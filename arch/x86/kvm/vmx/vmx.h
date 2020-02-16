@@ -304,7 +304,7 @@ struct vcpu_vmx {
 	union vmx_exit_reason exit_reason;
 
 	/* Posted interrupt descriptor */
-	struct pi_desc pi_desc;
+	struct pi_desc *pi_desc;
 
 	/* Support for a guest hypervisor (nested VMX) */
 	struct nested_vmx nested;
