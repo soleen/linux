@@ -68,8 +68,6 @@ void machine_kexec_cleanup(struct kimage *kimage)
  */
 int machine_kexec_prepare(struct kimage *kimage)
 {
-	kexec_image_info(kimage);
-
 	if (kimage->type != KEXEC_TYPE_CRASH && cpus_are_stuck_in_kernel()) {
 		pr_err("Can't kexec: CPUs are stuck in the kernel.\n");
 		return -EBUSY;
@@ -159,8 +157,10 @@ int machine_kexec_post_load(struct kimage *kimage)
 		kexec_segment_flush(kimage);
 
 	/* No relocation? Nothing more to do! */
-	if (!relocation_needed)
+	if (!relocation_needed) {
+		kexec_image_info(kimage);
 		return 0;
+	}
 
 	/* Copy and clean the relocation code that runs with the MMU off */
 	reloc_code = page_to_virt(kimage->control_code_page);
@@ -170,6 +170,8 @@ int machine_kexec_post_load(struct kimage *kimage)
 	flush_icache_range((unsigned long)reloc_code,
 			   (unsigned long)reloc_code + arm64_relocate_new_kernel_size);
 	kimage->arch.kern_reloc = __pa(reloc_code);
+
+	kexec_image_info(kimage);
 
 	return 0;
 }
@@ -190,8 +192,6 @@ void machine_kexec(struct kimage *kimage)
 	BUG_ON(!in_kexec_crash && (stuck_cpus || (num_online_cpus() > 1)));
 	WARN(in_kexec_crash && (stuck_cpus || smp_crash_stop_failed()),
 		"Some CPUs may be stale, kdump will be unreliable.\n");
-
-	kexec_image_info(kimage);
 
 	pr_info("Bye!\n");
 
