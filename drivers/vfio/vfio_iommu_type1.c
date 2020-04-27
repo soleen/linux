@@ -1571,6 +1571,8 @@ static int vfio_dma_do_map(struct vfio_iommu *iommu,
 		prot |= IOMMU_WRITE;
 	if (map->flags & VFIO_DMA_MAP_FLAG_READ)
 		prot |= IOMMU_READ;
+	if (map->flags & VFIO_DMA_MAP_FLAG_KEEPALIVE)
+		prot |= IOMMU_KEEPALIVE;
 
 	if ((prot && set_vaddr) || (!prot && !set_vaddr))
 		return -EINVAL;
@@ -2895,7 +2897,7 @@ static int vfio_iommu_type1_map_dma(struct vfio_iommu *iommu,
 	struct vfio_iommu_type1_dma_map map;
 	unsigned long minsz;
 	uint32_t mask = VFIO_DMA_MAP_FLAG_READ | VFIO_DMA_MAP_FLAG_WRITE |
-			VFIO_DMA_MAP_FLAG_VADDR;
+			VFIO_DMA_MAP_FLAG_VADDR | VFIO_DMA_MAP_FLAG_KEEPALIVE;
 
 	minsz = offsetofend(struct vfio_iommu_type1_dma_map, size);
 
