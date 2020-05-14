@@ -116,3 +116,8 @@ SYM_FUNC_START(__hyp_reset_vectors)
 	hvc	#0
 	ret
 SYM_FUNC_END(__hyp_reset_vectors)
+
+SYM_FUNC_START(__arm64_call_hyp)
+	hvc	#0
+	ret
+SYM_FUNC_END(__arm64_call_hyp)

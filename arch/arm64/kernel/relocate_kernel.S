@@ -39,17 +39,13 @@ SYM_CODE_START(arm64_relocate_new_kernel)
 	/* Clear the sctlr_el2 flags. */
 	mrs	x0, CurrentEL
 	cmp	x0, #CurrentEL_EL2
-	b.ne	1f
+	b.ne	.Lloop
 	mrs	x0, sctlr_el2
 	mov_q	x1, SCTLR_ELx_FLAGS
 	bic	x0, x0, x1
 	pre_disable_mmu_workaround
 	msr	sctlr_el2, x0
 	isb
-1:
-
-	/* Check if the new image needs relocation. */
-	tbnz	x16, IND_DONE_BIT, .Ldone
 
 .Lloop:
 	and	x12, x16, PAGE_MASK		/* x12 = addr */

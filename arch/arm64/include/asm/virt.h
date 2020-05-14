@@ -65,6 +65,8 @@ extern u32 __boot_cpu_mode[2];
 void __hyp_set_vectors(phys_addr_t phys_vector_base);
 void __hyp_reset_vectors(void);
 
+u64 __arm64_call_hyp(u64 callno, ...);
+
 /* Reports the availability of HYP mode */
 static inline bool is_hyp_mode_available(void)
 {

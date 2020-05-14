@@ -206,6 +206,18 @@ void machine_kexec(struct kimage *kimage)
 	local_daif_mask();
 
 	/*
+	 * If the image is already stored in place and cleaned to the PoC.
+	 * All we need to do is disable the MMU and jump in.
+	 */
+	if (!kexec_relocation_needed(kimage)) {
+		if (is_hyp_callable())
+			__arm64_call_hyp(HVC_SOFT_RESTART, kimage->start,
+					 kimage->arch.dtb_mem, 0, 0, 0);
+
+		cpu_soft_restart(kimage->start, kimage->arch.dtb_mem, 0, 0);
+	}
+
+	/*
 	 * cpu_soft_restart will shutdown the MMU, disable data caches, then
 	 * transfer control to the reboot_code_buffer which contains a copy of
 	 * the arm64_relocate_new_kernel routine.  arm64_relocate_new_kernel
