@@ -172,58 +172,65 @@ int arch_hibernation_header_restore(void *addr)
 }
 EXPORT_SYMBOL(arch_hibernation_header_restore);
 
-static int trans_pgd_map_page(pgd_t *trans_pgd, void *page,
-		       unsigned long dst_addr,
-		       pgprot_t pgprot)
+static int trans_idmap_single_page(phys_addr_t phys_dst_addr, pgprot_t pgprot,
+				       unsigned long *idmap_t0sz, pgd_t **idmap)
 {
-	pgd_t *pgdp;
-	p4d_t *p4dp;
-	pud_t *pudp;
-	pmd_t *pmdp;
-	pte_t *ptep;
+	unsigned long level_mask;
+	int this_level, index;
+	unsigned long *levels[4] = { };
+	int bits_mapped = PAGE_SHIFT - 4;
+	unsigned int level_lsb, level_msb, max_msb;
+	unsigned long pfn = __phys_to_pfn(phys_dst_addr);
+	unsigned long prev_level_entry, *this_level_table;
 
-	pgdp = pgd_offset_pgd(trans_pgd, dst_addr);
-	if (pgd_none(READ_ONCE(*pgdp))) {
-		pudp = (void *)get_safe_page(GFP_ATOMIC);
-		if (!pudp)
+	if (phys_dst_addr & GENMASK(52, 48))
+		max_msb = 51;
+	else
+		max_msb = 47;
+
+	/*
+	 * The page we want to idmap may be outside the range covered by
+	 * VA_BITS that can be built using the kernel's p?d_populate() helpers.
+	 *
+	 * As a one off, for a single page, we build these page tables bottom
+	 * up and just assume that we will need the maximum T0SZ.
+	 *
+	 * Each table points its single entry at the lower level's table, but
+	 * the lowest level points to phys_dst_addr, and is built first:
+	 */
+	phys_dst_addr &= PAGE_MASK;
+	prev_level_entry = pte_val(pfn_pte(pfn, PAGE_KERNEL_EXEC));
+
+	for (this_level = 3; this_level >= 0; this_level--) {
+		this_level_table = (unsigned long *)get_safe_page(GFP_ATOMIC);
+		if (!this_level_table)
 			return -ENOMEM;
-		pgd_populate(&init_mm, pgdp, pudp);
+
+		level_lsb = ARM64_HW_PGTABLE_LEVEL_SHIFT(this_level);
+		level_msb = min(level_lsb + bits_mapped, max_msb);
+		level_mask = GENMASK_ULL(level_msb, level_lsb);
+
+		index = (phys_dst_addr & level_mask) >> level_lsb;
+		this_level_table[index] = prev_level_entry;
+		levels[this_level] = this_level_table;
+
+		pfn = virt_to_pfn(this_level_table);
+		prev_level_entry = pte_val(pfn_pte(pfn,
+						    __pgprot(PMD_TYPE_TABLE)));
+
+		if (level_msb == max_msb)
+			break;
 	}
 
-	p4dp = p4d_offset(pgdp, dst_addr);
-	if (p4d_none(READ_ONCE(*p4dp))) {
-		pudp = (void *)get_safe_page(GFP_ATOMIC);
-		if (!pudp)
-			return -ENOMEM;
-		p4d_populate(&init_mm, p4dp, pudp);
-	}
-
-	pudp = pud_offset(p4dp, dst_addr);
-	if (pud_none(READ_ONCE(*pudp))) {
-		pmdp = (void *)get_safe_page(GFP_ATOMIC);
-		if (!pmdp)
-			return -ENOMEM;
-		pud_populate(&init_mm, pudp, pmdp);
-	}
-
-	pmdp = pmd_offset(pudp, dst_addr);
-	if (pmd_none(READ_ONCE(*pmdp))) {
-		ptep = (void *)get_safe_page(GFP_ATOMIC);
-		if (!ptep)
-			return -ENOMEM;
-		pmd_populate_kernel(&init_mm, pmdp, ptep);
-	}
-
-	ptep = pte_offset_kernel(pmdp, dst_addr);
-	set_pte(ptep, pfn_pte(virt_to_pfn(page), PAGE_KERNEL_EXEC));
+	*idmap_t0sz = TCR_T0SZ(max_msb + 1);
+	*idmap = (pgd_t *)this_level_table;
 
 	return 0;
 }
 
 /*
  * Copies length bytes, starting at src_start into an new page,
- * perform cache maintenance, then maps it at the specified address low
- * address as executable.
+ * perform cache maintenance, then idmaps it.
  *
  * This is used by hibernate to copy the code it needs to execute when
  * overwriting the kernel text. This function generates a new set of page
@@ -233,10 +240,10 @@ static int trans_pgd_map_page(pgd_t *trans_pgd, void *page,
  * page system.
  */
 static int create_safe_exec_page(void *src_start, size_t length,
-				 unsigned long dst_addr,
-				 phys_addr_t *phys_dst_addr)
+				  void **idmap_dst_addr)
 {
 	void *page = (void *)get_safe_page(GFP_ATOMIC);
+	unsigned long t0sz;
 	pgd_t *trans_pgd;
 	int rc;
 
@@ -246,12 +253,8 @@ static int create_safe_exec_page(void *src_start, size_t length,
 	memcpy(page, src_start, length);
 	__flush_icache_range((unsigned long)page, (unsigned long)page + length);
 
-	trans_pgd = (void *)get_safe_page(GFP_ATOMIC);
-	if (!trans_pgd)
-		return -ENOMEM;
-
-	rc = trans_pgd_map_page(trans_pgd, page, dst_addr,
-				PAGE_KERNEL_EXEC);
+	rc = trans_idmap_single_page(virt_to_phys(page), PAGE_KERNEL_EXEC,
+				      &t0sz, &trans_pgd);
 	if (rc)
 		return rc;
 
@@ -264,15 +267,18 @@ static int create_safe_exec_page(void *src_start, size_t length,
 	 * page, but TLBs may contain stale ASID-tagged entries (e.g. for EFI
 	 * runtime services), while for a userspace-driven test_resume cycle it
 	 * points to userspace page tables (and we must point it at a zero page
-	 * ourselves). Elsewhere we only (un)install the idmap with preemption
-	 * disabled, so T0SZ should be as required regardless.
+	 * ourselves).
+	 *
+	 * We change T0SZ as part of installing the idmap. This undone by
+	 * cpu_uninstall_idmap() in __cpu_suspend_exit().
 	 */
 	cpu_set_reserved_ttbr0();
 	local_flush_tlb_all();
+	__cpu_set_tcr_t0sz(t0sz);
 	write_sysreg(phys_to_ttbr(virt_to_phys(trans_pgd)), ttbr0_el1);
 	isb();
 
-	*phys_dst_addr = virt_to_phys(page);
+	*idmap_dst_addr = (void *)virt_to_phys(page);
 
 	return 0;
 }
@@ -528,7 +534,6 @@ int swsusp_arch_resume(void)
 	phys_addr_t el2_vectors;
 	void *zero_page, *hyp_stub;
 	unsigned long hyp_stub_end;
-	phys_addr_t phys_hibernate_exit;
 	void __noreturn (*hibernate_exit)(phys_addr_t, phys_addr_t, void *,
 					  void *, phys_addr_t, phys_addr_t);
 
@@ -578,15 +583,13 @@ int swsusp_arch_resume(void)
 	 * Locate the exit code in the bottom-but-one page, so that *NULL
 	 * still has disastrous affects.
 	 */
-	hibernate_exit = (void *)PAGE_SIZE;
 	exit_size = __hibernate_exit_text_end - __hibernate_exit_text_start;
 	/*
 	 * Copy swsusp_arch_suspend_exit() to a safe page. This will generate
 	 * a new set of ttbr0 page tables and load them.
 	 */
 	rc = create_safe_exec_page(__hibernate_exit_text_start, exit_size,
-				   (unsigned long)hibernate_exit,
-				   &phys_hibernate_exit);
+				   (void **)&hibernate_exit);
 	if (rc) {
 		pr_err("Failed to create safe executable page for hibernate_exit code.\n");
 		return rc;
