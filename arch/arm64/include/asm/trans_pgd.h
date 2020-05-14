@@ -25,7 +25,8 @@ struct trans_pgd_info {
 	void *trans_alloc_arg;
 };
 
-int trans_pgd_create_copy(pgd_t **dst_pgdp, unsigned long start,
+int trans_pgd_create_copy(const struct trans_pgd_info *info,
+			  pgd_t **dst_pgdp, unsigned long start,
 			  unsigned long end);
 
 int trans_idmap_single_page(const struct trans_pgd_info *info,
