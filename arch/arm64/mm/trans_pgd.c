@@ -25,6 +25,11 @@
 #include <asm/pgalloc.h>
 #include <asm/trans_pgd.h>
 
+static void *trans_alloc(const struct trans_pgd_info *info)
+{
+	return info->trans_alloc_page(info->trans_alloc_arg);
+}
+
 static void _copy_pte(pte_t *dst_ptep, pte_t *src_ptep, unsigned long addr)
 {
 	pte_t pte = READ_ONCE(*src_ptep);
@@ -201,8 +206,9 @@ int trans_pgd_create_copy(pgd_t **dst_pgdp, unsigned long start,
 	return rc;
 }
 
-int trans_idmap_single_page(phys_addr_t phys_dst_addr, pgprot_t pgprot,
-			     unsigned long *idmap_t0sz, pgd_t **idmap)
+int trans_idmap_single_page(const struct trans_pgd_info *info,
+			    phys_addr_t phys_dst_addr, pgprot_t pgprot,
+			    unsigned long *idmap_t0sz, pgd_t **idmap)
 {
 	unsigned long level_mask;
 	int this_level, index;
@@ -231,7 +237,8 @@ int trans_idmap_single_page(phys_addr_t phys_dst_addr, pgprot_t pgprot,
 	prev_level_entry = pte_val(pfn_pte(pfn, PAGE_KERNEL_EXEC));
 
 	for (this_level = 3; this_level >= 0; this_level--) {
-		this_level_table = (unsigned long *)get_safe_page(GFP_ATOMIC);
+		this_level_table = (unsigned long *)trans_alloc(info);
+
 		if (!this_level_table)
 			return -ENOMEM;
 

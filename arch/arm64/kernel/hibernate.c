@@ -170,6 +170,16 @@ int arch_hibernation_header_restore(void *addr)
 }
 EXPORT_SYMBOL(arch_hibernation_header_restore);
 
+static void *hibernate_page_alloc(void *arg)
+{
+	return (void *)get_safe_page((gfp_t)(unsigned long)arg);
+}
+
+static const struct trans_pgd_info trans_info = {
+	.trans_alloc_page	= hibernate_page_alloc,
+	.trans_alloc_arg	= (void *)GFP_ATOMIC,
+};
+
 /*
  * Copies length bytes, starting at src_start into an new page,
  * perform cache maintenance, then idmaps it.
@@ -195,8 +205,8 @@ static int create_safe_exec_page(void *src_start, size_t length,
 	memcpy(page, src_start, length);
 	__flush_icache_range((unsigned long)page, (unsigned long)page + length);
 
-	rc = trans_idmap_single_page(virt_to_phys(page), PAGE_KERNEL_EXEC,
-				     &t0sz, &trans_pgd);
+	rc = trans_idmap_single_page(&trans_info, virt_to_phys(page),
+				     PAGE_KERNEL_EXEC, &t0sz, &trans_pgd);
 	if (rc)
 		return rc;
 
