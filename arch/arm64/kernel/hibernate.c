@@ -53,9 +53,6 @@ extern int in_suspend;
 /* Do we need to reset el2? */
 #define el2_reset_needed() (is_hyp_mode_available() && !is_kernel_in_hyp_mode())
 
-/* temporary el2 vectors in the __hibernate_exit_text section. */
-extern char hibernate_el2_vectors[];
-
 /* hyp-stub vectors, used to restore el2 during resume from hibernate. */
 extern char __hyp_stub_vectors[];
 
@@ -529,9 +526,11 @@ static int trans_pgd_create_copy(pgd_t **dst_pgdp, unsigned long start,
 int swsusp_arch_resume(void)
 {
 	int rc;
-	void *zero_page;
 	size_t exit_size;
 	pgd_t *tmp_pg_dir;
+	phys_addr_t el2_vectors;
+	void *zero_page, *hyp_stub;
+	unsigned long hyp_stub_end;
 	phys_addr_t phys_hibernate_exit;
 	void __noreturn (*hibernate_exit)(phys_addr_t, phys_addr_t, void *,
 					  void *, phys_addr_t, phys_addr_t);
@@ -556,6 +555,29 @@ int swsusp_arch_resume(void)
 	}
 
 	/*
+	 * EL2 vectors may get overwritten during resume. Create a temporary
+	 * copy of the hyp-stub we can use to call HVC_SET_VECTORS after
+	 * resume.
+	 */
+	hyp_stub = (void *)get_safe_page(GFP_ATOMIC);
+	if (!hyp_stub) {
+		pr_err("Failed to allocate hyp stub page.\n");
+		return -ENOMEM;
+	}
+
+	memcpy(hyp_stub, &__hyp_stub_vectors, SZ_2K);
+
+	/*
+	 * The vectors will be executed at el2 with the mmu off in order to
+	 * reload hyp-stub.
+	 */
+	hyp_stub_end = (unsigned long)((char *)hyp_stub + SZ_2K);
+	__flush_icache_range((unsigned long)hyp_stub, hyp_stub_end);
+	__flush_dcache_area(hyp_stub, SZ_2K);
+
+	el2_vectors = virt_to_phys(hyp_stub);
+
+	/*
 	 * Locate the exit code in the bottom-but-one page, so that *NULL
 	 * still has disastrous affects.
 	 */
@@ -574,24 +596,13 @@ int swsusp_arch_resume(void)
 	}
 
 	/*
-	 * The hibernate exit text contains a set of el2 vectors, that will
-	 * be executed at el2 with the mmu off in order to reload hyp-stub.
-	 */
-	__flush_dcache_area(hibernate_exit, exit_size);
-
-	/*
 	 * KASLR will cause the el2 vectors to be in a different location in
 	 * the resumed kernel. Load hibernate's temporary copy into el2.
 	 *
 	 * We can skip this step if we booted at EL1, or are running with VHE.
 	 */
-	if (el2_reset_needed()) {
-		phys_addr_t el2_vectors = phys_hibernate_exit;  /* base */
-		el2_vectors += hibernate_el2_vectors -
-			       __hibernate_exit_text_start;     /* offset */
-
+	if (el2_reset_needed())
 		__hyp_set_vectors(el2_vectors);
-	}
 
 	hibernate_exit(virt_to_phys(tmp_pg_dir), resume_hdr.ttbr1_el1,
 		       resume_hdr.reenter_kernel, restore_pblist,
