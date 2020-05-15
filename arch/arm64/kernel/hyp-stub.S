@@ -23,41 +23,9 @@ SYM_CODE_START_LOCAL(\label)
 SYM_CODE_END(\label)
 .endm
 
-
-	.text
-	.pushsection	.hyp.text, "ax"
-
-	.align 11
-
-SYM_CODE_START(__hyp_stub_vectors)
-	invalid_vector	hyp_stub_el2t_sync_invalid	// Synchronous EL2t
-	invalid_vector	hyp_stub_el2t_irq_invalid	// IRQ EL2t
-	invalid_vector	hyp_stub_el2t_fiq_invalid	// FIQ EL2t
-	invalid_vector	hyp_stub_el2t_error_invalid	// Error EL2t
-
-	invalid_vector	hyp_stub_el2h_sync_invalid	// Synchronous EL2h
-	invalid_vector	hyp_stub_el2h_irq_invalid	// IRQ EL2h
-	invalid_vector	hyp_stub_el2h_fiq_invalid	// FIQ EL2h
-	invalid_vector	hyp_stub_el2h_error_invalid	// Error EL2h
-
-	ventry	el1_sync			// Synchronous 64-bit EL1
-	invalid_vector	hyp_stub_el1_irq_invalid	// IRQ 64-bit EL1
-	invalid_vector	hyp_stub_el1_fiq_invalid	// FIQ 64-bit EL1
-	invalid_vector	hyp_stub_el1_error_invalid	// Error 64-bit EL1
-
-	invalid_vector	hyp_stub_32b_el1_sync_invalid	// Synchronous 32-bit EL1
-	invalid_vector	hyp_stub_32b_el1_irq_invalid	// IRQ 32-bit EL1
-	invalid_vector	hyp_stub_32b_el1_fiq_invalid	// FIQ 32-bit EL1
-	invalid_vector	hyp_stub_32b_el1_error_invalid	// Error 32-bit EL1
-	.align 11
-SYM_INNER_LABEL(__hyp_stub_vectors_end, SYM_L_LOCAL)
-SYM_CODE_END(__hyp_stub_vectors)
-
-# Check the __hyp_stub_vectors didn't overflow
-.org . - (__hyp_stub_vectors_end - __hyp_stub_vectors) + SZ_2K
-
-
-SYM_CODE_START_LOCAL(el1_sync)
+.macro hyp_stub_el1_sync
+SYM_CODE_START_LOCAL(hyp_stub_el1_sync)
+	.align 7
 	cmp	x0, #HVC_SET_VECTORS
 	b.ne	2f
 	msr	vbar_el2, x1
@@ -80,7 +48,40 @@ SYM_CODE_START_LOCAL(el1_sync)
 
 9:	mov	x0, xzr
 	eret
-SYM_CODE_END(el1_sync)
+SYM_CODE_END(hyp_stub_el1_sync)
+.endm
+
+	.text
+	.pushsection	.hyp.text, "ax"
+
+	.align 11
+
+SYM_CODE_START(__hyp_stub_vectors)
+	invalid_vector	hyp_stub_el2t_sync_invalid	// Synchronous EL2t
+	invalid_vector	hyp_stub_el2t_irq_invalid	// IRQ EL2t
+	invalid_vector	hyp_stub_el2t_fiq_invalid	// FIQ EL2t
+	invalid_vector	hyp_stub_el2t_error_invalid	// Error EL2t
+
+	invalid_vector	hyp_stub_el2h_sync_invalid	// Synchronous EL2h
+	invalid_vector	hyp_stub_el2h_irq_invalid	// IRQ EL2h
+	invalid_vector	hyp_stub_el2h_fiq_invalid	// FIQ EL2h
+	invalid_vector	hyp_stub_el2h_error_invalid	// Error EL2h
+
+	hyp_stub_el1_sync				// Synchronous 64-bit EL1
+	invalid_vector	hyp_stub_el1_irq_invalid	// IRQ 64-bit EL1
+	invalid_vector	hyp_stub_el1_fiq_invalid	// FIQ 64-bit EL1
+	invalid_vector	hyp_stub_el1_error_invalid	// Error 64-bit EL1
+
+	invalid_vector	hyp_stub_32b_el1_sync_invalid	// Synchronous 32-bit EL1
+	invalid_vector	hyp_stub_32b_el1_irq_invalid	// IRQ 32-bit EL1
+	invalid_vector	hyp_stub_32b_el1_fiq_invalid	// FIQ 32-bit EL1
+	invalid_vector	hyp_stub_32b_el1_error_invalid	// Error 32-bit EL1
+	.align 11
+SYM_INNER_LABEL(__hyp_stub_vectors_end, SYM_L_LOCAL)
+SYM_CODE_END(__hyp_stub_vectors)
+
+# Check the __hyp_stub_vectors didn't overflow
+.org . - (__hyp_stub_vectors_end - __hyp_stub_vectors) + SZ_2K
 
 /*
  * __hyp_set_vectors: Call this after boot to set the initial hypervisor
