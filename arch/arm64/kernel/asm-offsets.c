@@ -149,6 +149,8 @@ int main(void)
 #ifdef CONFIG_KEXEC_CORE
   DEFINE(KIMAGE_ARCH_DTB_MEM,	offsetof(struct kimage, arch.dtb_mem));
   DEFINE(KIMAGE_ARCH_HYP_STUB,	offsetof(struct kimage, arch.hyp_stub_copy));
+  DEFINE(KIMAGE_ARCH_TTBR1,	offsetof(struct kimage, arch.ttbr1_baddr));
+  DEFINE(KIMAGE_ARCH_ZERO_PAGE,offsetof(struct kimage, arch.zero_page));
   DEFINE(KIMAGE_HEAD,		offsetof(struct kimage, head));
   DEFINE(KIMAGE_START,		offsetof(struct kimage, start));
   BLANK();

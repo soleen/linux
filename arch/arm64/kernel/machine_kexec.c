@@ -164,6 +164,8 @@ static void *kexec_page_alloc(void *arg)
 
 int machine_kexec_post_load(struct kimage *kimage)
 {
+	int rc;
+	pgd_t *trans_pgd;
 	bool relocation_needed = kexec_relocation_needed(kimage);
 	struct trans_pgd_info trans_info = {
 		.trans_alloc_page	= kexec_page_alloc,
@@ -200,6 +202,17 @@ int machine_kexec_post_load(struct kimage *kimage)
 	if (is_hyp_callable() &&
 	    arm64_copy_hyp_stub(&trans_info, &kimage->arch.hyp_stub_copy))
 		return -ENOMEM;
+
+	/* Create a copy of the linear map */
+	trans_pgd = kexec_page_alloc(kimage);
+	if (!trans_pgd)
+		return -ENOMEM;
+	rc = trans_pgd_create_copy(&trans_info, &trans_pgd, PAGE_OFFSET,
+				   PAGE_END);
+	if (rc)
+		return rc;
+	kimage->arch.ttbr1_baddr = __pa(trans_pgd);
+	kimage->arch.zero_page = __pa(empty_zero_page);
 
 	kexec_image_info(kimage);
 

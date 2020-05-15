@@ -32,6 +32,8 @@
 SYM_CODE_START(arm64_relocate_new_kernel)
 
 	/* Setup the list loop variables. */
+	ldr	x21, [x0, #KIMAGE_ARCH_ZERO_PAGE] /* x21 = zero page for BBM */
+	ldr	x20, [x0, #KIMAGE_ARCH_TTBR1]	/* x20 = linear map copy */
 	ldr	x19, [x0, #KIMAGE_ARCH_HYP_STUB] /* x19 = exit via hyp stub */
 	ldr	x18, [x0, #KIMAGE_ARCH_DTB_MEM]	/* x18 = dtb address */
 	ldr	x17, [x0, #KIMAGE_START]		/* x17 = kimage_start */
@@ -39,6 +41,9 @@ SYM_CODE_START(arm64_relocate_new_kernel)
 	raw_dcache_line_size x15, x0		/* x15 = dcache line size */
 	mov	x14, xzr			/* x14 = entry ptr */
 	mov	x13, xzr			/* x13 = copy dest */
+
+	/* Switch to the new copy of the linear map */
+	break_before_make_ttbr_switch	x21, x20, x0, x1
 
 .Lloop:
 	and	x12, x16, PAGE_MASK		/* x12 = addr */
