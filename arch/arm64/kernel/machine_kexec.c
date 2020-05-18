@@ -196,6 +196,7 @@ int machine_kexec_post_load(struct kimage *kimage)
 	 * Relocation will overwrite the hyp-stub, which we need to call the
 	 * payload at EL2. Provide a safe copy.
 	 */
+	kimage->arch.hyp_stub_copy = 0;
 	if (is_hyp_callable() &&
 	    arm64_copy_hyp_stub(&trans_info, &kimage->arch.hyp_stub_copy))
 		return -ENOMEM;

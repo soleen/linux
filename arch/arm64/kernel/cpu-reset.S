@@ -19,7 +19,6 @@
  * __cpu_soft_restart(el2_switch, entry, arg0, arg1, arg2) - Helper for
  * cpu_soft_restart.
  *
- * @el2_switch: Flag to indicate a switch to EL2 is needed.
  * @entry: Location to jump to for soft reset.
  * arg0: First argument passed to @entry. (relocation list)
  * arg1: Second argument passed to @entry.(physical kernel entry)
@@ -38,14 +37,10 @@ SYM_CODE_START(__cpu_soft_restart)
 	msr	sctlr_el1, x12
 	isb
 
-	cbz	x0, 1f				// el2_switch?
-	mov	x0, #HVC_SOFT_RESTART
-	hvc	#0				// no return
-
-1:	mov	x8, x1				// entry
-	mov	x0, x2				// arg0
-	mov	x1, x3				// arg1
-	mov	x2, x4				// arg2
+	mov	x8, x0				// entry
+	mov	x0, x1				// arg0
+	mov	x1, x2				// arg1
+	mov	x2, x3				// arg2
 	br	x8
 SYM_CODE_END(__cpu_soft_restart)
 
