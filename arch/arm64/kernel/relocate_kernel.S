@@ -25,13 +25,15 @@
  * machine_kexec() routine will copy arm64_relocate_new_kernel to the kexec
  * control_code_page, a special page which has been set up to be preserved
  * during the copy operation.
+ *
+ * x0: physical address of the kimage
  */
 SYM_CODE_START(arm64_relocate_new_kernel)
 
 	/* Setup the list loop variables. */
-	mov	x18, x2				/* x18 = dtb address */
-	mov	x17, x1				/* x17 = kimage_start */
-	mov	x16, x0				/* x16 = kimage_head */
+	ldr	x18, [x0, #KIMAGE_ARCH_DTB_MEM]	/* x18 = dtb address */
+	ldr	x17, [x0, #KIMAGE_START]		/* x17 = kimage_start */
+	ldr	x16, [x0, #KIMAGE_HEAD]		/* x16 = kimage_head */
 	raw_dcache_line_size x15, x0		/* x15 = dcache line size */
 	mov	x14, xzr			/* x14 = entry ptr */
 	mov	x13, xzr			/* x13 = copy dest */
