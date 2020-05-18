@@ -20,6 +20,7 @@
 #include <asm/mmu.h>
 #include <asm/mmu_context.h>
 #include <asm/page.h>
+#include <asm/trans_pgd.h>
 
 #include "cpu-reset.h"
 
@@ -147,9 +148,27 @@ static bool kexec_relocation_needed(struct kimage *kimage)
 	return !(kimage->head & IND_DONE);
 }
 
+/* Allocates pages for kexec page table */
+static void *kexec_page_alloc(void *arg)
+{
+	struct kimage *kimage = (struct kimage *)arg;
+	struct page *page = kimage_alloc_control_pages(kimage, 0);
+
+	if (!page)
+		return NULL;
+
+	memset(page_address(page), 0, PAGE_SIZE);
+
+	return page_address(page);
+}
+
 int machine_kexec_post_load(struct kimage *kimage)
 {
 	bool relocation_needed = kexec_relocation_needed(kimage);
+	struct trans_pgd_info trans_info = {
+		.trans_alloc_page	= kexec_page_alloc,
+		.trans_alloc_arg	= kimage,
+	};
 	void *reloc_code;
 
 	/* Clean the relocation data or payload to PoC */
@@ -172,6 +191,14 @@ int machine_kexec_post_load(struct kimage *kimage)
 	flush_icache_range((unsigned long)reloc_code,
 			   (unsigned long)reloc_code + arm64_relocate_new_kernel_size);
 	kimage->arch.kern_reloc = __pa(reloc_code);
+
+	/*
+	 * Relocation will overwrite the hyp-stub, which we need to call the
+	 * payload at EL2. Provide a safe copy.
+	 */
+	if (is_hyp_callable() &&
+	    arm64_copy_hyp_stub(&trans_info, &kimage->arch.hyp_stub_copy))
+		return -ENOMEM;
 
 	kexec_image_info(kimage);
 
@@ -210,6 +237,9 @@ void machine_kexec(struct kimage *kimage)
 
 		cpu_soft_restart(kimage->start, kimage->arch.dtb_mem, 0, 0);
 	}
+
+	if (is_hyp_callable())
+		__hyp_set_vectors(kimage->arch.hyp_stub_copy);
 
 	/*
 	 * cpu_soft_restart will shutdown the MMU, disable data caches, then
