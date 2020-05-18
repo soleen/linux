@@ -48,9 +48,6 @@
  */
 extern int in_suspend;
 
-/* hyp-stub vectors, used to restore el2 during resume from hibernate. */
-extern char __hyp_stub_vectors[];
-
 /*
  * The logical cpu number we should resume on, initialised to a non-cpu
  * number.
@@ -305,11 +302,10 @@ int swsusp_arch_suspend(void)
 int swsusp_arch_resume(void)
 {
 	int rc;
+	void *zero_page;
 	size_t exit_size;
 	pgd_t *tmp_pg_dir;
 	phys_addr_t el2_vectors;
-	void *zero_page, *hyp_stub;
-	unsigned long hyp_stub_end;
 	void __noreturn (*hibernate_exit)(phys_addr_t, phys_addr_t, void *,
 					  void *, phys_addr_t, phys_addr_t);
 
@@ -338,23 +334,10 @@ int swsusp_arch_resume(void)
 	 * copy of the hyp-stub we can use to call HVC_SET_VECTORS after
 	 * resume.
 	 */
-	hyp_stub = (void *)get_safe_page(GFP_ATOMIC);
-	if (!hyp_stub) {
+	if (arm64_copy_hyp_stub(&trans_info, &el2_vectors)) {
 		pr_err("Failed to allocate hyp stub page.\n");
 		return -ENOMEM;
 	}
-
-	memcpy(hyp_stub, &__hyp_stub_vectors, SZ_2K);
-
-	/*
-	 * The vectors will be executed at el2 with the mmu off in order to
-	 * reload hyp-stub.
-	 */
-	hyp_stub_end = (unsigned long)((char *)hyp_stub + SZ_2K);
-	__flush_icache_range((unsigned long)hyp_stub, hyp_stub_end);
-	__flush_dcache_area(hyp_stub, SZ_2K);
-
-	el2_vectors = virt_to_phys(hyp_stub);
 
 	/*
 	 * Locate the exit code in the bottom-but-one page, so that *NULL

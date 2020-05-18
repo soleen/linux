@@ -278,3 +278,29 @@ int trans_idmap_single_page(const struct trans_pgd_info *info,
 
 	return 0;
 }
+
+int arm64_copy_hyp_stub(const struct trans_pgd_info *info,
+			phys_addr_t *el2_vectors)
+{
+	void *hyp_stub;
+	unsigned long hyp_stub_end;
+
+	/*
+	 * EL2 vectors may get overwritten. Create a temporary copy of the
+	 * hyp-stub we can use to call HVC_SET_VECTORS or HVC_SOFT_RESTART.
+	 */
+	hyp_stub = trans_alloc(info);
+	if (!hyp_stub)
+		return -ENOMEM;
+
+	memcpy(hyp_stub, &__hyp_stub_vectors, SZ_2K);
+
+	/* The hyp-stub executes at el2 with the mmu off */
+	hyp_stub_end = (unsigned long)((char *)hyp_stub + SZ_2K);
+	__flush_icache_range((unsigned long)hyp_stub, hyp_stub_end);
+	__flush_dcache_area(hyp_stub, SZ_2K);
+
+	*el2_vectors = virt_to_phys(hyp_stub);
+
+	return 0;
+}

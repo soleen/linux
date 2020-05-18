@@ -33,6 +33,8 @@ int trans_idmap_single_page(const struct trans_pgd_info *info,
 			    phys_addr_t phys_dst_addr, pgprot_t pgprot,
 			    unsigned long *idmap_t0sz, pgd_t **idmap);
 
+int arm64_copy_hyp_stub(const struct trans_pgd_info *info,
+			phys_addr_t *el2_vectors);
 
 #endif /* _ASM_TRANS_TABLE_H */
 
