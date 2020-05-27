@@ -99,6 +99,8 @@ struct kimage_arch {
 	phys_addr_t hyp_stub_copy;
 	phys_addr_t ttbr1_baddr;
 	phys_addr_t zero_page;
+	pgd_t *idmap_pgd;
+	unsigned long idmap_t0sz;
 	/* Core ELF header buffer */
 	void *elf_headers;
 	unsigned long elf_headers_mem;

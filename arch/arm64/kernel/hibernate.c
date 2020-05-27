@@ -221,11 +221,7 @@ static int create_safe_exec_page(void *src_start, size_t length,
 	 * We change T0SZ as part of installing the idmap. This undone by
 	 * cpu_uninstall_idmap() in __cpu_suspend_exit().
 	 */
-	cpu_set_reserved_ttbr0();
-	local_flush_tlb_all();
-	__cpu_set_tcr_t0sz(t0sz);
-	write_sysreg(phys_to_ttbr(virt_to_phys(trans_pgd)), ttbr0_el1);
-	isb();
+	cpu_install_teardown_idmap(trans_pgd, t0sz);
 
 	*idmap_dst_addr = (void *)virt_to_phys(page);
 

@@ -55,14 +55,14 @@ SYM_CODE_START(arm64_relocate_new_kernel)
 .Ltest_source:
 	tbz	x16, IND_SOURCE_BIT, .Ltest_indirection
 
-	/* Invalidate dest page to PoC. */
-	sub     x0, x13, x22
-	mov	x1, #PAGE_SIZE
-	dcache_by_myline_op ivac, sy, x0, x1, x15, x20
-
 	sub x20, x13, x22
 	sub x21, x12, x22
 	copy_page x20, x21, x0, x1, x2, x3, x4, x5, x6, x7
+
+	/* Clean and Invalidate dest page to PoC. */
+	sub     x0, x13, x22
+	mov	x1, #PAGE_SIZE
+	dcache_by_myline_op civac, sy, x0, x1, x15, x20
 
 	/* dest += PAGE_SIZE */
 	add	x13, x13, PAGE_SIZE
@@ -95,6 +95,14 @@ SYM_CODE_START(arm64_relocate_new_kernel)
 	dsb	nsh
 	ic	iallu
 	dsb	nsh
+	isb
+
+	/* Clear sctlr_el1 flags. */
+	mrs	x12, sctlr_el1
+	mov_q	x13, SCTLR_ELx_FLAGS
+	bic	x12, x12, x13
+	pre_disable_mmu_workaround
+	msr	sctlr_el1, x12
 	isb
 
 	cbz	x19, .Lstart_at_el1

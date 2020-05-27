@@ -123,6 +123,17 @@ static inline void cpu_uninstall_idmap(void)
 		cpu_switch_mm(mm->pgd, mm);
 }
 
+static inline void cpu_install_teardown_idmap(pgd_t *pgd, unsigned long t0sz)
+{
+	cpu_set_reserved_ttbr0();
+	local_flush_tlb_all();
+	__cpu_set_tcr_t0sz(t0sz);
+
+	/* avoid cpu_switch_mm() and its SW-PAN and CNP interactions */
+	write_sysreg(phys_to_ttbr(virt_to_phys(pgd)), ttbr0_el1);
+	isb();
+}
+
 static inline void cpu_install_idmap(void)
 {
 	cpu_set_reserved_ttbr0();

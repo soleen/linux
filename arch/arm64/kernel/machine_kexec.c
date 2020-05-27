@@ -170,7 +170,7 @@ static void *kexec_page_alloc(void *arg)
 int machine_kexec_post_load(struct kimage *kimage)
 {
 	int rc;
-	pgd_t *trans_pgd;
+	pgd_t *trans_pgd, *idmap_pgd;
 	size_t reloc_size = arm64_kexec_reloc_size();
 	bool relocation_needed = kexec_relocation_needed(kimage);
 	struct trans_pgd_info trans_info = {
@@ -198,6 +198,12 @@ int machine_kexec_post_load(struct kimage *kimage)
 	flush_icache_range((unsigned long)reloc_code,
 			   (unsigned long)reloc_code + reloc_size);
 	kimage->arch.kern_reloc = __pa(reloc_code);
+	rc = trans_idmap_single_page(&trans_info, kimage->arch.kern_reloc,
+				     PAGE_KERNEL_EXEC, &kimage->arch.idmap_t0sz,
+				     &idmap_pgd);
+	if (rc)
+		return rc;
+	kimage->arch.idmap_pgd = idmap_pgd;
 
 	/*
 	 * Relocation will overwrite the hyp-stub, which we need to call the
@@ -276,9 +282,10 @@ void machine_kexec(struct kimage *kimage)
 	 * userspace (kexec-tools).
 	 * In kexec_file case, the kernel starts directly without purgatory.
 	 */
-	cpu_install_idmap();
-	cpu_soft_restart = (void *)__pa_symbol(__cpu_soft_restart);
-	cpu_soft_restart(kimage->arch.kern_reloc, virt_to_phys(kimage), 0, 0);
+	cpu_install_teardown_idmap(kimage->arch.idmap_pgd,
+				    kimage->arch.idmap_t0sz);
+	cpu_soft_restart = (void *)kimage->arch.kern_reloc;
+	cpu_soft_restart(virt_to_phys(kimage), physvirt_offset, 0, 0);
 
 	BUG(); /* Should never get here. */
 }
