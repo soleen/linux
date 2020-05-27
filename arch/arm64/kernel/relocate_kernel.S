@@ -28,8 +28,11 @@
  * during the copy operation.
  *
  * x0: physical address of the kimage
+ * x1: physical to virtual offset for the physically indexed list
  */
 SYM_CODE_START(arm64_relocate_new_kernel)
+	mov	x22, x1
+	sub	x0, x0, x22
 
 	/* Setup the list loop variables. */
 	ldr	x21, [x0, #KIMAGE_ARCH_ZERO_PAGE] /* x21 = zero page for BBM */
@@ -53,12 +56,12 @@ SYM_CODE_START(arm64_relocate_new_kernel)
 	tbz	x16, IND_SOURCE_BIT, .Ltest_indirection
 
 	/* Invalidate dest page to PoC. */
-	mov	x0, x13
+	sub     x0, x13, x22
 	mov	x1, #PAGE_SIZE
 	dcache_by_myline_op ivac, sy, x0, x1, x15, x20
 
-	mov x20, x13
-	mov x21, x12
+	sub x20, x13, x22
+	sub x21, x12, x22
 	copy_page x20, x21, x0, x1, x2, x3, x4, x5, x6, x7
 
 	/* dest += PAGE_SIZE */
@@ -80,7 +83,9 @@ SYM_CODE_START(arm64_relocate_new_kernel)
 
 .Lnext:
 	/* entry = *ptr++ */
-	ldr	x16, [x14], #8
+	sub	x1, x14, x22
+	ldr	x16, [x1]
+	add	x14, x14, #8
 
 	/* while (!(entry & DONE)) */
 	tbz	x16, IND_DONE_BIT, .Lloop
