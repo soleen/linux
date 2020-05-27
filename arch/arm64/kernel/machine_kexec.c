@@ -24,9 +24,13 @@
 
 #include "cpu-reset.h"
 
-/* Global variables for the arm64_relocate_new_kernel routine. */
 extern const unsigned char arm64_relocate_new_kernel[];
-extern const unsigned long arm64_relocate_new_kernel_size;
+extern const unsigned char arm64_relocate_new_kernel_end[];
+
+static inline size_t arm64_kexec_reloc_size(void)
+{
+	return arm64_relocate_new_kernel_end - arm64_relocate_new_kernel;
+}
 
 /**
  * kexec_image_info - For debugging output.
@@ -166,6 +170,7 @@ int machine_kexec_post_load(struct kimage *kimage)
 {
 	int rc;
 	pgd_t *trans_pgd;
+	size_t reloc_size = arm64_kexec_reloc_size();
 	bool relocation_needed = kexec_relocation_needed(kimage);
 	struct trans_pgd_info trans_info = {
 		.trans_alloc_page	= kexec_page_alloc,
@@ -187,11 +192,10 @@ int machine_kexec_post_load(struct kimage *kimage)
 
 	/* Copy and clean the relocation code that runs with the MMU off */
 	reloc_code = page_to_virt(kimage->control_code_page);
-	memcpy(reloc_code, arm64_relocate_new_kernel,
-	       arm64_relocate_new_kernel_size);
-	__flush_dcache_area(reloc_code, arm64_relocate_new_kernel_size);
+	memcpy(reloc_code, arm64_relocate_new_kernel, reloc_size);
+	__flush_dcache_area(reloc_code, reloc_size);
 	flush_icache_range((unsigned long)reloc_code,
-			   (unsigned long)reloc_code + arm64_relocate_new_kernel_size);
+			   (unsigned long)reloc_code + reloc_size);
 	kimage->arch.kern_reloc = __pa(reloc_code);
 
 	/*
