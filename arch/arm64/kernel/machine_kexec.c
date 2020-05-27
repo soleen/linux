@@ -22,10 +22,11 @@
 #include <asm/page.h>
 #include <asm/trans_pgd.h>
 
-#include "cpu-reset.h"
-
 extern const unsigned char arm64_relocate_new_kernel[];
 extern const unsigned char arm64_relocate_new_kernel_end[];
+
+void __cpu_soft_restart(phys_addr_t entry, unsigned long arg0,
+			unsigned long arg1, unsigned long arg2);
 
 static inline size_t arm64_kexec_reloc_size(void)
 {
@@ -230,6 +231,8 @@ int machine_kexec_post_load(struct kimage *kimage)
  */
 void machine_kexec(struct kimage *kimage)
 {
+	void (*cpu_soft_restart)(phys_addr_t entry, unsigned long arg0,
+				 unsigned long arg1, unsigned long arg2);
 	bool in_kexec_crash = (kimage == kexec_crash_image);
 	bool stuck_cpus = cpus_are_stuck_in_kernel();
 
@@ -253,6 +256,8 @@ void machine_kexec(struct kimage *kimage)
 			__arm64_call_hyp(HVC_SOFT_RESTART, kimage->start,
 					 kimage->arch.dtb_mem, 0, 0, 0);
 
+		cpu_install_idmap();
+		cpu_soft_restart = (void *)__pa_symbol(__cpu_soft_restart);
 		cpu_soft_restart(kimage->start, kimage->arch.dtb_mem, 0, 0);
 	}
 
@@ -271,6 +276,8 @@ void machine_kexec(struct kimage *kimage)
 	 * userspace (kexec-tools).
 	 * In kexec_file case, the kernel starts directly without purgatory.
 	 */
+	cpu_install_idmap();
+	cpu_soft_restart = (void *)__pa_symbol(__cpu_soft_restart);
 	cpu_soft_restart(kimage->arch.kern_reloc, virt_to_phys(kimage), 0, 0);
 
 	BUG(); /* Should never get here. */
