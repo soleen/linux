@@ -136,6 +136,27 @@ static void kexec_segment_flush(const struct kimage *kimage)
 	}
 }
 
+static bool kexec_relocation_needed(struct kimage *kimage)
+{
+	/* The kdump kernel is always stored in place */
+	if (kimage == kexec_crash_image)
+		return false;
+
+	/* unless the list is empty, kexec needs relocation */
+	return !(kimage->head & IND_DONE);
+}
+
+int machine_kexec_post_load(struct kimage *kimage)
+{
+	/* Clean the relocation data or payload to PoC */
+	if (kexec_relocation_needed(kimage))
+		kexec_list_flush(kimage);
+	else
+		kexec_segment_flush(kimage);
+
+	return 0;
+}
+
 /**
  * machine_kexec - Do the kexec reboot.
  *
@@ -179,13 +200,6 @@ void machine_kexec(struct kimage *kimage)
 	__flush_icache_range((uintptr_t)reboot_code_buffer,
 			     (uintptr_t)reboot_code_buffer +
 			     arm64_relocate_new_kernel_size);
-
-	/* Flush the kimage list and its buffers. */
-	kexec_list_flush(kimage);
-
-	/* Flush the new image if already in place. */
-	if ((kimage != kexec_crash_image) && (kimage->head & IND_DONE))
-		kexec_segment_flush(kimage);
 
 	pr_info("Bye!\n");
 
@@ -260,8 +274,6 @@ void machine_crash_shutdown(struct pt_regs *regs)
 void arch_kexec_protect_crashkres(void)
 {
 	int i;
-
-	kexec_segment_flush(kexec_crash_image);
 
 	for (i = 0; i < kexec_crash_image->nr_segments; i++)
 		set_memory_valid(
