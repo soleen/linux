@@ -55,15 +55,9 @@ SYM_CODE_START(arm64_relocate_new_kernel)
 	tbz	x16, IND_SOURCE_BIT, .Ltest_indirection
 
 	/* Invalidate dest page to PoC. */
-	mov     x0, x13
-	add     x20, x0, #PAGE_SIZE
-	sub     x1, x15, #1
-	bic     x0, x0, x1
-2:	dc      ivac, x0
-	add     x0, x0, x15
-	cmp     x0, x20
-	b.lo    2b
-	dsb     sy
+	mov	x0, x13
+	mov	x1, #PAGE_SIZE
+	dcache_by_myline_op ivac, sy, x0, x1, x15, x20
 
 	mov x20, x13
 	mov x21, x12

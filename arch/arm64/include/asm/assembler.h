@@ -362,10 +362,9 @@ alternative_else
 alternative_endif
 	.endm
 
-	.macro dcache_by_line_op op, domain, kaddr, size, tmp1, tmp2
-	dcache_line_size \tmp1, \tmp2
+	.macro dcache_by_myline_op op, domain, kaddr, size, linesz, tmp2
 	add	\size, \kaddr, \size
-	sub	\tmp2, \tmp1, #1
+	sub	\tmp2, \linesz, #1
 	bic	\kaddr, \kaddr, \tmp2
 9998:
 	.ifc	\op, cvau
@@ -385,10 +384,15 @@ alternative_endif
 	.endif
 	.endif
 	.endif
-	add	\kaddr, \kaddr, \tmp1
+	add	\kaddr, \kaddr, \linesz
 	cmp	\kaddr, \size
 	b.lo	9998b
 	dsb	\domain
+	.endm
+
+	.macro dcache_by_line_op op, domain, kaddr, size, tmp1, tmp2
+	dcache_line_size \tmp1, \tmp2
+	dcache_by_myline_op \op, \domain, \kaddr, \size, \tmp1, \tmp2
 	.endm
 
 /*
