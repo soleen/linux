@@ -1181,6 +1181,7 @@ int kernel_kexec(void)
 		machine_shutdown();
 	}
 
+	pr_emerg("PASHA kernel reboot end");
 	machine_kexec(kexec_image);
 
 #ifdef CONFIG_KEXEC_JUMP

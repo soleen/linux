@@ -1482,6 +1482,7 @@ void __init tsc_early_init(void)
 	loops_per_jiffy = get_loops_per_jiffy();
 
 	tsc_enable_sched_clock();
+	pr_emerg("PASHA kernel boot start1");
 }
 
 void __init tsc_init(void)
@@ -1528,6 +1529,7 @@ void __init tsc_init(void)
 
 	clocksource_register_khz(&clocksource_tsc_early, tsc_khz);
 	detect_art();
+	pr_emerg("PASHA kernel boot start2");
 }
 
 #ifdef CONFIG_SMP
