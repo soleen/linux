@@ -2460,8 +2460,10 @@ EXPORT_SYMBOL_GPL(nvme_enable_ctrl);
 
 int nvme_shutdown_ctrl(struct nvme_ctrl *ctrl)
 {
+#if 0
 	unsigned long timeout = jiffies + (ctrl->shutdown_timeout * HZ);
 	u32 csts;
+#endif
 	int ret;
 
 	ctrl->ctrl_config &= ~NVME_CC_SHN_MASK;
@@ -2471,6 +2473,7 @@ int nvme_shutdown_ctrl(struct nvme_ctrl *ctrl)
 	if (ret)
 		return ret;
 
+#if 0
 	while ((ret = ctrl->ops->reg_read32(ctrl, NVME_REG_CSTS, &csts)) == 0) {
 		if ((csts & NVME_CSTS_SHST_MASK) == NVME_CSTS_SHST_CMPLT)
 			break;
@@ -2484,6 +2487,7 @@ int nvme_shutdown_ctrl(struct nvme_ctrl *ctrl)
 			return -ENODEV;
 		}
 	}
+#endif
 
 	return ret;
 }
