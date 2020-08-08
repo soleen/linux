@@ -324,6 +324,8 @@ struct keepalive_state {
 	bool bardirty;
 	uuid_t uuid;
 	int keepalive_err_cnt;
+	int saved_num_ctx;
+	void **saved_irq_data;
 	struct pci_saved_state *pci_saved_state;
 	struct pci_saved_state *pm_save;
 };
@@ -431,6 +433,9 @@ static int restore_keepalive_state(struct vfio_pci_device *vdev)
 	vdev->pci_saved_state = state->pci_saved_state;
 	vdev->pm_save = state->pm_save;
 	vdev->keepalive_err_cnt = state->keepalive_err_cnt;
+
+	vdev->saved_num_ctx = state->saved_num_ctx;
+	vdev->saved_irq_data = state->saved_irq_data;
 
 	kfree(state);
 
@@ -570,6 +575,11 @@ static int save_keepalive_state(struct vfio_pci_device *vdev)
 	vdev->pci_saved_state = NULL;
 	state->pm_save = vdev->pm_save;
 	vdev->pm_save = NULL;
+
+	state->saved_num_ctx = vdev->saved_num_ctx;
+	state->saved_irq_data = vdev->saved_irq_data;
+	vdev->saved_num_ctx = 0;
+	vdev->saved_irq_data = NULL;
 
 	add_keepalive_state(state);
 
@@ -1048,8 +1058,15 @@ static int vfio_pci_set_keepalive(struct vfio_device *core_vdev,
 		if (ret)
 			goto device_put;
 
+		ret = vfio_pci_save_keepalive_irq(vdev);
+		if (ret)
+			goto token_free;
+
 		dev_set_keepalive(&vdev->pdev->dev);
 	} else if (!keepalive && dev_is_keepalive(&vdev->pdev->dev)) {
+		ret = vfio_pci_restore_keepalive_irq(vdev);
+		if (ret)
+			goto keepalive_out;
 		vfio_pci_free_keepalive_token(vdev);
 		vfio_pci_device_put(vdev);
 		dev_clear_keepalive(&vdev->pdev->dev);
@@ -1058,6 +1075,8 @@ static int vfio_pci_set_keepalive(struct vfio_device *core_vdev,
 
 	mutex_unlock(&vdev->reflck->lock);
 	return 0;
+token_free:
+	vfio_pci_free_keepalive_token(vdev);
 device_put:
 	vfio_pci_device_put(vdev);
 keepalive_out:
