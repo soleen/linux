@@ -6846,7 +6846,7 @@ static void vmx_free_vcpu(struct kvm_vcpu *vcpu)
 	free_vpid(vmx->vpid);
 	nested_vmx_free_vcpu(vcpu);
 	free_loaded_vmcs(vmx->loaded_vmcs);
-	free_page((unsigned long)vmx->pi_desc);
+	vmx_vcpu_free_pi_desc(vcpu);
 }
 
 static int vmx_create_vcpu(struct kvm_vcpu *vcpu)
@@ -6854,18 +6854,15 @@ static int vmx_create_vcpu(struct kvm_vcpu *vcpu)
 	struct vmx_uret_msr *tsx_ctrl;
 	struct vcpu_vmx *vmx;
 	int i, cpu, err;
-	struct page *page;
 
 	BUILD_BUG_ON(offsetof(struct vcpu_vmx, vcpu) != 0);
 	vmx = to_vmx(vcpu);
 
-	err = -ENOMEM;
-
-	page = alloc_page(GFP_KERNEL | __GFP_ZERO);
-	if (!page)
+	err = vmx_vcpu_alloc_pi_desc(vcpu);
+	if (err)
 		return err;
-	vmx->pi_desc = page_address(page);
 
+	err = -ENOMEM;
 	vmx->vpid = allocate_vpid();
 
 	/*
@@ -6970,8 +6967,7 @@ free_pml:
 	vmx_destroy_pml_buffer(vmx);
 free_vpid:
 	free_vpid(vmx->vpid);
-	free_page((unsigned long)vmx->pi_desc);
-	vmx->pi_desc = NULL;
+	vmx_vcpu_free_pi_desc(vcpu);
 	return err;
 }
 
@@ -6983,6 +6979,7 @@ static int vmx_vm_init(struct kvm *kvm)
 #if IS_ENABLED(CONFIG_HYPERV)
 	spin_lock_init(&to_kvm_vmx(kvm)->hv_root_ept_lock);
 #endif
+	vmx_init_pi_desc(kvm);
 
 	if (!ple_gap)
 		kvm->arch.pause_in_guest = true;

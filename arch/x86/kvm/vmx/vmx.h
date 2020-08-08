@@ -362,6 +362,9 @@ struct kvm_vmx {
 	hpa_t hv_root_ept;
 	spinlock_t hv_root_ept_lock;
 #endif
+
+	struct mutex pid_page_lock;
+	struct list_head pid_page_list;
 };
 
 bool nested_vmx_allowed(struct kvm_vcpu *vcpu);
