@@ -145,6 +145,7 @@ static inline __attribute_const__ u32 msi_mask(unsigned x)
  */
 u32 __pci_msi_desc_mask_irq(struct msi_desc *desc, u32 mask, u32 flag)
 {
+	struct pci_dev *pdev = msi_desc_to_pci_dev(desc);
 	u32 mask_bits = desc->masked;
 
 	if (pci_msi_ignore_mask || !desc->msi_attrib.maskbit)
@@ -152,6 +153,10 @@ u32 __pci_msi_desc_mask_irq(struct msi_desc *desc, u32 mask, u32 flag)
 
 	mask_bits &= ~mask;
 	mask_bits |= flag;
+
+	if (dev_is_keepalive(&pdev->dev))
+		return mask_bits;
+
 	pci_write_config_dword(msi_desc_to_pci_dev(desc), desc->mask_pos,
 			       mask_bits);
 
@@ -181,6 +186,7 @@ static void __iomem *pci_msix_desc_addr(struct msi_desc *desc)
  */
 u32 __pci_msix_desc_mask_irq(struct msi_desc *desc, u32 flag)
 {
+	struct pci_dev *dev = msi_desc_to_pci_dev(desc);
 	u32 mask_bits = desc->masked;
 	void __iomem *desc_addr;
 
@@ -194,6 +200,9 @@ u32 __pci_msix_desc_mask_irq(struct msi_desc *desc, u32 flag)
 	mask_bits &= ~PCI_MSIX_ENTRY_CTRL_MASKBIT;
 	if (flag & PCI_MSIX_ENTRY_CTRL_MASKBIT)
 		mask_bits |= PCI_MSIX_ENTRY_CTRL_MASKBIT;
+
+	if (dev_is_keepalive(&dev->dev))
+		return mask_bits;
 
 	writel(mask_bits, desc_addr + PCI_MSIX_ENTRY_VECTOR_CTRL);
 
@@ -284,6 +293,9 @@ void __pci_read_msi_msg(struct msi_desc *entry, struct msi_msg *msg)
 void __pci_write_msi_msg(struct msi_desc *entry, struct msi_msg *msg)
 {
 	struct pci_dev *dev = msi_desc_to_pci_dev(entry);
+
+	if (dev_is_keepalive(&dev->dev))
+		goto skip;
 
 	if (dev->current_state != PCI_D0 || pci_dev_is_disconnected(dev)) {
 		/* Don't touch the hardware now */
@@ -378,6 +390,9 @@ static void free_msi_irqs(struct pci_dev *dev)
 
 static void pci_intx_for_msi(struct pci_dev *dev, int enable)
 {
+	if (dev_is_keepalive(&dev->dev))
+		return;
+
 	if (!(dev->dev_flags & PCI_DEV_FLAGS_MSI_INTX_DISABLE_BUG))
 		pci_intx(dev, enable);
 }
@@ -385,6 +400,9 @@ static void pci_intx_for_msi(struct pci_dev *dev, int enable)
 static void pci_msi_set_enable(struct pci_dev *dev, int enable)
 {
 	u16 control;
+
+	if (dev_is_keepalive(&dev->dev))
+		return;
 
 	pci_read_config_word(dev, dev->msi_cap + PCI_MSI_FLAGS, &control);
 	control &= ~PCI_MSI_FLAGS_ENABLE;
@@ -418,6 +436,9 @@ static void __pci_restore_msi_state(struct pci_dev *dev)
 static void pci_msix_clear_and_set_ctrl(struct pci_dev *dev, u16 clear, u16 set)
 {
 	u16 ctrl;
+
+	if (dev_is_keepalive(&dev->dev))
+		return;
 
 	pci_read_config_word(dev, dev->msix_cap + PCI_MSIX_FLAGS, &ctrl);
 	ctrl &= ~clear;
