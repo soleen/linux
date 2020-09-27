@@ -54,6 +54,8 @@ struct vfio_device_ops {
 	int	(*mmap)(struct vfio_device *vdev, struct vm_area_struct *vma);
 	void	(*request)(struct vfio_device *vdev, unsigned int count);
 	int	(*match)(struct vfio_device *vdev, char *buf);
+	int	(*set_keepalive)(struct vfio_device *vdev,
+				 struct vfio_keepalive_data *vka);
 };
 
 extern struct iommu_group *vfio_iommu_group_get(struct device *dev);
