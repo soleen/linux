@@ -882,7 +882,7 @@ void vfio_unregister_group_dev(struct vfio_device *device)
 	vfio_device_put(device);
 	rc = try_wait_for_completion(&device->comp);
 	while (rc <= 0) {
-		if (device->ops->request)
+		if (!dev_is_keepalive(device->dev) && device->ops->request)
 			device->ops->request(device, i++);
 
 		if (interrupted) {
