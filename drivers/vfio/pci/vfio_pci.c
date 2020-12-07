@@ -2422,8 +2422,12 @@ static int vfio_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (ret)
 		goto out_power;
 	dev_set_drvdata(&pdev->dev, vdev);
-	return 0;
 
+	/* keepalive flag means an extra refcnt */
+	if (dev_is_keepalive(&pdev->dev))
+		vfio_device_get_from_dev(&pdev->dev);
+
+	return 0;
 out_power:
 	if (!disable_idle_d3)
 		vfio_pci_set_power_state(vdev, PCI_D0);
