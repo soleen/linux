@@ -1996,6 +1996,9 @@ EXPORT_SYMBOL(pci_enable_device_mem);
  */
 int pci_enable_device(struct pci_dev *dev)
 {
+	if (dev_is_keepalive(&dev->dev))
+		return 0;
+
 	return pci_enable_device_flags(dev, IORESOURCE_MEM | IORESOURCE_IO);
 }
 EXPORT_SYMBOL(pci_enable_device);
@@ -2190,6 +2193,9 @@ void pci_disable_enabled_device(struct pci_dev *dev)
 void pci_disable_device(struct pci_dev *dev)
 {
 	struct pci_devres *dr;
+
+	if (dev_is_keepalive(&dev->dev))
+		return;
 
 	dr = find_pci_dr(dev);
 	if (dr)
@@ -4362,6 +4368,9 @@ void __weak pcibios_set_master(struct pci_dev *dev)
  */
 void pci_set_master(struct pci_dev *dev)
 {
+	if (dev_is_keepalive(&dev->dev))
+		return;
+
 	__pci_set_master(dev, true);
 	pcibios_set_master(dev);
 }
@@ -4373,6 +4382,9 @@ EXPORT_SYMBOL(pci_set_master);
  */
 void pci_clear_master(struct pci_dev *dev)
 {
+	if (dev_is_keepalive(&dev->dev))
+		return;
+
 	__pci_set_master(dev, false);
 }
 EXPORT_SYMBOL(pci_clear_master);
