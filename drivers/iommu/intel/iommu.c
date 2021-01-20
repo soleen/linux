@@ -5919,6 +5919,32 @@ static void __init check_tylersburg_isoch(void)
 	pr_warn("Recommended TLB entries for ISOCH unit is 16; your BIOS set %d\n",
 	       vtisochctrl);
 }
+
+static int intel_iommu_pkram_save_one_devinfo(struct pkram_stream *ps,
+					      struct intel_iommu *iommu)
+{
+	struct device_domain_info *info;
+	PKRAM_ACCESS(pa, ps, bytes);
+	int cnt = 0;
+	ssize_t ret = 0;
+
+	spin_lock(&device_domain_lock);
+	list_for_each_entry(info, &iommu->devinfo_list, global)
+		cnt++;
+	ret = pkram_write(&pa, &cnt, sizeof(int));
+	if (ret < 0)
+		goto devinfo_out;
+
+	list_for_each_entry(info, &iommu->devinfo_list, global) {
+		ret = pkram_write(&pa, info, sizeof(*info));
+		if (ret < 0)
+			goto devinfo_out;
+	}
+devinfo_out:
+	spin_unlock(&device_domain_lock);
+	return ret;
+}
+
 static int devinfo_get_domain_id(struct device_domain_info *info, u16 *did)
 {
 	struct context_entry *context;
@@ -5975,7 +6001,8 @@ static int intel_iommu_pkram_save_one_state(struct pkram_stream *ps,
 	struct intel_iommu_state state;
 	unsigned long *domain_ids;
 	void *base;
-	int i, ret;
+	int i;
+	ssize_t ret;
 
 	memset(&state, 0, sizeof(state));
 	state.reg_phys = iommu->reg_phys;
@@ -5988,7 +6015,7 @@ static int intel_iommu_pkram_save_one_state(struct pkram_stream *ps,
 	state.domain_ids_size = BITS_TO_LONGS(cap_ndoms(iommu->cap)) * sizeof(unsigned long);
 
 	ret = pkram_write(&pa_bytes, &state, sizeof(state));
-	if (ret)
+	if (ret < 0)
 		return ret;
 
 	domain_ids = kzalloc(state.domain_ids_size, GFP_KERNEL);
@@ -5998,7 +6025,7 @@ static int intel_iommu_pkram_save_one_state(struct pkram_stream *ps,
 	if (ret)
 		return ret;
 	ret = pkram_write(&pa_bytes, domain_ids, state.domain_ids_size);
-	if (ret)
+	if (ret < 0)
 		return ret;
 	kfree(domain_ids);
 
@@ -6033,13 +6060,14 @@ intel_iommu_pkram_load_one_state(struct pkram_stream *ps)
 	PKRAM_ACCESS(pa_pages, ps, pages);
 	struct intel_iommu_state *state;
 	struct page *page;
-	int i, ret;
+	int i;
+	ssize_t ret;
 
 	state = kmalloc(sizeof(*state), GFP_KERNEL);
 	if (!state)
 		return NULL;
 	ret = pkram_read(&pa_bytes, state, sizeof(*state));
-	if (ret)
+	if (ret < 0)
 		goto fail_free_state;
 
 	state->domain_ids = kmalloc(state->domain_ids_size, GFP_KERNEL);
@@ -6048,7 +6076,7 @@ intel_iommu_pkram_load_one_state(struct pkram_stream *ps)
 		goto fail_free_state;
 	}
 	ret = pkram_read(&pa_bytes, state->domain_ids, state->domain_ids_size);
-	if (ret) {
+	if (ret < 0) {
 		pr_warn("failed to load domain_ids\n");
 		goto fail_free_state;
 	}
@@ -6101,6 +6129,51 @@ fail_free_state:
 	}
 	kfree(state);
 	return NULL;
+}
+
+static int intel_iommu_pkram_save_devinfo(struct intel_iommu *iommu)
+{
+	struct pkram_stream ps;
+	char devinfo_name[128];
+	int ret;
+
+	snprintf(devinfo_name, 128, "intel-iommu-devinfo-%d", iommu->seq_id);
+	ret = pkram_prepare_save(&ps, devinfo_name, GFP_ATOMIC);
+	if (ret)
+		return ret;
+
+	pkram_prepare_save_obj(&ps, PKRAM_DATA_bytes);
+	ret = intel_iommu_pkram_save_one_devinfo(&ps, iommu);
+	if (ret)
+		goto fail_save_devinfo;
+	pkram_finish_save_obj(&ps);
+	pkram_finish_save(&ps);
+	return 0;
+fail_save_devinfo:
+	pkram_discard_save(&ps);
+	return ret;
+}
+
+static int intel_iommu_save_devinfo(void)
+{
+	struct dmar_drhd_unit *drhd;
+	struct intel_iommu *iommu;
+	int ret;
+
+	down_write(&dmar_global_lock);
+	for_each_iommu(iommu, drhd) {
+		if (!iommu->keepalive)
+			continue;
+		ret = intel_iommu_pkram_save_devinfo(iommu);
+		if (ret) {
+			pr_info("failed to save devinfo\n");
+			up_write(&dmar_global_lock);
+			return ret;
+		}
+	}
+	up_write(&dmar_global_lock);
+
+	return 0;
 }
 
 int intel_iommu_pkram_save_state(void)
@@ -6180,6 +6253,9 @@ static int intel_iommu_save_callback(struct notifier_block *notifier,
 {
 	if (intel_iommu_pkram_save_state()) {
 		pr_warn("failed to save intel iommu state \n");
+	}
+	if (intel_iommu_save_devinfo()) {
+		pr_warn("failed to save intel iommu devinfo \n");
 	}
 	return NOTIFY_OK;
 }
