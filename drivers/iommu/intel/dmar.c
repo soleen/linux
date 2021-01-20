@@ -1050,6 +1050,8 @@ static void dmar_free_seq_id(struct intel_iommu *iommu)
 	}
 }
 
+static bool pkram_iommu_state_loaded;
+
 static int alloc_iommu(struct dmar_drhd_unit *drhd)
 {
 	struct intel_iommu *iommu;
@@ -1061,6 +1063,11 @@ static int alloc_iommu(struct dmar_drhd_unit *drhd)
 	if (!drhd->reg_base_addr) {
 		warn_invalid_dmar(0, "");
 		return -EINVAL;
+	}
+
+	if (!pkram_iommu_state_loaded) {
+		intel_iommu_pkram_load();
+		pkram_iommu_state_loaded = true;
 	}
 
 	iommu = kzalloc(sizeof(*iommu), GFP_KERNEL);
