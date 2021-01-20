@@ -5940,8 +5940,40 @@ static int intel_iommu_pkram_save_one_devinfo(struct pkram_stream *ps,
 		if (ret < 0)
 			goto devinfo_out;
 	}
+	ret = 0;
 devinfo_out:
 	spin_unlock(&device_domain_lock);
+	return ret;
+}
+
+static int intel_iommu_pkram_load_one_devinfo(struct pkram_stream *ps,
+					      struct intel_iommu_state *state)
+{
+	struct device_domain_info *devinfo;
+	PKRAM_ACCESS(pa, ps, bytes);
+	int cnt;
+	ssize_t ret;
+
+	ret = pkram_read(&pa, &cnt, sizeof(int));
+	if (ret < 0)
+		return ret;
+	INIT_LIST_HEAD(&state->devinfo_list);
+	while (cnt--) {
+		devinfo = kmalloc(sizeof(*devinfo), GFP_KERNEL);
+		if (!devinfo) {
+			ret = -ENOMEM;
+			goto fail_free_list;
+		}
+		ret = pkram_read(&pa, devinfo, sizeof(*devinfo));
+		if (ret < 0)
+			goto fail_free_devinfo;
+		list_add_tail(&devinfo->global, &state->devinfo_list);
+	}
+
+	return 0;
+fail_free_devinfo:
+	kfree(devinfo);
+fail_free_list:
 	return ret;
 }
 
@@ -6208,6 +6240,47 @@ int intel_iommu_pkram_save_state(void)
 	return ret;
 }
 
+static int intel_iommu_pkram_load_devinfo(struct intel_iommu_state *state)
+{
+	struct pkram_stream ps;
+	char devinfo_name[128];
+	int ret;
+
+	snprintf(devinfo_name, 128, "intel-iommu-devinfo-%d", state->seq_id);
+	ret = pkram_prepare_load(&ps, devinfo_name);
+	if (ret)
+		return ret;
+	pkram_prepare_load_obj(&ps);
+	ret = intel_iommu_pkram_load_one_devinfo(&ps, state);
+	if (ret) {
+		pr_warn("failed to load devinfo\n");
+		pkram_finish_load(&ps);
+		return ret;
+	}
+	pkram_finish_load_obj(&ps);
+
+	return 0;
+}
+
+static int intel_iommu_load_devinfo(void)
+{
+	struct intel_iommu_state *state;
+	int ret;
+
+	mutex_lock(&intel_iommu_state_lock);
+	list_for_each_entry(state, &intel_iommu_state_list, list) {
+		ret = intel_iommu_pkram_load_devinfo(state);
+		if (ret) {
+			pr_warn("failed to load devinfo\n");
+			mutex_unlock(&intel_iommu_state_lock);
+			return ret;
+		}
+	}
+	mutex_unlock(&intel_iommu_state_lock);
+
+	return 0;
+}
+
 static int intel_iommu_load_state(void)
 {
 	struct intel_iommu_state *state;
@@ -6243,6 +6316,9 @@ int intel_iommu_pkram_load()
 	int ret;
 
 	ret = intel_iommu_load_state();
+	ret = intel_iommu_load_devinfo();
+	if (ret)
+		return ret;
 	if (ret)
 		return ret;
 	return 0;
