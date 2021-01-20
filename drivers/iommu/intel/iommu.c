@@ -2663,6 +2663,9 @@ static int domain_keepalive_reattach_iommu(struct dmar_domain *domain,
 	return 0;
 }
 
+static LIST_HEAD(intel_iommu_state_list);
+static DEFINE_MUTEX(intel_iommu_state_lock);
+
 static struct dmar_domain *dmar_insert_one_dev_info(struct intel_iommu *iommu,
 						    int bus, int devfn,
 						    struct device *dev,
@@ -6023,6 +6026,83 @@ static int intel_iommu_pkram_save_one_state(struct pkram_stream *ps,
 	return 0;
 }
 
+static struct intel_iommu_state *
+intel_iommu_pkram_load_one_state(struct pkram_stream *ps)
+{
+	PKRAM_ACCESS(pa_bytes, ps, bytes);
+	PKRAM_ACCESS(pa_pages, ps, pages);
+	struct intel_iommu_state *state;
+	struct page *page;
+	int i, ret;
+
+	state = kmalloc(sizeof(*state), GFP_KERNEL);
+	if (!state)
+		return NULL;
+	ret = pkram_read(&pa_bytes, state, sizeof(*state));
+	if (ret)
+		goto fail_free_state;
+
+	state->domain_ids = kmalloc(state->domain_ids_size, GFP_KERNEL);
+	if (!state->domain_ids) {
+		pr_warn("failed to allocate domain_ids\n");
+		goto fail_free_state;
+	}
+	ret = pkram_read(&pa_bytes, state->domain_ids, state->domain_ids_size);
+	if (ret) {
+		pr_warn("failed to load domain_ids\n");
+		goto fail_free_state;
+	}
+
+	state->root_entry_page = pkram_load_file_page(&pa_pages, NULL);
+
+	if (!state->root_entry_page) {
+		pr_warn("failed to load root_entry_page\n");
+		goto fail_free_state;
+	}
+
+	state->qi_desc_page = pkram_load_file_page(&pa_pages, NULL);
+	if (!state->qi_desc_page) {
+		pr_warn("failed to load qi_desc_page\n");
+		goto fail_free_state;
+	}
+
+	state->qi_desc_status = pkram_load_file_page(&pa_pages, NULL);
+	if (!state->qi_desc_status) {
+		pr_warn("failed to load qi_desc_status\n");
+		goto fail_free_state;
+	}
+
+	for (i = 0; i < (1 << INTR_REMAP_PAGE_ORDER); i++) {
+		page = pkram_load_file_page(&pa_pages, NULL);
+		if (!page) {
+			pr_warn("failed to load ir_table page %d\n", i);
+			goto fail_free_state;
+		}
+		if (i == 0)
+			state->ir_table_base = page_address(page);
+		else
+			set_page_count(page, 0);
+	}
+
+	return state;
+fail_free_state:
+	if (state->domain_ids)
+		kfree(state->domain_ids);
+	if (state->qi_desc_page)
+		__free_page(state->qi_desc_page);
+	if (state->qi_desc_status)
+		__free_page(state->qi_desc_status);
+	if (state->ir_table_base) {
+		while (i--) {
+			page = virt_to_page(state->ir_table_base + i * PAGE_SIZE);
+			set_page_count(page, 1);
+			__free_page(page);
+		}
+	}
+	kfree(state);
+	return NULL;
+}
+
 int intel_iommu_pkram_save_state(void)
 {
 	struct dmar_drhd_unit *drhd;
@@ -6053,6 +6133,46 @@ int intel_iommu_pkram_save_state(void)
 		pkram_finish_save(&ps);
 	}
 	return ret;
+}
+
+static int intel_iommu_load_state(void)
+{
+	struct intel_iommu_state *state;
+	struct pkram_stream ps;
+	int ret;
+
+	ret = pkram_prepare_load(&ps, "intel-iommu");
+	if (ret)
+		return ret;
+
+	while (pkram_prepare_load_obj(&ps) == 0) {
+		state = intel_iommu_pkram_load_one_state(&ps);
+		if (!state) {
+			pr_warn("failed to load state\n");
+			goto fail_pkram_load;
+		}
+
+		pkram_finish_load_obj(&ps);
+
+		mutex_lock(&intel_iommu_state_lock);
+		list_add(&state->list, &intel_iommu_state_list);
+		mutex_unlock(&intel_iommu_state_lock);
+	}
+	pkram_finish_load(&ps);
+	return 0;
+fail_pkram_load:
+	pkram_finish_load(&ps);
+	return -1;
+}
+
+int intel_iommu_pkram_load()
+{
+	int ret;
+
+	ret = intel_iommu_load_state();
+	if (ret)
+		return ret;
+	return 0;
 }
 
 static int intel_iommu_save_callback(struct notifier_block *notifier,
