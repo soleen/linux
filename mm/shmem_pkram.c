@@ -115,6 +115,7 @@ static int save_file_content_range(struct pkram_access *pa,
 }
 
 struct shmem_pkram_arg {
+	int *error;
 	struct pkram_stream *ps;
 	struct address_space *mapping;
 	struct mm_struct *mm;
@@ -135,6 +136,16 @@ static int get_save_range(unsigned long max, atomic64_t *next, unsigned long *st
 	*end = index + shmem_pkram_max_index_range - 1;
  
 	return 0;
+}
+
+/* Completion tracking for save_file_content_thr() threads */
+static atomic_t pkram_save_n_undone;
+static DECLARE_COMPLETION(pkram_save_all_done_comp);
+
+static inline void pkram_save_report_one_done(void)
+{
+	if (atomic_dec_and_test(&pkram_save_n_undone))
+		complete(&pkram_save_all_done_comp);
 }
 
 static int do_save_file_content(struct pkram_stream *ps,
@@ -160,11 +171,40 @@ static int do_save_file_content(struct pkram_stream *ps,
 	return ret;
 }
 
-static int save_file_content(struct pkram_stream *ps, struct address_space *mapping)
+static int save_file_content_thr(void *data)
 {
-	struct shmem_pkram_arg arg = { ps, mapping, NULL, ATOMIC64_INIT(0) };
- 
-	return do_save_file_content(arg.ps, arg.mapping, &arg.next);
+	struct shmem_pkram_arg *arg = data;
+	int ret;
+
+	ret = do_save_file_content(arg->ps, arg->mapping, &arg->next);
+	if (ret && !*arg->error)
+		*arg->error = ret;
+
+	pkram_save_report_one_done();
+	return 0;
+}
+
+static int shmem_pkram_max_threads = 16;
+
+static int save_file_content(struct pkram_stream *ps, struct address_space *mapping)
+ {
+	int err = 0;
+	struct shmem_pkram_arg arg = { &err, ps, mapping, NULL, ATOMIC64_INIT(0) };
+	unsigned int thr, nr_threads;
+
+	nr_threads = num_online_cpus() - 1;
+	nr_threads = clamp_val(shmem_pkram_max_threads, 1, nr_threads);
+
+	if (nr_threads == 1)
+		return do_save_file_content(arg.ps, arg.mapping, &arg.next);
+
+	atomic_set(&pkram_save_n_undone, nr_threads);
+	for (thr = 0; thr < nr_threads; thr++)
+		kthread_run(save_file_content_thr, &arg, "pkram_save%d", thr);
+
+	wait_for_completion(&pkram_save_all_done_comp);
+
+	return err;
 }
 
 static int save_file(struct dentry *dentry, struct pkram_stream *ps)
@@ -275,7 +315,17 @@ out:
 	return err;
 }
 
-static int load_file_content(struct pkram_stream *ps, struct address_space *mapping, struct mm_struct *mm)
+/* Completion tracking for load_file_content_thr() threads */
+static atomic_t pkram_load_n_undone;
+static DECLARE_COMPLETION(pkram_load_all_done_comp);
+
+static inline void pkram_load_report_one_done(void)
+{
+	if (atomic_dec_and_test(&pkram_load_n_undone))
+		complete(&pkram_load_all_done_comp);
+}
+
+static int do_load_file_content(struct pkram_stream *ps, struct address_space *mapping, struct mm_struct *mm)
 {
 	PKRAM_ACCESS(pa, ps, pages);
 	unsigned long index;
@@ -293,6 +343,40 @@ static int load_file_content(struct pkram_stream *ps, struct address_space *mapp
 	} while (!err);
 
 	pkram_finish_access(&pa, err == 0);
+	return err;
+}
+
+static int load_file_content_thr(void *data)
+{
+	struct shmem_pkram_arg *arg = data;
+	int ret;
+
+	ret = do_load_file_content(arg->ps, arg->mapping, arg->mm);
+	if (ret && !*arg->error)
+		*arg->error = ret;
+
+	pkram_load_report_one_done();
+	return 0;
+}
+
+static int load_file_content(struct pkram_stream *ps, struct address_space *mapping, struct mm_struct *mm)
+{
+	int err = 0;
+	struct shmem_pkram_arg arg = { &err, ps, mapping, mm };
+	unsigned int thr, nr_threads;
+
+	nr_threads = num_online_cpus() - 1;
+	nr_threads = clamp_val(shmem_pkram_max_threads, 1, nr_threads);
+
+	if (nr_threads == 1)
+		return do_load_file_content(ps, mapping, mm);
+
+	atomic_set(&pkram_load_n_undone, nr_threads);
+	for (thr = 0; thr < nr_threads; thr++)
+		kthread_run(load_file_content_thr, &arg, "pkram_load%d", thr);
+
+	wait_for_completion(&pkram_load_all_done_comp);
+
 	return err;
 }
 
