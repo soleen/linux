@@ -96,6 +96,10 @@ void pkram_finish_access(struct pkram_access *pa, bool status_ok);
 int pkram_save_file_page(struct pkram_access *pa, struct page *page);
 struct page *pkram_load_file_page(struct pkram_access *pa, unsigned long *index);
 
+#define PKRAM_PAGES_BUFSIZE	PAGE_SIZE
+
+int pkram_load_file_pages(struct pkram_access *pa, struct page *pages[], unsigned int *nr_pages, unsigned long *index);
+
 ssize_t pkram_write(struct pkram_access *pa, const void *buf, size_t count);
 size_t pkram_read(struct pkram_access *pa, void *buf, size_t count);
 

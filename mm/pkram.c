@@ -1099,6 +1099,52 @@ struct page *pkram_load_file_page(struct pkram_access *pa, unsigned long *index)
 }
 
 /**
+ * Load pages from the preserved memory node and object associated with
+ * pkram stream access @pa. The stream must have been initialized with
+ * pkram_prepare_load() and pkram_prepare_load_obj() and access initialized
+ * with PKRAM_ACCESS().
+ * The page entries of a single pkram_link are processed, and @pages is
+ * populated with the page pointers.  @nr_pages is set to the number of
+ * pages, and @index is set to the mapping index of the first page.
+ *
+ * Returns 0 if one or more pages are loaded or -ENODATA if there are no
+ * pages to load.
+ *
+ * The pages loaded have an incremented refcount either because the page
+ * was initialized with a refcount of 1 at boot or because the page was
+ * subsequently preserved which increased the refcount.
+ */
+int pkram_load_file_pages(struct pkram_access *pa, struct page *pages[], unsigned int *nr_pages, unsigned long *index)
+{
+	struct pkram_data_stream *pds = &pa->pds;
+	struct pkram_link *link;
+	int nr_entries = 0;
+	int i, ret;
+
+	ret = pkram_next_link(pds, &link);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < PKRAM_LINK_ENTRIES_MAX; i++) {
+		unsigned long p = link->entry[i];
+
+		if (!p)
+			break;
+
+		pages[i] = __pkram_prep_load_page(p);
+		nr_entries++;
+	}
+
+	*nr_pages = nr_entries;
+	*index = link->index;
+
+	pkram_free_page(link);
+	pds->link = NULL;
+
+	return 0;
+}
+
+/**
  * Copy @count bytes from @buf to the preserved memory node and object
  * associated with pkram stream access @pa. The stream must have been
  * initialized with pkram_prepare_save() and pkram_prepare_save_obj()
