@@ -6,6 +6,8 @@
 #include <linux/types.h>
 #include <linux/mm_types.h>
 
+struct pkram_node;
+
 /**
  * enum pkram_data_flags - definition of data types contained in a pkram obj
  * @PKRAM_DATA_none: No data types configured
@@ -14,7 +16,11 @@ enum pkram_data_flags {
 	PKRAM_DATA_none		= 0x0,  /* No data types configured */
 };
 
-struct pkram_stream;
+struct pkram_stream {
+	gfp_t gfp_mask;
+	struct pkram_node *node;
+};
+
 struct pkram_access;
 
 #define PKRAM_NAME_MAX		256	/* including nul */
