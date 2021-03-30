@@ -7,6 +7,7 @@
 #include <linux/mm_types.h>
 
 struct pkram_node;
+struct pkram_obj;
 
 /**
  * enum pkram_data_flags - definition of data types contained in a pkram obj
@@ -19,6 +20,7 @@ enum pkram_data_flags {
 struct pkram_stream {
 	gfp_t gfp_mask;
 	struct pkram_node *node;
+	struct pkram_obj *obj;
 };
 
 struct pkram_access;
