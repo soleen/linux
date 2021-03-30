@@ -671,7 +671,7 @@ static inline bool is_huge_enabled(struct shmem_sb_info *sbinfo)
 static int shmem_add_to_page_cache(struct page *page,
 				   struct address_space *mapping,
 				   pgoff_t index, void *expected, gfp_t gfp,
-				   struct mm_struct *charge_mm)
+				   struct mm_struct *charge_mm, bool skipcharge)
 {
 	XA_STATE_ORDER(xas, &mapping->i_pages, index, compound_order(page));
 	unsigned long i = 0;
@@ -688,7 +688,7 @@ static int shmem_add_to_page_cache(struct page *page,
 	page->mapping = mapping;
 	page->index = index;
 
-	if (!PageSwapCache(page)) {
+	if (!skipcharge && !PageSwapCache(page)) {
 		error = mem_cgroup_charge(page, charge_mm, gfp);
 		if (error) {
 			if (PageTransHuge(page)) {
@@ -770,6 +770,7 @@ int shmem_insert_page(struct mm_struct *mm, struct inode *inode, pgoff_t index,
 	int nr;
 	pgoff_t hindex = index;
 	bool on_lru = PageLRU(page);
+	bool ischarged = page_memcg(page) ? true : false;
 
 	if (index > (MAX_LFS_FILESIZE >> PAGE_SHIFT))
 		return -EFBIG;
@@ -809,7 +810,8 @@ retry:
 	__SetPageReferenced(page);
 
 	err = shmem_add_to_page_cache(page, mapping, hindex,
-				      NULL, gfp & GFP_RECLAIM_MASK, mm);
+				      NULL, gfp & GFP_RECLAIM_MASK,
+				      mm, ischarged);
 	if (err)
 		goto out_unlock;
 
@@ -1829,7 +1831,7 @@ static int shmem_swapin_page(struct inode *inode, pgoff_t index,
 
 	error = shmem_add_to_page_cache(page, mapping, index,
 					swp_to_radix_entry(swap), gfp,
-					charge_mm);
+					charge_mm, false);
 	if (error)
 		goto failed;
 
@@ -2009,7 +2011,7 @@ alloc_nohuge:
 
 	error = shmem_add_to_page_cache(page, mapping, hindex,
 					NULL, gfp & GFP_RECLAIM_MASK,
-					charge_mm);
+					charge_mm, false);
 	if (error)
 		goto unacct;
 	lru_cache_add(page);
@@ -2496,7 +2498,7 @@ static int shmem_mfill_atomic_pte(struct mm_struct *dst_mm,
 		goto out_release;
 
 	ret = shmem_add_to_page_cache(page, mapping, pgoff, NULL,
-				      gfp & GFP_RECLAIM_MASK, dst_mm);
+				      gfp & GFP_RECLAIM_MASK, dst_mm, false);
 	if (ret)
 		goto out_release;
 
