@@ -74,16 +74,14 @@ static int save_page(struct page *page, struct pkram_access *pa)
 	return err;
 }
 
-static int save_file_content(struct pkram_stream *ps, struct address_space *mapping)
+static int save_file_content_range(struct pkram_access *pa,
+				   struct address_space *mapping,
+				   unsigned long start, unsigned long end)
 {
-	PKRAM_ACCESS(pa, ps, pages);
 	struct pagevec pvec;
-	unsigned long start, end;
 	int err = 0;
 	int i;
 
-	start = 0;
-	end = DIV_ROUND_UP(i_size_read(mapping->host), PAGE_SIZE);
 	pagevec_init(&pvec);
 	for ( ; ; ) {
 		pvec.nr = find_get_pages_range(mapping, &start, end,
@@ -95,7 +93,7 @@ static int save_file_content(struct pkram_stream *ps, struct address_space *mapp
 
 			lock_page(page);
 			BUG_ON(page->mapping != mapping);
-			err = save_page(page, &pa);
+			err = save_page(page, pa);
 			if (PageCompound(page)) {
 				start = page->index + compound_nr(page);
 				i += compound_nr(page);
@@ -113,8 +111,60 @@ static int save_file_content(struct pkram_stream *ps, struct address_space *mapp
 		cond_resched();
 	}
 
-	pkram_finish_access(&pa, err == 0);
 	return err;
+}
+
+struct shmem_pkram_arg {
+	struct pkram_stream *ps;
+	struct address_space *mapping;
+	struct mm_struct *mm;
+	atomic64_t next;
+};
+
+unsigned long shmem_pkram_max_index_range = 512 * 512;
+
+static int get_save_range(unsigned long max, atomic64_t *next, unsigned long *start, unsigned long *end)
+{
+	unsigned long index;
+ 
+	index = atomic64_fetch_add(shmem_pkram_max_index_range, next);
+	if (index >= max)
+		return -ENODATA;
+ 
+	*start = index;
+	*end = index + shmem_pkram_max_index_range - 1;
+ 
+	return 0;
+}
+
+static int do_save_file_content(struct pkram_stream *ps,
+				struct address_space *mapping,
+				atomic64_t *next)
+{
+	PKRAM_ACCESS(pa, ps, pages);
+	unsigned long start, end, max;
+	int ret;
+ 
+	max = DIV_ROUND_UP(i_size_read(mapping->host), PAGE_SIZE);
+ 
+	do {
+		ret = get_save_range(max, next, &start, &end);
+		if (!ret)
+			ret = save_file_content_range(&pa, mapping, start, end);
+	} while (!ret);
+ 
+	if (ret == -ENODATA)
+		ret = 0;
+ 
+	pkram_finish_access(&pa, ret == 0);
+	return ret;
+}
+
+static int save_file_content(struct pkram_stream *ps, struct address_space *mapping)
+{
+	struct shmem_pkram_arg arg = { ps, mapping, NULL, ATOMIC64_INIT(0) };
+ 
+	return do_save_file_content(arg.ps, arg.mapping, &arg.next);
 }
 
 static int save_file(struct dentry *dentry, struct pkram_stream *ps)
