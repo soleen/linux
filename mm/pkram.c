@@ -535,33 +535,42 @@ static void pkram_truncate(void)
 static void pkram_add_link(struct pkram_link *link, struct pkram_data_stream *pds)
 {
 	__u64 link_pfn = page_to_pfn(virt_to_page(link));
+	__u64 *tail = pds->tail_link_pfnp;
+	__u64 tail_pfn;
 
-	if (!*pds->head_link_pfnp) {
+	do {
+		tail_pfn = *tail;
+	} while (cmpxchg64(tail, tail_pfn, link_pfn) != tail_pfn);
+
+	if (!tail_pfn) {
 		*pds->head_link_pfnp = link_pfn;
-		*pds->tail_link_pfnp = link_pfn;
 	} else {
-		struct pkram_link *tail = pfn_to_kaddr(*pds->tail_link_pfnp);
+		struct pkram_link *prev_tail = pfn_to_kaddr(tail_pfn);
 
-		tail->link_pfn = link_pfn;
-		*pds->tail_link_pfnp = link_pfn;
+		prev_tail->link_pfn = link_pfn;
 	}
 }
 
 static struct pkram_link *pkram_remove_link(struct pkram_data_stream *pds)
 {
-	struct pkram_link *link;
+	__u64 *head = pds->head_link_pfnp;
+	__u64 head_pfn = *head;
 
-	if (!*pds->head_link_pfnp)
-		return NULL;
+	while (head_pfn) {
+		struct pkram_link *link = pfn_to_kaddr(head_pfn);
 
-	link = pfn_to_kaddr(*pds->head_link_pfnp);
-	*pds->head_link_pfnp = link->link_pfn;
-	if (!*pds->head_link_pfnp)
-		*pds->tail_link_pfnp = 0;
-	else
-		link->link_pfn = 0;
+		if (cmpxchg64(head, head_pfn, link->link_pfn) == head_pfn) {
+			if (!*head)
+				*pds->tail_link_pfnp = 0;
+			else
+				link->link_pfn = 0;
+			return link;
+		}
 
-	return link;
+		head_pfn = *head;
+	}
+
+	return NULL;
 }
 
 static struct pkram_link *pkram_new_link(struct pkram_data_stream *pds, gfp_t gfp_mask)
