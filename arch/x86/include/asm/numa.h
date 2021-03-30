@@ -41,6 +41,7 @@ static inline void set_apicid_to_node(int apicid, s16 node)
 }
 
 extern int numa_cpu_node(int cpu);
+extern void __init numa_isolate_memblocks(void);
 
 #else	/* CONFIG_NUMA */
 static inline void set_apicid_to_node(int apicid, s16 node)
@@ -50,6 +51,9 @@ static inline void set_apicid_to_node(int apicid, s16 node)
 static inline int numa_cpu_node(int cpu)
 {
 	return NUMA_NO_NODE;
+}
+static inline void numa_isolate_memblocks(void)
+{
 }
 #endif	/* CONFIG_NUMA */
 
