@@ -8,22 +8,47 @@
 
 struct pkram_node;
 struct pkram_obj;
+struct pkram_link;
 
 /**
  * enum pkram_data_flags - definition of data types contained in a pkram obj
  * @PKRAM_DATA_none: No data types configured
+ * @PKRAM_DATA_pages: obj contains file page data
  */
 enum pkram_data_flags {
-	PKRAM_DATA_none		= 0x0,  /* No data types configured */
+	PKRAM_DATA_none		= 0x0,	/* No data types configured */
+	PKRAM_DATA_pages	= 0x1,	/* Contains file page data */
+};
+
+struct pkram_data_stream {
+	/* List of link pages to add/remove from */
+	__u64 *head_link_pfnp;
+	__u64 *tail_link_pfnp;
+
+	struct pkram_link *link;	/* current link */
+	unsigned int entry_idx;		/* next entry in link */
 };
 
 struct pkram_stream {
 	gfp_t gfp_mask;
 	struct pkram_node *node;
 	struct pkram_obj *obj;
+
+	__u64 *pages_head_link_pfnp;
+	__u64 *pages_tail_link_pfnp;
 };
 
-struct pkram_access;
+struct pkram_pages_access {
+	unsigned long next_index;
+};
+
+struct pkram_access {
+	enum pkram_data_flags dtype;
+	struct pkram_stream *ps;
+	struct pkram_data_stream pds;
+
+	struct pkram_pages_access pages;
+};
 
 #define PKRAM_NAME_MAX		256	/* including nul */
 
@@ -41,8 +66,19 @@ int pkram_prepare_load_obj(struct pkram_stream *ps);
 void pkram_finish_load(struct pkram_stream *ps);
 void pkram_finish_load_obj(struct pkram_stream *ps);
 
+#define PKRAM_PDS_INIT(name, stream, type) {			\
+	.head_link_pfnp=(stream)->type##_head_link_pfnp,	\
+	.tail_link_pfnp=(stream)->type##_tail_link_pfnp,	\
+	}
+
+#define PKRAM_ACCESS_INIT(name, stream, type) {			\
+	.dtype = PKRAM_DATA_##type,				\
+	.ps = (stream),						\
+	.pds = PKRAM_PDS_INIT(name, stream, type),		\
+	}
+
 #define PKRAM_ACCESS(name, stream, type)			\
-	struct pkram_access name
+	struct pkram_access name = PKRAM_ACCESS_INIT(name, stream, type)
 
 void pkram_finish_access(struct pkram_access *pa, bool status_ok);
 
