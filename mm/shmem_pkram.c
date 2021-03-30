@@ -225,7 +225,7 @@ out:
 	return err;
 }
 
-static int load_file_content(struct pkram_stream *ps, struct address_space *mapping)
+static int load_file_content(struct pkram_stream *ps, struct address_space *mapping, struct mm_struct *mm)
 {
 	PKRAM_ACCESS(pa, ps, pages);
 	unsigned long index;
@@ -237,7 +237,7 @@ static int load_file_content(struct pkram_stream *ps, struct address_space *mapp
 		if (!page)
 			break;
 
-		err = shmem_insert_page(current->mm, mapping->host, index, page);
+		err = shmem_insert_page(mm, mapping->host, index, page);
 		put_page(page);
 		cond_resched();
 	} while (!err);
@@ -291,7 +291,7 @@ static int load_file(struct dentry *parent, struct pkram_stream *ps,
 	inode->i_ctime = ns_to_timespec64(hdr.ctime);
 	i_size_write(inode, hdr.size);
 
-	err = load_file_content(ps, inode->i_mapping);
+	err = load_file_content(ps, inode->i_mapping, current->mm);
 out_unlock:
 	inode_unlock(d_inode(parent));
 out:
