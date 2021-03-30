@@ -103,6 +103,9 @@ struct pkram_super_block {
 static unsigned long pkram_sb_pfn __initdata;
 static struct pkram_super_block *pkram_sb;
 
+extern int pkram_add_identity_map(struct page *page);
+extern void pkram_remove_identity_map(struct page *page);
+
 /*
  * For convenience sake PKRAM nodes are kept in an auxiliary doubly-linked list
  * connected through the lru field of the page struct.
@@ -121,11 +124,24 @@ early_param("pkram", parse_pkram_sb_pfn);
 
 static inline struct page *pkram_alloc_page(gfp_t gfp_mask)
 {
-	return alloc_page(gfp_mask);
+	struct page *page;
+	int err;
+
+	page = alloc_page(gfp_mask);
+	if (page) {
+		err = pkram_add_identity_map(page);
+		if (err) {
+			__free_page(page);
+			page = NULL;
+		}
+	}
+
+	return page;
 }
 
 static inline void pkram_free_page(void *addr)
 {
+	pkram_remove_identity_map(virt_to_page(addr));
 	free_page((unsigned long)addr);
 }
 
@@ -163,6 +179,7 @@ static void pkram_truncate_link(struct pkram_link *link)
 		if (!p)
 			continue;
 		page = pfn_to_page(PHYS_PFN(p));
+		pkram_remove_identity_map(page);
 		put_page(page);
 	}
 }
@@ -615,10 +632,15 @@ static int __pkram_save_page(struct pkram_access *pa, struct page *page,
 int pkram_save_file_page(struct pkram_access *pa, struct page *page)
 {
 	struct pkram_node *node = pa->ps->node;
+	int err;
 
 	BUG_ON((node->flags & PKRAM_ACCMODE_MASK) != PKRAM_SAVE);
 
-	return __pkram_save_page(pa, page, page->index);
+	err = __pkram_save_page(pa, page, page->index);
+	if (!err)
+		err = pkram_add_identity_map(page);
+
+	return err;
 }
 
 static int __pkram_bytes_save_page(struct pkram_access *pa, struct page *page)
@@ -651,6 +673,8 @@ static struct page *__pkram_prep_load_page(pkram_entry_t p)
 		prep_compound_page(page, order);
 		prep_transhuge_page(page);
 	}
+
+	pkram_remove_identity_map(page);
 
 	return page;
 }
@@ -898,7 +922,7 @@ static int __init pkram_init_sb(void)
 	if (!pkram_sb) {
 		struct page *page;
 
-		page = pkram_alloc_page(GFP_KERNEL | __GFP_ZERO);
+		page = alloc_page(GFP_KERNEL | __GFP_ZERO);
 		if (!page) {
 			pr_err("PKRAM: Failed to allocate super block\n");
 			return 0;
