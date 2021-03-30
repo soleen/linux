@@ -1434,3 +1434,23 @@ int __init pkram_merge_with_reserved(void)
 
 	return 0;
 }
+
+void __init pkram_cleanup(void)
+{
+	struct pkram_region_list *rl;
+	unsigned long next_pfn;
+
+	if (!pkram_sb || !pkram_reserved_pages)
+		return;
+
+	next_pfn = pkram_sb->region_list_pfn;
+
+	while (next_pfn) {
+		struct page *page = pfn_to_page(next_pfn);
+
+		rl = pfn_to_kaddr(next_pfn);
+		next_pfn = rl->next_pfn;
+		__free_pages_core(page, 0);
+		pkram_reserved_pages--;
+	}
+}

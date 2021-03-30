@@ -102,9 +102,11 @@ size_t pkram_read(struct pkram_access *pa, void *buf, size_t count);
 #ifdef CONFIG_PKRAM
 extern unsigned long pkram_reserved_pages;
 void pkram_reserve(void);
+void pkram_cleanup(void);
 #else
 #define pkram_reserved_pages 0UL
 static inline void pkram_reserve(void) { }
+static inline void pkram_cleanup(void) { }
 #endif
 
 #endif /* _LINUX_PKRAM_H */
