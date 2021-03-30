@@ -845,6 +845,7 @@ int shmem_insert_pages(struct mm_struct *charge_mm, struct inode *inode,
 	struct shmem_inode_info *info = SHMEM_I(inode);
 	struct shmem_sb_info *sbinfo = SHMEM_SB(inode->i_sb);
 	gfp_t gfp = mapping_gfp_mask(mapping);
+	LRU_SPLICE(splice);
 	int i, err;
 	int nr = 0;
 
@@ -908,7 +909,7 @@ retry:
 
 	for (i = 0; i < npages; i++) {
 		if (!PageLRU(pages[i]))
-			lru_cache_add(pages[i]);
+			lru_splice_add(pages[i], &splice);
 
 		flush_dcache_page(pages[i]);
 		SetPageUptodate(pages[i]);
@@ -916,6 +917,8 @@ retry:
 
 		unlock_page(pages[i]);
 	}
+
+	add_splice_to_lru_list(&splice);
 
 	return 0;
 
