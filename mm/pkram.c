@@ -1668,3 +1668,23 @@ void __init pkram_cleanup(void)
 		pkram_reserved_pages--;
 	}
 }
+
+static int has_preserved_pages_cb(unsigned long base, unsigned long size, void *private)
+{
+	int *has_preserved = (int *)private;
+
+	*has_preserved = 1;
+	return 1;
+}
+
+/*
+ * Check whether the memory range [start, end) contains preserved pages.
+ */
+int pkram_has_preserved_pages(unsigned long start, unsigned long end)
+{
+	int has_preserved = 0;
+
+	pkram_find_preserved(start, end, &has_preserved, has_preserved_pages_cb);
+
+	return has_preserved;
+}
