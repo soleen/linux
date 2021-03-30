@@ -2007,11 +2007,18 @@ static unsigned long __init free_low_memory_core_early(void)
 	unsigned long count = 0;
 	phys_addr_t start, end;
 	u64 i;
+	struct memblock_region *r;
 
 	memblock_clear_hotplug(0, -1);
 
-	for_each_reserved_mem_range(i, &start, &end)
-		reserve_bootmem_region(start, end);
+	for_each_reserved_mem_region(r) {
+		if (IS_ENABLED(CONFIG_DEFERRED_STRUCT_PAGE_INIT) && memblock_is_preserved(r))
+			continue;
+
+		start = r->base;
+		end = r->base + r->size;
+		reserve_bootmem_region(start, end, NUMA_NO_NODE);
+	}
 
 	/*
 	 * We need to use NUMA_NO_NODE instead of NODE_DATA(0)->node_id
