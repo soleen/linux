@@ -135,6 +135,8 @@ extern void pkram_find_preserved(unsigned long start, unsigned long end, void *p
 static LIST_HEAD(pkram_nodes);			/* linked through page::lru */
 static DEFINE_MUTEX(pkram_mutex);		/* serializes open/close */
 
+unsigned long __initdata pkram_reserved_pages;
+
 /*
  * The PKRAM super block pfn, see above.
  */
@@ -143,6 +145,59 @@ static int __init parse_pkram_sb_pfn(char *arg)
 	return kstrtoul(arg, 16, &pkram_sb_pfn);
 }
 early_param("pkram", parse_pkram_sb_pfn);
+
+static void * __init pkram_map_meta(unsigned long pfn)
+{
+	if (pfn >= max_low_pfn)
+		return ERR_PTR(-EINVAL);
+	return pfn_to_kaddr(pfn);
+}
+
+int pkram_merge_with_reserved(void);
+/*
+ * Reserve pages that belong to preserved memory.
+ *
+ * This function should be called at boot time as early as possible to prevent
+ * preserved memory from being recycled.
+ */
+void __init pkram_reserve(void)
+{
+	int err = 0;
+
+	if (!pkram_sb_pfn)
+		return;
+
+	pr_info("PKRAM: Examining preserved memory...\n");
+
+	/* Verify that nothing else has reserved the pkram_sb page */
+	if (memblock_is_region_reserved(PFN_PHYS(pkram_sb_pfn), PAGE_SIZE)) {
+		err = -EBUSY;
+		goto out;
+	}
+
+	pkram_sb = pkram_map_meta(pkram_sb_pfn);
+	if (IS_ERR(pkram_sb)) {
+		err = PTR_ERR(pkram_sb);
+		goto out;
+	}
+	/* An empty pkram_sb is not an error */
+	if (!pkram_sb->node_pfn) {
+		pkram_sb = NULL;
+		goto done;
+	}
+
+	err = pkram_merge_with_reserved();
+out:
+	if (err) {
+		pr_err("PKRAM: Reservation failed: %d\n", err);
+		WARN_ON(pkram_reserved_pages > 0);
+		pkram_sb = NULL;
+		return;
+	}
+
+done:
+	pr_info("PKRAM: %lu pages reserved\n", pkram_reserved_pages);
+}
 
 static inline struct page *pkram_alloc_page(gfp_t gfp_mask)
 {
@@ -163,6 +218,11 @@ static inline struct page *pkram_alloc_page(gfp_t gfp_mask)
 
 static inline void pkram_free_page(void *addr)
 {
+	/*
+	 * The page may have the reserved bit set since preserved pages
+	 * are reserved early in boot.
+	 */
+	ClearPageReserved(virt_to_page(addr));
 	pkram_remove_identity_map(virt_to_page(addr));
 	free_page((unsigned long)addr);
 }
@@ -201,6 +261,11 @@ static void pkram_truncate_link(struct pkram_link *link)
 		if (!p)
 			continue;
 		page = pfn_to_page(PHYS_PFN(p));
+		/*
+		 * The page may have the reserved bit set since preserved pages
+		 * are reserved early in boot.
+		 */
+		ClearPageReserved(page);
 		pkram_remove_identity_map(page);
 		put_page(page);
 	}
@@ -684,14 +749,20 @@ static int __pkram_bytes_save_page(struct pkram_access *pa, struct page *page)
 static struct page *__pkram_prep_load_page(pkram_entry_t p)
 {
 	struct page *page;
-	int order;
+	int i, order;
 	short flags;
 
 	flags = (p >> PKRAM_ENTRY_FLAGS_SHIFT) & PKRAM_ENTRY_FLAGS_MASK;
+	order = p & PKRAM_ENTRY_ORDER_MASK;
 	page = pfn_to_page(PHYS_PFN(p));
 
+	for (i = 0; i < (1 << order); i++) {
+		struct page *pg = page + i;
+
+		ClearPageReserved(pg);
+	}
+
 	if (flags & PKRAM_PAGE_TRANS_HUGE) {
-		order = p & PKRAM_ENTRY_ORDER_MASK;
 		prep_compound_page(page, order);
 		prep_transhuge_page(page);
 	}
@@ -1311,6 +1382,7 @@ int __init pkram_create_merged_reserved(struct memblock_type *new)
 	}
 
 	WARN_ON(cnt_a + cnt_b != k);
+	pkram_reserved_pages = nr_preserved;
 	new->cnt = cnt_a + cnt_b;
 	new->total_size = total_size;
 
