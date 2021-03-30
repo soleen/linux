@@ -328,20 +328,31 @@ static inline void pkram_load_report_one_done(void)
 static int do_load_file_content(struct pkram_stream *ps, struct address_space *mapping, struct mm_struct *mm)
 {
 	PKRAM_ACCESS(pa, ps, pages);
+	struct page **pages;
+	unsigned int nr_pages;
 	unsigned long index;
-	struct page *page;
-	int err = 0;
+	int i, err;
+
+	pages = kzalloc(PKRAM_PAGES_BUFSIZE, GFP_KERNEL);
+	if (!pages)
+		return -ENOMEM;
 
 	do {
-		page = pkram_load_file_page(&pa, &index);
-		if (!page)
+		err = pkram_load_file_pages(&pa, pages, &nr_pages, &index);
+		if (err) {
+			if (err == -ENODATA)
+				err = 0;
 			break;
+		}
 
-		err = shmem_insert_page(mm, mapping->host, index, page);
-		put_page(page);
+		err = shmem_insert_pages(mm, mapping->host, index, pages, nr_pages);
+
+		for (i = 0; i < nr_pages; i++)
+			put_page(pages[i]);
 		cond_resched();
 	} while (!err);
 
+	kfree(pages);
 	pkram_finish_access(&pa, err == 0);
 	return err;
 }
