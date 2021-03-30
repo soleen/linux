@@ -444,6 +444,14 @@ called each time the XArray updates a node.  This is used by the page
 cache workingset code to maintain its list of nodes which contain only
 shadow entries.
 
+xas_export_node() is used to remove and return a node from an XArray
+while xas_import_node() is used to add a node to an XArray.  Together
+these can be used, for example, to reduce lock contention when multiple
+threads are updating an XArray by allowing a caller to allocate and
+populate a node outside of the target XArray in a local XArray, export
+the node, and then take the target XArray lock just long enough to import
+the node.
+
 Multi-Index Entries
 -------------------
 

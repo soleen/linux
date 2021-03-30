@@ -1767,6 +1767,50 @@ static noinline void check_destroy(struct xarray *xa)
 #endif
 }
 
+static noinline void check_export_import_1(struct xarray *xa,
+		unsigned long index, unsigned int order)
+{
+	int xa_shift = order + XA_CHUNK_SHIFT - (order % XA_CHUNK_SHIFT);
+	XA_STATE(xas, xa, index);
+	struct xa_node *node;
+	unsigned long i;
+
+	xa_store_many_order(xa, index, xa_shift);
+
+	xas_lock(&xas);
+	xas_set_order(&xas, index, xa_shift);
+	node = xas_export_node(&xas);
+	xas_unlock(&xas);
+
+	XA_BUG_ON(xa, !xa_empty(xa));
+
+	do {
+		xas_lock(&xas);
+		xas_set_order(&xas, index, xa_shift);
+		xas_import_node(&xas, node);
+		xas_unlock(&xas);
+	} while (xas_nomem(&xas, GFP_KERNEL));
+
+	for (i = index; i < index + (1UL << xa_shift); i++)
+		xa_erase_index(xa, i);
+
+	XA_BUG_ON(xa, !xa_empty(xa));
+}
+
+static noinline void check_export_import(struct xarray *xa)
+{
+	unsigned int order;
+	unsigned int max_order = IS_ENABLED(CONFIG_XARRAY_MULTI) ? 12 : 1;
+
+	for (order = 0; order < max_order; order += XA_CHUNK_SHIFT) {
+		int xa_shift = order + XA_CHUNK_SHIFT;
+		unsigned long j;
+
+		for (j = 0; j < XA_CHUNK_SIZE; j++)
+			check_export_import_1(xa, j << xa_shift, order);
+	}
+}
+
 static DEFINE_XARRAY(array);
 
 static int xarray_checks(void)
@@ -1799,6 +1843,7 @@ static int xarray_checks(void)
 	check_workingset(&array, 0);
 	check_workingset(&array, 64);
 	check_workingset(&array, 4096);
+	check_export_import(&array);
 
 	printk("XArray: %u of %u tests passed\n", tests_passed, tests_run);
 	return (tests_run == tests_passed) ? 0 : -EINVAL;

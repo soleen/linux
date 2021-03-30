@@ -510,6 +510,30 @@ static void xas_delete_node(struct xa_state *xas)
 		xas_shrink(xas);
 }
 
+static void xas_unlink_node(struct xa_state *xas)
+{
+	struct xa_node *node = xas->xa_node;
+	struct xa_node *parent;
+
+	parent = xa_parent_locked(xas->xa, node);
+	xas->xa_node = parent;
+	xas->xa_offset = node->offset;
+
+	if (!parent) {
+		xas->xa->xa_head = NULL;
+		xas->xa_node = XAS_BOUNDS;
+		return;
+	}
+
+	parent->slots[xas->xa_offset] = NULL;
+	parent->count--;
+	XA_NODE_BUG_ON(parent, parent->count > XA_CHUNK_SIZE);
+
+	xas_update(xas, parent);
+
+	xas_delete_node(xas);
+}
+
 /**
  * xas_free_nodes() - Free this node and all nodes that it references
  * @xas: Array operation state.
@@ -1688,6 +1712,82 @@ static void xas_set_range(struct xa_state *xas, unsigned long first,
 
 	xas->xa_shift = shift;
 	xas->xa_sibs = sibs;
+}
+
+/**
+ * xas_export_node() - remove and return a node from an XArray
+ * @xas: XArray operation state
+ *
+ * The range covered by @xas must be aligned to and cover a single node
+ * at any level of the tree.
+ *
+ * Return: On success, returns the removed node.  If the range is invalid,
+ * returns %NULL and sets -EINVAL in @xas.  Otherwise returns %NULL if the
+ * node does not exist.
+ */
+struct xa_node *xas_export_node(struct xa_state *xas)
+{
+	struct xa_node *node;
+
+	if (!xas->xa_shift || xas->xa_sibs) {
+		xas_set_err(xas, -EINVAL);
+		return NULL;
+	}
+
+	xas->xa_shift -= XA_CHUNK_SHIFT;
+
+	if (!xas_find(xas, xas->xa_index))
+		return NULL;
+	node = xas->xa_node;
+	xas_unlink_node(xas);
+	node->parent = NULL;
+
+	return node;
+}
+
+/**
+ * xas_import_node() - add a node to an XArray
+ * @xas: XArray operation state
+ * @node: The node to add
+ *
+ * The range covered by @xas must be aligned to and cover a single node
+ * at any level of the tree.  No nodes should already exist within the
+ * range.
+ * Sets an error in @xas if the range is invalid or xas_create() fails
+ */
+void xas_import_node(struct xa_state *xas, struct xa_node *node)
+{
+	struct xa_node *parent = NULL;
+	void __rcu **slot = &xas->xa->xa_head;
+	int count = 0;
+
+	if (!xas->xa_shift || xas->xa_sibs) {
+		xas_set_err(xas, -EINVAL);
+		return;
+	}
+
+	if (xas->xa_index || xa_head_locked(xas->xa)) {
+		xas_set_order(xas, xas->xa_index, node->shift + XA_CHUNK_SHIFT);
+		xas_create(xas, true);
+
+		if (xas_invalid(xas))
+			return;
+
+		parent = xas->xa_node;
+	}
+
+	if (parent) {
+		slot = &parent->slots[xas->xa_offset];
+		node->offset = xas->xa_offset;
+		count++;
+	}
+
+	RCU_INIT_POINTER(node->parent, parent);
+	node->array = xas->xa;
+
+	rcu_assign_pointer(*slot, xa_mk_node(node));
+
+	update_node(xas, parent, count, 0);
 }
 
 /**

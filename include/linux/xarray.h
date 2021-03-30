@@ -1508,6 +1508,8 @@ bool xas_nomem(struct xa_state *, gfp_t);
 void xas_pause(struct xa_state *);
 
 void xas_create_range(struct xa_state *);
+struct xa_node *xas_export_node(struct xa_state *xas);
+void xas_import_node(struct xa_state *xas, struct xa_node *node);
 
 #ifdef CONFIG_XARRAY_MULTI
 int xa_get_order(struct xarray *, unsigned long index);
