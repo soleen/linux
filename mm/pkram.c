@@ -21,6 +21,7 @@
 #include <linux/sysfs.h>
 #include <linux/types.h>
 
+#include <asm/numa.h>
 #include "internal.h"
 
 #define PKRAM_MAGIC		0x706B726D
@@ -226,6 +227,14 @@ out:
 		return;
 	}
 
+	/*
+	 * Fix up the reserved memblock list to ensure the
+	 * memblock regions are split along node boundaries
+	 * and have a node ID set.  This will allow the page
+	 * structs for the preserved pages to be initialized
+	 * more efficiently.
+	 */
+	numa_isolate_memblocks();
 done:
 	pr_info("PKRAM: %lu pages reserved\n", pkram_reserved_pages);
 }
