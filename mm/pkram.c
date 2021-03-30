@@ -22,6 +22,7 @@
 
 #include "internal.h"
 
+#define PKRAM_MAGIC		0x706B726D
 
 /*
  * Represents a reference to a data page saved to PKRAM.
@@ -112,6 +113,8 @@ struct pkram_region_list {
  * The structure occupies a memory page.
  */
 struct pkram_super_block {
+	__u32	magic;
+
 	__u64	node_pfn;		/* first element of the node list */
 	__u64	region_list_pfn;
 	__u64	nr_regions;
@@ -178,6 +181,11 @@ void __init pkram_reserve(void)
 	pkram_sb = pkram_map_meta(pkram_sb_pfn);
 	if (IS_ERR(pkram_sb)) {
 		err = PTR_ERR(pkram_sb);
+		goto out;
+	}
+	if (pkram_sb->magic != PKRAM_MAGIC) {
+		pr_err("PKRAM: invalid super block\n");
+		err = -EINVAL;
 		goto out;
 	}
 	/* An empty pkram_sb is not an error */
@@ -993,6 +1001,7 @@ done:
 	 */
 	memset(pkram_sb, 0, PAGE_SIZE);
 	if (!err && node_pfn) {
+		pkram_sb->magic = PKRAM_MAGIC;
 		pkram_sb->node_pfn = node_pfn;
 		pkram_sb->region_list_pfn = rl_pfn;
 		pkram_sb->nr_regions = nr_regions;
