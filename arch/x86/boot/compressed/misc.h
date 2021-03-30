@@ -116,6 +116,16 @@ static inline void console_init(void)
 { }
 #endif
 
+#ifdef CONFIG_PKRAM
+void pkram_init(void);
+int pkram_has_overlap(struct mem_vector *entry, struct mem_vector *overlap);
+#else
+static inline void pkram_init(void) { }
+static inline int pkram_has_overlap(struct mem_vector *entry,
+				    struct mem_vector *overlap);
+{ return 0; }
+#endif
+
 void set_sev_encryption_mask(void);
 
 #ifdef CONFIG_AMD_MEM_ENCRYPT

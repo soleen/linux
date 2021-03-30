@@ -440,6 +440,7 @@ static bool mem_avoid_overlap(struct mem_vector *img,
 	struct setup_data *ptr;
 	u64 earliest = img->start + img->size;
 	bool is_overlapping = false;
+	struct mem_vector avoid;
 
 	for (i = 0; i < MEM_AVOID_MAX; i++) {
 		if (mem_overlaps(img, &mem_avoid[i]) &&
@@ -453,8 +454,6 @@ static bool mem_avoid_overlap(struct mem_vector *img,
 	/* Avoid all entries in the setup_data linked list. */
 	ptr = (struct setup_data *)(unsigned long)boot_params->hdr.setup_data;
 	while (ptr) {
-		struct mem_vector avoid;
-
 		avoid.start = (unsigned long)ptr;
 		avoid.size = sizeof(*ptr) + ptr->len;
 
@@ -477,6 +476,12 @@ static bool mem_avoid_overlap(struct mem_vector *img,
 		}
 
 		ptr = (struct setup_data *)(unsigned long)ptr->next;
+	}
+
+	if (pkram_has_overlap(img, &avoid) && (avoid.start < earliest)) {
+		*overlap = avoid;
+		earliest = overlap->start;
+		is_overlapping = true;
 	}
 
 	return is_overlapping;
@@ -840,6 +845,7 @@ void choose_random_location(unsigned long input,
 		return;
 	}
 
+	pkram_init();
 	boot_params->hdr.loadflags |= KASLR_FLAG;
 
 	if (IS_ENABLED(CONFIG_X86_32))
