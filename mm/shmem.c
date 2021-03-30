@@ -111,16 +111,20 @@ struct shmem_options {
 	unsigned long long blocks;
 	unsigned long long inodes;
 	struct mempolicy *mpol;
+	struct shmem_pkram_info *pkram;
 	kuid_t uid;
 	kgid_t gid;
 	umode_t mode;
 	bool full_inums;
+	bool preserve;
 	int huge;
 	int seen;
 #define SHMEM_SEEN_BLOCKS 1
 #define SHMEM_SEEN_INODES 2
 #define SHMEM_SEEN_HUGE 4
 #define SHMEM_SEEN_INUMS 8
+#define SHMEM_SEEN_PKRAM 16
+#define SHMEM_SEEN_PRESERVE 32
 };
 
 #ifdef CONFIG_TMPFS
@@ -3440,6 +3444,8 @@ enum shmem_param {
 	Opt_uid,
 	Opt_inode32,
 	Opt_inode64,
+	Opt_pkram,
+	Opt_preserve,
 };
 
 static const struct constant_table shmem_param_enums_huge[] = {
@@ -3461,6 +3467,8 @@ const struct fs_parameter_spec shmem_fs_parameters[] = {
 	fsparam_u32   ("uid",		Opt_uid),
 	fsparam_flag  ("inode32",	Opt_inode32),
 	fsparam_flag  ("inode64",	Opt_inode64),
+	fsparam_string("pkram",		Opt_pkram),
+	fsparam_flag_no("preserve",	Opt_preserve),
 	{}
 };
 
@@ -3544,6 +3552,22 @@ static int shmem_parse_one(struct fs_context *fc, struct fs_parameter *param)
 		ctx->full_inums = true;
 		ctx->seen |= SHMEM_SEEN_INUMS;
 		break;
+	case Opt_pkram:
+		if (IS_ENABLED(CONFIG_PKRAM)) {
+			kfree(ctx->pkram);
+			if (shmem_parse_pkram(param->string, &ctx->pkram))
+				goto bad_value;
+			ctx->seen |= SHMEM_SEEN_PKRAM;
+			break;
+		}
+		goto unsupported_parameter;
+	case Opt_preserve:
+		if (IS_ENABLED(CONFIG_PKRAM)) {
+			ctx->preserve = result.boolean;
+			ctx->seen |= SHMEM_SEEN_PRESERVE;
+			break;
+		}
+		goto unsupported_parameter;
 	}
 	return 0;
 
@@ -3640,6 +3664,41 @@ static int shmem_reconfigure(struct fs_context *fc)
 		err = "Current inum too high to switch to 32-bit inums";
 		goto out;
 	}
+	if (ctx->seen & SHMEM_SEEN_PRESERVE) {
+		if (!sbinfo->pkram && !(ctx->seen & SHMEM_SEEN_PKRAM)) {
+			err = "Cannot set preserve/nopreserve. Not enabled for PKRAM";
+			goto out;
+		}
+		if (ctx->preserve && !(fc->sb_flags & SB_RDONLY)) {
+			err = "Cannot preserve. Filesystem must be read-only";
+			goto out;
+		}
+	}
+
+	if (ctx->pkram) {
+		kfree(sbinfo->pkram);
+		sbinfo->pkram = ctx->pkram;
+	}
+
+	if (ctx->seen & SHMEM_SEEN_PRESERVE) {
+		int error;
+
+		if (!sbinfo->preserve && ctx->preserve) {
+			error = shmem_save_pkram(fc->root->d_sb);
+			if (error) {
+				err = "Failed to preserve";
+				goto out;
+			}
+			sbinfo->preserve = true;
+		} else if (sbinfo->preserve && !ctx->preserve) {
+			error = shmem_release_pkram(fc->root->d_sb);
+			if (error) {
+				err = "Failed to unpreserve";
+				goto out;
+			}
+			sbinfo->preserve = false;
+		}
+	}
 
 	if (ctx->seen & SHMEM_SEEN_HUGE)
 		sbinfo->huge = ctx->huge;
@@ -3713,6 +3772,7 @@ static int shmem_show_options(struct seq_file *seq, struct dentry *root)
 		seq_printf(seq, ",huge=%s", shmem_format_huge(sbinfo->huge));
 #endif
 	shmem_show_mpol(seq, sbinfo->mpol);
+	shmem_show_pkram(seq, sbinfo->pkram, sbinfo->preserve);
 	return 0;
 }
 
@@ -3725,6 +3785,7 @@ static void shmem_put_super(struct super_block *sb)
 	free_percpu(sbinfo->ino_batch);
 	percpu_counter_destroy(&sbinfo->used_blocks);
 	mpol_put(sbinfo->mpol);
+	kfree(sbinfo->pkram);
 	kfree(sbinfo);
 	sb->s_fs_info = NULL;
 }
@@ -3779,6 +3840,8 @@ static int shmem_fill_super(struct super_block *sb, struct fs_context *fc)
 	sbinfo->huge = ctx->huge;
 	sbinfo->mpol = ctx->mpol;
 	ctx->mpol = NULL;
+	sbinfo->pkram = ctx->pkram;
+	ctx->pkram = NULL;
 
 	spin_lock_init(&sbinfo->stat_lock);
 	if (percpu_counter_init(&sbinfo->used_blocks, 0, GFP_KERNEL))
@@ -3808,6 +3871,7 @@ static int shmem_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_root = d_make_root(inode);
 	if (!sb->s_root)
 		goto failed;
+	shmem_load_pkram(sb);
 	return 0;
 
 failed:

@@ -26,6 +26,11 @@ struct shmem_inode_info {
 	struct inode		vfs_inode;
 };
 
+#define SHMEM_PKRAM_NAME_MAX	128
+struct shmem_pkram_info {
+	char name[SHMEM_PKRAM_NAME_MAX];
+};
+
 struct shmem_sb_info {
 	unsigned long max_blocks;   /* How many blocks are allowed */
 	struct percpu_counter used_blocks;  /* How many are allocated */
@@ -43,6 +48,8 @@ struct shmem_sb_info {
 	spinlock_t shrinklist_lock;   /* Protects shrinklist */
 	struct list_head shrinklist;  /* List of shinkable inodes */
 	unsigned long shrinklist_len; /* Length of shrinklist */
+	struct shmem_pkram_info *pkram;
+	bool preserve;		    /* PKRAM-enabled data is preserved */
 };
 
 static inline struct shmem_inode_info *SHMEM_I(struct inode *inode)
@@ -105,6 +112,23 @@ extern int shmem_getpage(struct inode *inode, pgoff_t index,
 
 extern int shmem_insert_page(struct mm_struct *mm, struct inode *inode,
 		pgoff_t index, struct page *page);
+
+#ifdef CONFIG_PKRAM
+extern int shmem_parse_pkram(const char *str, struct shmem_pkram_info **pkram);
+extern void shmem_show_pkram(struct seq_file *seq, struct shmem_pkram_info *pkram,
+			bool preserve);
+extern int shmem_save_pkram(struct super_block *sb);
+extern void shmem_load_pkram(struct super_block *sb);
+extern int shmem_release_pkram(struct super_block *sb);
+#else
+static inline int shmem_parse_pkram(const char *str,
+			struct shmem_pkram_info **pkram) { return 1; }
+static inline void shmem_show_pkram(struct seq_file *seq,
+			struct shmem_pkram_info *pkram, bool preserve) { }
+static inline int shmem_save_pkram(struct super_block *sb) { return 0; }
+static inline void shmem_load_pkram(struct super_block *sb) { }
+static inline int shmem_release_pkram(struct super_block *sb) { return 0; }
+#endif
 
 static inline struct page *shmem_read_mapping_page(
 				struct address_space *mapping, pgoff_t index)
