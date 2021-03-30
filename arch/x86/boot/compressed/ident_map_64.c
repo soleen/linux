@@ -95,8 +95,8 @@ static void add_identity_map(unsigned long start, unsigned long end)
 	int ret;
 
 	/* Align boundary to 2M. */
-	start = round_down(start, PMD_SIZE);
-	end = round_up(end, PMD_SIZE);
+	start = round_down(start, PUD_SIZE);
+	end = round_up(end, PUD_SIZE);
 	if (start >= end)
 		return;
 
@@ -119,6 +119,7 @@ void initialize_identity_maps(void *rmode)
 	mapping_info.context = &pgt_data;
 	mapping_info.page_flag = __PAGE_KERNEL_LARGE_EXEC | sme_me_mask;
 	mapping_info.kernpg_flag = _KERNPG_TABLE;
+	mapping_info.direct_gbpages = true;
 
 	/*
 	 * It should be impossible for this not to already be true,
@@ -329,8 +330,8 @@ void do_boot_page_fault(struct pt_regs *regs, unsigned long error_code)
 
 	ghcb_fault = sev_es_check_ghcb_fault(address);
 
-	address   &= PMD_MASK;
-	end        = address + PMD_SIZE;
+	address   &= PUD_MASK;
+	end        = address + PUD_SIZE;
 
 	/*
 	 * Check for unexpected error codes. Unexpected are:
