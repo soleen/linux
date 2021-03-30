@@ -2386,6 +2386,8 @@ static struct inode *shmem_get_inode(struct super_block *sb, const struct inode 
 		INIT_LIST_HEAD(&info->swaplist);
 		simple_xattrs_init(&info->xattrs);
 		cache_no_acl(inode);
+		if (sbinfo->pkram)
+			mapping_set_unevictable(inode->i_mapping);
 
 		switch (mode & S_IFMT) {
 		default:
