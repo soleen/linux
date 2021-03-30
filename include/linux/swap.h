@@ -367,6 +367,19 @@ extern void swap_setup(void);
 
 extern void lru_cache_add_inactive_or_unevictable(struct page *page,
 						struct vm_area_struct *vma);
+struct lru_splice {
+	struct list_head	splice;
+	struct list_head	*lru_head;
+	struct lruvec		*lruvec;
+	enum lru_list		lru;
+	unsigned long		nr_pages[MAX_NR_ZONES];
+	unsigned long		pgculled;
+};
+#define LRU_SPLICE_INIT(name)	{ .splice = LIST_HEAD_INIT(name.splice) }
+#define LRU_SPLICE(name) \
+	struct lru_splice name = LRU_SPLICE_INIT(name)
+extern void lru_splice_add(struct page *page, struct lru_splice *splice);
+extern void add_splice_to_lru_list(struct lru_splice *splice);
 
 /* linux/mm/vmscan.c */
 extern unsigned long zone_reclaimable_pages(struct zone *zone);

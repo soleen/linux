@@ -201,6 +201,92 @@ int get_kernel_page(unsigned long start, int write, struct page **pages)
 }
 EXPORT_SYMBOL_GPL(get_kernel_page);
 
+/*
+ * Update stats and move accumulated pages from an lru_splice to the lru.
+ */
+void add_splice_to_lru_list(struct lru_splice *splice)
+{
+	struct lruvec *lruvec = splice->lruvec;
+	enum lru_list lru = splice->lru;
+	unsigned long flags = 0;
+	int zid;
+
+	if (list_empty(&splice->splice))
+		return;
+
+	spin_lock_irqsave(&lruvec->lru_lock, flags);
+	for (zid = 0; zid < MAX_NR_ZONES; zid++) {
+		if (splice->nr_pages[zid])
+			update_lru_size(lruvec, lru, zid, splice->nr_pages[zid]);
+	}
+	count_vm_events(UNEVICTABLE_PGCULLED, splice->pgculled);
+	list_splice_init(&splice->splice, splice->lru_head);
+	spin_unlock_irqrestore(&lruvec->lru_lock, flags);
+}
+
+static void add_page_to_lru_splice(struct page *page, struct lru_splice *splice,
+				   struct lruvec *lruvec, enum lru_list lru)
+{
+	if (list_empty(&splice->splice)) {
+		int zid;
+
+		splice->lruvec = lruvec;
+		splice->lru_head = &lruvec->lists[lru];
+		splice->lru = lru;
+		for (zid = 0; zid < MAX_NR_ZONES; zid++)
+			splice->nr_pages[zid] = 0;
+		splice->pgculled = 0;
+	}
+
+	BUG_ON(splice->lruvec != lruvec);
+	BUG_ON(splice->lru_head != &lruvec->lists[lru]);
+
+	list_add(&page->lru, &splice->splice);
+	splice->nr_pages[page_zonenum(page)] += thp_nr_pages(page);
+}
+
+/*
+ * Similar in functionality to __pagevec_lru_add_fn() but here the page is
+ * being added to an lru_splice and the LRU lock is not held.
+ */
+static void page_lru_splice_add(struct page *page, struct lru_splice *splice, struct lruvec *lruvec)
+{
+	enum lru_list lru;
+	int was_unevictable = TestClearPageUnevictable(page);
+	int nr_pages = thp_nr_pages(page);
+
+	VM_BUG_ON_PAGE(PageLRU(page), page);
+	/* XXX only supports unevictable pages at the moment */
+	VM_BUG_ON_PAGE(was_unevictable, page);
+
+	SetPageLRU(page);
+	smp_mb__after_atomic();
+
+	lru = LRU_UNEVICTABLE;
+	ClearPageActive(page);
+	SetPageUnevictable(page);
+	if (!was_unevictable)
+		splice->pgculled += nr_pages;
+
+	add_page_to_lru_splice(page, splice, lruvec, lru);
+	trace_mm_lru_insertion(page);
+}
+
+void lru_splice_add(struct page *page, struct lru_splice *splice)
+{
+	struct lruvec *lruvec;
+
+	VM_BUG_ON_PAGE(PageActive(page) && PageUnevictable(page), page);
+	VM_BUG_ON_PAGE(PageLRU(page), page);
+
+	get_page(page);
+	lruvec = mem_cgroup_page_lruvec(page, page_pgdat(page));
+	if (lruvec != splice->lruvec)
+		add_splice_to_lru_list(splice);
+	page_lru_splice_add(page, splice, lruvec);
+	put_page(page);
+}
+
 static void pagevec_lru_move_fn(struct pagevec *pvec,
 	void (*move_fn)(struct page *page, struct lruvec *lruvec))
 {
