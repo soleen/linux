@@ -911,9 +911,20 @@ static int __pkram_save_page(struct pkram_access *pa, struct page *page,
 {
 	struct pkram_data_stream *pds = &pa->pds;
 	struct pkram_link *link = pds->link;
+	int align, align_cnt;
+
+	if (PageTransHuge(page)) {
+		align = 1 << (HPAGE_PMD_ORDER + XA_CHUNK_SHIFT - (HPAGE_PMD_ORDER % XA_CHUNK_SHIFT));
+		align_cnt = align >> HPAGE_PMD_ORDER;
+	} else {
+		align = XA_CHUNK_SIZE;
+		align_cnt = XA_CHUNK_SIZE;
+	}
 
 	if (!link || pds->entry_idx >= PKRAM_LINK_ENTRIES_MAX ||
-	    index != pa->pages.next_index) {
+	    index != pa->pages.next_index ||
+	    (IS_ALIGNED(index, align) &&
+	    (pds->entry_idx + align_cnt > PKRAM_LINK_ENTRIES_MAX))) {
 		link = pkram_new_link(pds, pa->ps->gfp_mask);
 		if (!link)
 			return -ENOMEM;
