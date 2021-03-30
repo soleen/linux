@@ -21,6 +21,9 @@ typedef __u64 pkram_entry_t;
 
 #define PKRAM_ENTRY_FLAGS_SHIFT	0x5
 #define PKRAM_ENTRY_FLAGS_MASK	0x7f
+#define PKRAM_ENTRY_ORDER_MASK	0x1f
+
+#define PKRAM_PAGE_TRANS_HUGE	0x1	/* page is a transparent hugepage */
 
 /*
  * Keeps references to data pages saved to PKRAM.
@@ -211,7 +214,11 @@ static void pkram_add_link_entry(struct pkram_data_stream *pds, struct page *pag
 	pkram_entry_t p;
 	short flags = 0;
 
+	if (PageTransHuge(page))
+		flags |= PKRAM_PAGE_TRANS_HUGE;
+
 	p = page_to_phys(page);
+	p |= compound_order(page);
 	p |= ((flags & PKRAM_ENTRY_FLAGS_MASK) << PKRAM_ENTRY_FLAGS_SHIFT);
 	link->entry[pds->entry_idx] = p;
 	pds->entry_idx++;
@@ -516,7 +523,7 @@ static int __pkram_save_page(struct pkram_access *pa, struct page *page,
 
 	pkram_add_link_entry(pds, page);
 
-	pa->pages.next_index++;
+	pa->pages.next_index += compound_nr(page);
 
 	return 0;
 }
@@ -542,18 +549,23 @@ int pkram_save_file_page(struct pkram_access *pa, struct page *page)
 
 	BUG_ON((node->flags & PKRAM_ACCMODE_MASK) != PKRAM_SAVE);
 
-	BUG_ON(PageCompound(page));
-
 	return __pkram_save_page(pa, page, page->index);
 }
 
 static struct page *__pkram_prep_load_page(pkram_entry_t p)
 {
 	struct page *page;
+	int order;
 	short flags;
 
 	flags = (p >> PKRAM_ENTRY_FLAGS_SHIFT) & PKRAM_ENTRY_FLAGS_MASK;
 	page = pfn_to_page(PHYS_PFN(p));
+
+	if (flags & PKRAM_PAGE_TRANS_HUGE) {
+		order = p & PKRAM_ENTRY_ORDER_MASK;
+		prep_compound_page(page, order);
+		prep_transhuge_page(page);
+	}
 
 	return page;
 }
@@ -588,7 +600,7 @@ static struct page *__pkram_load_page(struct pkram_access *pa, unsigned long *in
 
 	if (index) {
 		*index = pa->pages.next_index;
-		pa->pages.next_index++;
+		pa->pages.next_index += compound_nr(page);
 	}
 
 	/* clear to avoid double free (see pkram_truncate_link()) */
