@@ -14,10 +14,12 @@ struct pkram_link;
  * enum pkram_data_flags - definition of data types contained in a pkram obj
  * @PKRAM_DATA_none: No data types configured
  * @PKRAM_DATA_pages: obj contains file page data
+ * @PKRAM_DATA_bytes: obj contains byte data
  */
 enum pkram_data_flags {
 	PKRAM_DATA_none		= 0x0,	/* No data types configured */
 	PKRAM_DATA_pages	= 0x1,	/* Contains file page data */
+	PKRAM_DATA_bytes	= 0x2,	/* Contains byte data */
 };
 
 struct pkram_data_stream {
@@ -36,10 +38,18 @@ struct pkram_stream {
 
 	__u64 *pages_head_link_pfnp;
 	__u64 *pages_tail_link_pfnp;
+
+	__u64 *bytes_head_link_pfnp;
+	__u64 *bytes_tail_link_pfnp;
 };
 
 struct pkram_pages_access {
 	unsigned long next_index;
+};
+
+struct pkram_bytes_access {
+	struct page *data_page;		/* current page */
+	unsigned int data_offset;	/* offset into current page */
 };
 
 struct pkram_access {
@@ -48,6 +58,7 @@ struct pkram_access {
 	struct pkram_data_stream pds;
 
 	struct pkram_pages_access pages;
+	struct pkram_bytes_access bytes;
 };
 
 #define PKRAM_NAME_MAX		256	/* including nul */
