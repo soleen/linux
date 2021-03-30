@@ -1607,6 +1607,7 @@ int __init pkram_create_merged_reserved(struct memblock_type *new)
 		} else if (pkr->base + pkr->size <= r->base) {
 			rgn->base = pkr->base;
 			rgn->size = pkr->size;
+			rgn->flags = MEMBLOCK_PRESERVED;
 			memblock_set_region_node(rgn, MAX_NUMNODES);
 
 			nr_preserved +=  (rgn->size >> PAGE_SHIFT);
@@ -1636,6 +1637,7 @@ int __init pkram_create_merged_reserved(struct memblock_type *new)
 		rgn = &new->regions[k];
 		rgn->base = pkr->base;
 		rgn->size = pkr->size;
+		rgn->flags = MEMBLOCK_PRESERVED;
 		memblock_set_region_node(rgn, MAX_NUMNODES);
 
 		nr_preserved += (rgn->size >> PAGE_SHIFT);
