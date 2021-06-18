@@ -1375,10 +1375,13 @@ static struct attribute_group pkram_attr_group = {
 };
 
 /* returns non-zero on success */
-static int __init pkram_init_sb(void)
+void __init pkram_init_sb(void)
 {
 	unsigned long pfn;
 	struct pkram_node *node;
+
+	if (is_kdump_kernel())
+		return;
 
 	if (!pkram_sb) {
 		struct page *page;
@@ -1387,7 +1390,7 @@ static int __init pkram_init_sb(void)
 		if (!page) {
 			pr_err("PKRAM: Failed to allocate super block\n");
 			__banned_pages_shrink(ULONG_MAX);
-			return 0;
+			return;
 		}
 		pkram_sb = page_address(page);
 	}
@@ -1402,12 +1405,12 @@ static int __init pkram_init_sb(void)
 		pkram_insert_node(node);
 		pfn = node->node_pfn;
 	}
-	return 1;
+	return;
 }
 
 static int __init pkram_init(void)
 {
-	if (!is_kdump_kernel() && pkram_init_sb()) {
+	if (!is_kdump_kernel()) {
 		register_reboot_notifier(&pkram_reboot_notifier);
 		register_shrinker(&banned_pages_shrinker);
 		sysfs_update_group(kernel_kobj, &pkram_attr_group);

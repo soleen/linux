@@ -105,12 +105,14 @@ size_t pkram_read(struct pkram_access *pa, void *buf, size_t count);
 
 #ifdef CONFIG_PKRAM
 extern unsigned long pkram_reserved_pages;
+void pkram_init_sb(void);
 void pkram_reserve(void);
 void pkram_cleanup(void);
 void pkram_ban_region(unsigned long start, unsigned long end);
 int pkram_has_preserved_pages(unsigned long start, unsigned long end);
 #else
 #define pkram_reserved_pages 0UL
+static inline void pkram_init_sb(void) { }
 static inline void pkram_reserve(void) { }
 static inline void pkram_cleanup(void) { }
 static inline void pkram_ban_region(unsigned long start, unsigned long end) { }
