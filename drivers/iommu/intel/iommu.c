@@ -929,16 +929,19 @@ static struct dma_pte *pfn_to_dma_pte(struct dmar_domain *domain,
 			if (!tmp_page)
 				return NULL;
 
+			iommu_pt_init(tmp_page);
 			domain_flush_cache(domain, tmp_page, VTD_PAGE_SIZE);
 			pteval = ((uint64_t)virt_to_dma_pfn(tmp_page) << VTD_PAGE_SHIFT) | DMA_PTE_READ | DMA_PTE_WRITE;
 			if (domain->use_first_level)
 				pteval |= DMA_FL_PTE_XD | DMA_FL_PTE_US | DMA_FL_PTE_ACCESS;
 
-			if (dma_set_pte(pte, pteval))
+			if (dma_set_pte(pte, pteval)) {
 				/* Someone else set it while we were thinking; use theirs. */
+				iommu_pt_fini(tmp_page);
 				iommu_free_page(tmp_page);
-			else
+			} else {
 				domain_flush_cache(domain, pte, sizeof(*pte));
+			}
 		}
 		if (level == 1)
 			break;
@@ -1075,6 +1078,7 @@ static void dma_pte_free_pagetable(struct dmar_domain *domain,
 
 	/* free pgd */
 	if (start_pfn == 0 && last_pfn == DOMAIN_MAX_PFN(domain->gaw)) {
+		iommu_pt_fini(domain->pgd);
 		iommu_free_page(domain->pgd);
 		domain->pgd = NULL;
 	}
@@ -1107,7 +1111,7 @@ static void dma_pte_list_pagetables(struct dmar_domain *domain,
 		pte++;
 	} while (!first_pte_in_page(pte));
 
-	list_add_tail(&pg->lru, freelist);
+	iommu_pt_add_tail(freelist, pg);
 }
 
 static void dma_pte_clear_level(struct dmar_domain *domain, int level,
@@ -1171,7 +1175,8 @@ static void domain_unmap(struct dmar_domain *domain, unsigned long start_pfn,
 	/* free pgd */
 	if (start_pfn == 0 && last_pfn == DOMAIN_MAX_PFN(domain->gaw)) {
 		struct page *pgd_page = virt_to_page(domain->pgd);
-		list_add_tail(&pgd_page->lru, freelist);
+
+		iommu_pt_add_tail(freelist, pgd_page);
 		domain->pgd = NULL;
 	}
 }
@@ -3998,6 +4003,7 @@ static int md_domain_init(struct dmar_domain *domain, int guest_width)
 	domain->pgd = iommu_alloc_page_node(domain->nid, GFP_ATOMIC);
 	if (!domain->pgd)
 		return -ENOMEM;
+	iommu_pt_init(domain->pgd);
 	domain_flush_cache(domain, domain->pgd, PAGE_SIZE);
 	return 0;
 }
@@ -4142,6 +4148,7 @@ int prepare_domain_attach_device(struct iommu_domain *domain,
 		pte = dmar_domain->pgd;
 		if (dma_pte_present(pte)) {
 			dmar_domain->pgd = phys_to_virt(dma_pte_addr(pte));
+			iommu_pt_fini(pte);
 			iommu_free_page(pte);
 		}
 		dmar_domain->agaw--;

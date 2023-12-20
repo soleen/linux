@@ -228,4 +228,66 @@ static inline void iommu_free_pages_list(struct list_head *pages)
 	}
 }
 
+static inline void iommu_pt_init(void *pte)
+{
+	struct page *page = virt_to_page(pte);
+	rwlock_t *lock = (rwlock_t *)&page->private;
+
+	rwlock_init(lock);
+}
+
+static inline void iommu_pt_fini(void *pte)
+{
+	struct page *page = virt_to_page(pte);
+
+	INIT_LIST_HEAD(&page->lru);
+}
+
+/*
+ * iommu_pt_add_tail - add a page table at the tail of of the freelist.
+ * @freelist: list head.
+ * @page: page to be added to the tail of the list
+ *
+ * IOMMU Page Tables use LRU only when added to freelist, otherwise the
+ * page->private is used a lock.
+ */
+static inline void iommu_pt_add_tail(struct list_head *freelist,
+				     struct page *page)
+{
+	INIT_LIST_HEAD(&page->lru);
+	list_add_tail(&page->lru, freelist);
+}
+
+static inline void iommu_pt_read_lock(void *pte)
+{
+	struct page *page = virt_to_page(pte);
+	rwlock_t *lock = (rwlock_t *)&page->private;
+
+	read_lock(lock);
+}
+
+static inline void iommu_pt_write_lock(void *pte)
+{
+	struct page *page = virt_to_page(pte);
+	rwlock_t *lock = (rwlock_t *)&page->private;
+
+	write_lock(lock);
+}
+
+static inline void iommu_pt_read_unlock(void *pte)
+{
+	struct page *page = virt_to_page(pte);
+	rwlock_t *lock = (rwlock_t *)&page->private;
+
+	read_unlock(lock);
+}
+
+static inline void iommu_pt_write_unlock(void *pte)
+{
+	struct page *page = virt_to_page(pte);
+	rwlock_t *lock = (rwlock_t *)&page->private;
+
+	write_unlock(lock);
+}
+
 #endif	/* __IOMMU_PAGES_H */
