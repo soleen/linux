@@ -16,8 +16,9 @@
 
 static const char memfd_luo_compatible[] = "memfd-v1";
 
-static void memfd_luo_unpreserve_folios(const void *fdt) {
-	const u64 (*folios)[2];
+static void memfd_luo_unpreserve_folios(const void *fdt)
+{
+	const u64(*folios)[2];
 	int len;
 	int i;
 
@@ -34,7 +35,8 @@ static void memfd_luo_unpreserve_folios(const void *fdt) {
 	}
 }
 
-static int memfd_luo_preserve_folio(void *fdt, struct folio* f) {
+static int memfd_luo_preserve_folio(void *fdt, struct folio *f)
+{
 	int err;
 	u64 phys = PFN_PHYS(folio_pfn(f));
 	u64 index = folio_index(f);
@@ -45,7 +47,7 @@ static int memfd_luo_preserve_folio(void *fdt, struct folio* f) {
 	if (err)
 		goto put;
 
-	u64 val[2] = {phys, index};
+	u64 val[2] = { phys, index };
 	err = fdt_appendprop(fdt, 0, "folios", val, sizeof(val));
 	if (err)
 		goto unpreserve;
@@ -69,15 +71,16 @@ static int memfd_luo_preserve_folios(struct inode *inode, void *fdt)
 
 	folio_batch_init(&fbatch);
 
-	while(start < end) {
+	while (start < end) {
 		int count;
 
-		count = find_get_entries(inode->i_mapping, &start, end - 1, &fbatch, indices);
+		count = find_get_entries(inode->i_mapping, &start, end - 1,
+					 &fbatch, indices);
 		if (count == 0)
 			break;
 
-		for (int i = 0; i < count; i ++) {
-			struct folio* f = fbatch.folios[i];
+		for (int i = 0; i < count; i++) {
+			struct folio *f = fbatch.folios[i];
 
 			if (xa_is_value(f)) {
 				pr_err("TODO: handle swap");
@@ -103,7 +106,8 @@ static int memfd_luo_preserve_folios(struct inode *inode, void *fdt)
 	return err;
 }
 
-static int memfd_luo_prepare(struct file *file, void *arg, u64 *data) {
+static int memfd_luo_prepare(struct file *file, void *arg, u64 *data)
+{
 	int err = 0;
 	struct page *fdt_page = NULL;
 	void *fdt = NULL;
@@ -145,7 +149,8 @@ free:
 	return err;
 }
 
-static void memfd_luo_cancel(struct file *file, void *arg, u64 data) {
+static void memfd_luo_cancel(struct file *file, void *arg, u64 data)
+{
 	void *fdt = phys_to_virt(data);
 	struct folio *fdt_folio = virt_to_folio(fdt);
 
@@ -153,16 +158,17 @@ static void memfd_luo_cancel(struct file *file, void *arg, u64 data) {
 	kho_unpreserve_folio(fdt_folio);
 	folio_put(fdt_folio);
 	pr_err("unpreserved fdt_folio = %llx\n", data);
-
 }
 
-static void memfd_luo_finish(struct file *file, void *arg, u64 data, bool reclaimed) {
+static void memfd_luo_finish(struct file *file, void *arg, u64 data,
+			     bool reclaimed)
+{
 	phys_addr_t fdt_phys = data;
 	void *fdt = phys_to_virt(fdt_phys);
 	struct folio *fdt_folio;
 
-	if (!reclaimed)	{
-		const u64 (*folios)[2];
+	if (!reclaimed) {
+		const u64(*folios)[2];
 		int len;
 		int i;
 
@@ -175,7 +181,8 @@ static void memfd_luo_finish(struct file *file, void *arg, u64 data, bool reclai
 			struct folio *f = kho_restore_folio(phys);
 
 			folio_put(f);
-			pr_err("memfd_luo_finish, not relcaimed: %llx, phys=%llx\n", data, phys );
+			pr_err("memfd_luo_finish, not relcaimed: %llx, phys=%llx\n",
+			       data, phys);
 		}
 	}
 
@@ -184,9 +191,10 @@ static void memfd_luo_finish(struct file *file, void *arg, u64 data, bool reclai
 	pr_err("memfd_luo_finish, put fdt: %llx\n", fdt_phys);
 }
 
-static int memfd_luo_retrieve(void *arg, u64 data, struct file **file_p) {
+static int memfd_luo_retrieve(void *arg, u64 data, struct file **file_p)
+{
 	const void *fdt = phys_to_virt((phys_addr_t)data);
-	const u64 (*folios)[2];
+	const u64(*folios)[2];
 	int len_folios, len;
 	int ret = 0;
 	const u64 *pos, *size;
@@ -237,7 +245,8 @@ static int memfd_luo_retrieve(void *arg, u64 data, struct file **file_p) {
 
 		folio = kho_restore_folio(folios[i][0]);
 		if (!folio) {
-			pr_err("invalid folio physical address: %llx\n", folios[i][0]);
+			pr_err("invalid folio physical address: %llx\n",
+			       folios[i][0]);
 			goto put_file;
 		}
 		index = folios[i][1];
@@ -261,20 +270,23 @@ static int memfd_luo_retrieve(void *arg, u64 data, struct file **file_p) {
 
 		ret = mem_cgroup_charge(folio, NULL, mapping_gfp_mask(mapping));
 		if (ret) {
-			pr_err("shmem: failed to charge folio index %d: %d\n", i, ret);
+			pr_err("shmem: failed to charge folio index %d: %d\n",
+			       i, ret);
 			goto unlock_folio;
 		}
 
 		ret = shmem_add_to_page_cache(folio, mapping, index, NULL,
 					      mapping_gfp_mask(mapping));
 		if (ret) {
-			pr_err("shmem: failed to add to page cache folio index %d: %d\n", i, ret);
+			pr_err("shmem: failed to add to page cache folio index %d: %d\n",
+			       i, ret);
 			goto unlock_folio;
 		}
 
 		ret = shmem_inode_acct_blocks(inode, 1);
 		if (ret) {
-			pr_err("shmem: failed to account folio index %d: %d\n", i, ret);
+			pr_err("shmem: failed to account folio index %d: %d\n",
+			       i, ret);
 			goto unlock_folio;
 		}
 
@@ -304,12 +316,12 @@ free:
 	return ret;
 }
 
-static bool memfd_luo_can_preserve(struct file *file, void *arg) {
+static bool memfd_luo_can_preserve(struct file *file, void *arg)
+{
 	struct inode *inode = file_inode(file);
 
 	return shmem_file(file) && !inode->i_nlink;
 }
-
 
 static struct liveupdate_filesystem memfd_luo_fs_ops = {
 	.prepare = memfd_luo_prepare,
