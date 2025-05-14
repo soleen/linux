@@ -41,7 +41,6 @@ static int memfd_luo_preserve_folio(void *fdt, struct folio* f) {
 
 	pr_err("to preserve: folio=%llx, index=%llu\n", phys, index);
 
-	folio_get(f);
 	err = kho_preserve_folio(f);
 	if (err)
 		goto put;
