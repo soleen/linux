@@ -256,6 +256,7 @@ int liveupdate_get_file_incoming(struct liveupdate_session *s, u64 token,
 /* Get a token for an outgoing file, or -ENOENT if file is not preserved */
 int liveupdate_get_token_outgoing(struct liveupdate_session *s,
 				  struct file *file, u64 *tokenp);
+const char *liveupdate_session_name(struct liveupdate_session *s);
 
 #else /* CONFIG_LIVEUPDATE */
 
@@ -319,6 +320,11 @@ static inline int liveupdate_get_token_outgoing(struct liveupdate_session *s,
 						struct file *file, u64 *tokenp)
 {
 	return -EOPNOTSUPP;
+}
+
+static inline const char *liveupdate_session_name(struct liveupdate_session *s)
+{
+	return NULL;
 }
 
 #endif /* CONFIG_LIVEUPDATE */
