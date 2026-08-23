@@ -8,6 +8,7 @@
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/cpu.h>
+#include <linux/cpu_preserve.h>
 #include <linux/topology.h>
 #include <linux/device.h>
 #include <linux/node.h>
@@ -53,6 +54,9 @@ static int cpu_subsys_online(struct device *dev)
 	int ret;
 	int retries = 0;
 
+	if (cpu_is_preserved(cpuid))
+		return -EBUSY;
+
 	from_nid = cpu_to_node(cpuid);
 	if (from_nid == NUMA_NO_NODE)
 		return -ENODEV;
@@ -88,6 +92,9 @@ retry:
 
 static int cpu_subsys_offline(struct device *dev)
 {
+	if (cpu_is_preserved(dev->id))
+		return -EBUSY;
+
 	return cpu_device_down(dev);
 }
 
@@ -189,6 +196,27 @@ static const struct attribute_group crash_note_cpu_attr_group = {
 };
 #endif
 
+#ifdef CONFIG_LIVEUPDATE_CPU
+static ssize_t preserve_show(struct device *dev,
+			     struct device_attribute *attr,
+			     char *buf)
+{
+	struct cpu *cpu = container_of(dev, struct cpu, dev);
+
+	return sysfs_emit(buf, "%d\n", cpu_is_preserved(cpu->dev.id));
+}
+static DEVICE_ATTR_RO(preserve);
+
+static struct attribute *cpu_preserve_attrs[] = {
+	&dev_attr_preserve.attr,
+	NULL
+};
+
+static const struct attribute_group cpu_preserve_attr_group = {
+	.attrs = cpu_preserve_attrs,
+};
+#endif
+
 static const struct attribute_group *common_cpu_attr_groups[] = {
 #ifdef CONFIG_CRASH_DUMP
 	&crash_note_cpu_attr_group,
@@ -199,6 +227,9 @@ static const struct attribute_group *common_cpu_attr_groups[] = {
 static const struct attribute_group *hotplugable_cpu_attr_groups[] = {
 #ifdef CONFIG_CRASH_DUMP
 	&crash_note_cpu_attr_group,
+#endif
+#ifdef CONFIG_LIVEUPDATE_CPU
+	&cpu_preserve_attr_group,
 #endif
 	NULL
 };
@@ -241,6 +272,15 @@ static ssize_t print_cpus_kernel_max(struct device *dev,
 }
 static DEVICE_ATTR(kernel_max, 0444, print_cpus_kernel_max, NULL);
 
+#ifdef CONFIG_LIVEUPDATE_CPU
+static ssize_t print_cpus_preserved(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(cpu_get_preserved_mask()));
+}
+static DEVICE_ATTR(preserved, 0444, print_cpus_preserved, NULL);
+#endif
+
 /* arch-optional setting to enable display of offline cpus >= nr_cpu_ids */
 unsigned int total_cpus;
 
@@ -254,6 +294,7 @@ static ssize_t print_cpus_offline(struct device *dev,
 	if (!alloc_cpumask_var(&offline, GFP_KERNEL))
 		return -ENOMEM;
 	cpumask_andnot(offline, cpu_possible_mask, cpu_online_mask);
+	cpu_preserved_filter_offline_mask(offline);
 	len += sysfs_emit_at(buf, len, "%*pbl", cpumask_pr_args(offline));
 	free_cpumask_var(offline);
 
@@ -520,6 +561,9 @@ static struct attribute *cpu_root_attrs[] = {
 	&cpu_attrs[2].attr.attr,
 	&dev_attr_kernel_max.attr,
 	&dev_attr_offline.attr,
+#ifdef CONFIG_LIVEUPDATE_CPU
+	&dev_attr_preserved.attr,
+#endif
 	&dev_attr_enabled.attr,
 	&dev_attr_isolated.attr,
 	&dev_attr_housekeeping.attr,
