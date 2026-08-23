@@ -1628,6 +1628,11 @@ static int _cpu_up(unsigned int cpu, int tasks_frozen, enum cpuhp_state target)
 		goto out;
 	}
 
+	if (cpu_is_preserved(cpu)) {
+		ret = -EBUSY;
+		goto out;
+	}
+
 	/*
 	 * The caller of cpu_up() might have raced with another
 	 * caller. Nothing to do.
@@ -1771,6 +1776,10 @@ static void __init cpuhp_bringup_mask(const struct cpumask *mask, unsigned int n
 	for_each_cpu(cpu, mask) {
 		struct cpuhp_cpu_state *st = per_cpu_ptr(&cpuhp_state, cpu);
 
+		if (cpu_is_preserved(cpu)) {
+			pr_debug("smp: skipping secondary bringup for preserved cpu %d\n", cpu);
+			continue;
+		}
 		if (cpu_up(cpu, target) && can_rollback_cpu(st)) {
 			/*
 			 * If this failed then cpu_up() might have only
