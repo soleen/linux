@@ -657,6 +657,15 @@ static inline bool gic_enable_sre(void)
 	return !!(val & ICC_SRE_EL1_SRE);
 }
 
+#ifdef CONFIG_ARM64
+void gicv3_caretaker_enable_sgi(void);
+void gicv3_caretaker_clear_sgi(void);
+void gicv3_caretaker_kick_cpu(int cpu);
+void __iomem *gicv3_get_rdist_for_cpu(int cpu);
+int gicv3_caretaker_get_redist_region(int idx, phys_addr_t *pa,
+				      unsigned long *va, size_t *size);
+#endif
+
 #endif
 
 #endif

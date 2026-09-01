@@ -310,10 +310,5 @@ static inline void *caretaker_memcpy(void *dest, const void *src, size_t n)
 	return dest;
 }
 
-#ifdef CONFIG_KEXEC_HANDOVER
-void gicv3_its_preserve_kho(void);
-#else
-static inline void gicv3_its_preserve_kho(void) {}
-#endif
 
 #endif /* __LINUX_CARETAKER_H */
