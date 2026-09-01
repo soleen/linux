@@ -7,6 +7,7 @@
 #define pr_fmt(fmt)	"GICv3: " fmt
 
 #include <linux/acpi.h>
+#include <linux/cpu_preserve.h>
 #include <linux/cpu.h>
 #include <linux/cpu_pm.h>
 #include <linux/delay.h>
@@ -50,6 +51,7 @@ static struct cpumask broken_rdists __read_mostly __maybe_unused;
 struct redist_region {
 	void __iomem		*redist_base;
 	phys_addr_t		phys_base;
+	size_t			size;
 	bool			single_redist;
 };
 
@@ -79,6 +81,17 @@ static void __iomem *t241_dist_base_alias[T241_CHIPS_MAX] __read_mostly;
 static DEFINE_STATIC_KEY_FALSE(gic_nvidia_t241_erratum);
 
 static DEFINE_STATIC_KEY_FALSE(gic_arm64_2941627_erratum);
+
+struct caretaker_cpu_rdist {
+	void __iomem		*rdist_base;
+	phys_addr_t		phys_base;
+	u64			mpidr;
+};
+
+struct caretaker_gic_state {
+	struct caretaker_cpu_rdist cpu_rdists[NR_CPUS];
+};
+static struct caretaker_gic_state caretaker_gic __cpu_preserved_data;
 
 static struct gic_chip_data gic_data __read_mostly;
 static DEFINE_STATIC_KEY_TRUE(supports_deactivate_key);
@@ -119,7 +132,7 @@ static bool nmi_support_forbidden;
  */
 static DEFINE_STATIC_KEY_FALSE(supports_pseudo_nmis);
 
-static u32 gic_get_pribits(void)
+__cpu_preserved_text static u32 gic_get_pribits(void)
 {
 	u32 pribits;
 
@@ -751,6 +764,9 @@ static u64 gic_cpu_to_affinity(int cpu)
 	u64 mpidr = cpu_logical_map(cpu);
 	u64 aff;
 
+	if (mpidr == INVALID_HWID && cpu >= 0 && cpu < ARRAY_SIZE(caretaker_gic.cpu_rdists))
+		mpidr = cpu;
+
 	/* ASR8601 needs to have its affinities shifted down... */
 	if (unlikely(gic_data.flags & FLAGS_WORKAROUND_ASR_ERRATUM_8601001))
 		mpidr = (MPIDR_AFFINITY_LEVEL(mpidr, 1)	|
@@ -1037,6 +1053,14 @@ static int __gic_populate_rdist(struct redist_region *region, void __iomem *ptr)
 	typer = gic_read_typer(ptr + GICR_TYPER);
 	if ((typer >> 32) == aff) {
 		u64 offset = ptr - region->redist_base;
+		int cpu = smp_processor_id();
+
+		if (cpu < ARRAY_SIZE(caretaker_gic.cpu_rdists)) {
+			caretaker_gic.cpu_rdists[cpu].rdist_base = ptr;
+			caretaker_gic.cpu_rdists[cpu].phys_base = region->phys_base + offset;
+			caretaker_gic.cpu_rdists[cpu].mpidr = mpidr;
+		}
+
 		raw_spin_lock_init(&gic_data_rdist()->rd_lock);
 		gic_data_rdist_rd_base() = ptr;
 		gic_data_rdist()->phys_base = region->phys_base + offset;
@@ -1297,6 +1321,140 @@ static void gic_cpu_init(void)
 	gic_cpu_sys_reg_init();
 }
 
+#define CARETAKER_RWP_TIMEOUT_COUNT	1000000
+#define CARETAKER_SGI_MASK		GENMASK(15, 0)
+#define CARETAKER_HYP_TIMER_PPI		26
+#define CARETAKER_HYP_VIRT_TIMER_PPI	30
+#define GICR_INT_PRIORITY(intid)	(GICR_IPRIORITYR0 + (intid))
+
+__cpu_preserved_text static u64 gicv3_caretaker_cpu_to_affinity(int cpu)
+{
+	u64 mpidr = INVALID_HWID;
+
+	if (cpu >= 0 && cpu < ARRAY_SIZE(caretaker_gic.cpu_rdists) &&
+	    caretaker_gic.cpu_rdists[cpu].mpidr) {
+		mpidr = caretaker_gic.cpu_rdists[cpu].mpidr;
+	} else if (cpu < 0) {
+		mpidr = read_sysreg(mpidr_el1);
+	}
+
+	if (mpidr == INVALID_HWID)
+		mpidr = cpu;
+
+	return ((u64)MPIDR_AFFINITY_LEVEL(mpidr, 3) << 32 |
+		MPIDR_AFFINITY_LEVEL(mpidr, 2) << 16 |
+		MPIDR_AFFINITY_LEVEL(mpidr, 1) << 8  |
+		MPIDR_AFFINITY_LEVEL(mpidr, 0));
+}
+
+__cpu_preserved_text void __iomem *gicv3_get_rdist_for_cpu(int cpu)
+{
+	if (cpu < 0) {
+		u64 mpidr = read_sysreg(mpidr_el1) & MPIDR_HWID_BITMASK;
+		int c;
+
+		for (c = 0; c < ARRAY_SIZE(caretaker_gic.cpu_rdists); c++) {
+			if (caretaker_gic.cpu_rdists[c].rdist_base &&
+			    (caretaker_gic.cpu_rdists[c].mpidr & MPIDR_HWID_BITMASK) == mpidr)
+				return caretaker_gic.cpu_rdists[c].rdist_base;
+		}
+		return NULL;
+	}
+
+	if (cpu < ARRAY_SIZE(caretaker_gic.cpu_rdists))
+		return caretaker_gic.cpu_rdists[cpu].rdist_base;
+
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(gicv3_get_rdist_for_cpu);
+
+int gicv3_caretaker_get_redist_region(int idx, phys_addr_t *pa,
+				      unsigned long *va, size_t *size)
+{
+	if (!gic_data.redist_regions || idx < 0 || idx >= gic_data.nr_redist_regions)
+		return -ENOENT;
+	if (!gic_data.redist_regions[idx].redist_base)
+		return -ENOENT;
+	*va = (unsigned long)gic_data.redist_regions[idx].redist_base;
+	*pa = gic_data.redist_regions[idx].phys_base;
+	*size = gic_data.redist_regions[idx].size;
+	if (!*size)
+		*size = nr_cpu_ids * (gic_data.redist_stride ? : SZ_128K);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(gicv3_caretaker_get_redist_region);
+
+__cpu_preserved_text static inline void gicv3_caretaker_wait_for_rwp(void __iomem *base, u32 bit)
+{
+	int count = CARETAKER_RWP_TIMEOUT_COUNT;
+	u32 val;
+
+	while (count-- > 0) {
+		val = readl_relaxed(base + GICD_CTLR);
+		if (!(val & bit))
+			return;
+		cpu_relax();
+	}
+}
+
+__cpu_preserved_text void gicv3_caretaker_enable_sgi(void)
+{
+	void __iomem *ptr = gicv3_get_rdist_for_cpu(-1);
+	void __iomem *rbase = NULL;
+
+	if (ptr) {
+		rbase = ptr + SZ_64K;
+		writel_relaxed(~0U, rbase + GICR_IGROUPR0);
+		writel_relaxed(0, rbase + GICR_IGRPMODR0);
+		writeb_relaxed(0x00, rbase + GICR_INT_PRIORITY(0));
+		writeb_relaxed(0x00, rbase + GICR_INT_PRIORITY(CARETAKER_HYP_TIMER_PPI));
+		writeb_relaxed(0x00, rbase + GICR_INT_PRIORITY(CARETAKER_HYP_VIRT_TIMER_PPI));
+		writel_relaxed(CARETAKER_SGI_MASK |
+			       BIT(CARETAKER_HYP_TIMER_PPI) |
+			       BIT(CARETAKER_HYP_VIRT_TIMER_PPI),
+			       rbase + GICR_ISENABLER0);
+		writel_relaxed(~0U, rbase + GICR_ICACTIVER0);
+		gicv3_caretaker_wait_for_rwp(ptr, GICR_CTLR_RWP);
+	}
+
+	{
+		u32 pribits = gic_get_pribits();
+
+		write_sysreg_s(0, SYS_ICC_BPR1_EL1);
+		switch (pribits) {
+		case 8:
+		case 7:
+			write_sysreg_s(0, SYS_ICC_AP1R3_EL1);
+			write_sysreg_s(0, SYS_ICC_AP1R2_EL1);
+			fallthrough;
+		case 6:
+			write_sysreg_s(0, SYS_ICC_AP1R1_EL1);
+			fallthrough;
+		case 5:
+		case 4:
+		default:
+			write_sysreg_s(0, SYS_ICC_AP1R0_EL1);
+			break;
+		}
+		isb();
+	}
+}
+EXPORT_SYMBOL_GPL(gicv3_caretaker_enable_sgi);
+
+__cpu_preserved_text void gicv3_caretaker_clear_sgi(void)
+{
+	void __iomem *ptr = gicv3_get_rdist_for_cpu(-1);
+	void __iomem *rbase = NULL;
+
+	if (ptr) {
+		rbase = ptr + SZ_64K;
+		writel_relaxed(~0U, rbase + GICR_ICPENDR0);
+		writel_relaxed(~0U, rbase + GICR_ICACTIVER0);
+		gicv3_caretaker_wait_for_rwp(ptr, GICR_CTLR_RWP);
+	}
+}
+EXPORT_SYMBOL_GPL(gicv3_caretaker_clear_sgi);
+
 #ifdef CONFIG_SMP
 
 #define MPIDR_TO_SGI_RS(mpidr)	(MPIDR_RS(mpidr) << ICC_SGI1R_RS_SHIFT)
@@ -1372,6 +1530,67 @@ static void gic_send_sgi(u64 cluster_id, u16 tlist, unsigned int irq)
 	pr_devel("CPU%d: ICC_SGI1R_EL1 %llx\n", smp_processor_id(), val);
 	gic_write_sgi1r(val);
 }
+
+__cpu_preserved_text void gicv3_caretaker_kick_cpu(int cpu)
+{
+	void __iomem *ptr, *sgi_base;
+	u64 mpidr, cluster_id;
+	u16 tlist;
+
+	if (cpu < 0 || cpu >= ARRAY_SIZE(caretaker_gic.cpu_rdists))
+		return;
+	if ((caretaker_gic.cpu_rdists[cpu].mpidr & MPIDR_HWID_BITMASK) ==
+	    (read_sysreg(mpidr_el1) & MPIDR_HWID_BITMASK))
+		return;
+
+	ptr = gicv3_get_rdist_for_cpu(cpu);
+	if (ptr) {
+		u32 val = readl_relaxed(ptr + GICR_WAKER);
+
+		sgi_base = ptr + SZ_64K;
+
+		if (val & GICR_WAKER_ProcessorSleep) {
+			int count = CARETAKER_RWP_TIMEOUT_COUNT;
+
+			val &= ~GICR_WAKER_ProcessorSleep;
+			writel_relaxed(val, ptr + GICR_WAKER);
+			while (count-- > 0) {
+				val = readl_relaxed(ptr + GICR_WAKER);
+				if (!(val & GICR_WAKER_ChildrenAsleep))
+					break;
+				cpu_relax();
+			}
+		}
+
+		writel_relaxed(~0U, sgi_base + GICR_IGROUPR0);
+		writel_relaxed(0, sgi_base + GICR_IGRPMODR0);
+		writel_relaxed(0, sgi_base + GICR_INT_PRIORITY(0));
+		writel_relaxed(0, sgi_base + GICR_INT_PRIORITY(4));
+		writel_relaxed(0, sgi_base + GICR_INT_PRIORITY(8));
+		writel_relaxed(0, sgi_base + GICR_INT_PRIORITY(12));
+		writel_relaxed(CARETAKER_SGI_MASK | BIT(CARETAKER_HYP_TIMER_PPI),
+			       sgi_base + GICR_ISENABLER0);
+		gicv3_caretaker_wait_for_rwp(ptr, GICR_CTLR_RWP);
+	}
+
+	mpidr = gicv3_caretaker_cpu_to_affinity(cpu);
+	cluster_id = MPIDR_TO_SGI_CLUSTER_ID(mpidr);
+	tlist = 1 << (mpidr & 0xf);
+
+	dsb(ishst);
+	{
+		u64 val = (MPIDR_TO_SGI_AFFINITY(cluster_id, 3) |
+			   MPIDR_TO_SGI_AFFINITY(cluster_id, 2) |
+			   (0ULL << ICC_SGI1R_SGI_ID_SHIFT) |
+			   MPIDR_TO_SGI_AFFINITY(cluster_id, 1) |
+			   MPIDR_TO_SGI_RS(cluster_id) |
+			   ((u64)tlist << ICC_SGI1R_TARGET_LIST_SHIFT));
+
+		write_sysreg_s(val, SYS_ICC_SGI1R_EL1);
+	}
+	isb();
+}
+EXPORT_SYMBOL_GPL(gicv3_caretaker_kick_cpu);
 
 static void gic_ipi_send_mask(struct irq_data *d, const struct cpumask *mask)
 {
@@ -2237,6 +2456,7 @@ static int __init gic_of_init(struct device_node *node, struct device_node *pare
 			goto out_unmap_rdist;
 		}
 		rdist_regs[i].phys_base = res.start;
+		rdist_regs[i].size = resource_size(&res);
 	}
 
 	if (of_property_read_u64(node, "redistributor-stride", &redist_stride))
@@ -2281,12 +2501,13 @@ static struct
 } acpi_data __initdata;
 
 static void __init
-gic_acpi_register_redist(phys_addr_t phys_base, void __iomem *redist_base)
+gic_acpi_register_redist(phys_addr_t phys_base, void __iomem *redist_base, size_t size)
 {
 	static int count = 0;
 
 	acpi_data.redist_regs[count].phys_base = phys_base;
 	acpi_data.redist_regs[count].redist_base = redist_base;
+	acpi_data.redist_regs[count].size = size;
 	acpi_data.redist_regs[count].single_redist = acpi_data.single_redist;
 	count++;
 }
@@ -2311,7 +2532,7 @@ gic_acpi_parse_madt_redist(union acpi_subtable_headers *header,
 
 	gic_request_region(redist->base_address, redist->length, "GICR");
 
-	gic_acpi_register_redist(redist->base_address, redist_base);
+	gic_acpi_register_redist(redist->base_address, redist_base, redist->length);
 	return 0;
 }
 
@@ -2353,7 +2574,7 @@ gic_acpi_parse_madt_gicc(union acpi_subtable_headers *header,
 	    (gicc->flags & ACPI_MADT_GICC_NON_COHERENT))
 		gic_data.rdists.flags |= RDIST_FLAGS_FORCE_NON_SHAREABLE;
 
-	gic_acpi_register_redist(gicc->gicr_base_address, redist_base);
+	gic_acpi_register_redist(gicc->gicr_base_address, redist_base, size);
 	return 0;
 }
 
