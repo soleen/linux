@@ -32,7 +32,7 @@ struct cpu_preserved_stack_context {
 	void				*entry_data;
 };
 
-#include 
+
 #ifdef CONFIG_LIVEUPDATE_CPU
 
 #include <asm/cpu_preserve.h>
@@ -254,7 +254,15 @@ int arch_cpu_preserved_setup_buffer(struct page *text_page,
  * update is cancelled or unpreserved.
  */
 void arch_cpu_preserved_unpreserve_pagetables(void);
+int arch_cpu_preserved_map_range(phys_addr_t pa, unsigned long va,
+				 size_t size, pgprot_t prot);
 int cpu_preserved_init_runtime_buffer(void);
+int cpu_preserved_map_range(phys_addr_t pa, unsigned long va,
+			    size_t size, pgprot_t prot);
+int cpu_preserved_map_buffer(void *va, size_t size);
+u64 arch_cpu_preserved_get_mpidr(int cpu);
+int arch_cpu_preserved_mpidr_to_cpu(u64 mpidr);
+bool arch_cpu_preserved_is_active(void);
 void arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa);
 
 #else /* !CONFIG_LIVEUPDATE_CPU */
@@ -310,7 +318,15 @@ static inline int arch_cpu_preserved_setup_buffer(struct page *text_page,
 	return 0;
 }
 static inline void arch_cpu_preserved_unpreserve_pagetables(void) {}
+static inline int arch_cpu_preserved_map_range(phys_addr_t pa, unsigned long va,
+					       size_t size, pgprot_t prot) { return 0; }
 static inline int cpu_preserved_init_runtime_buffer(void) { return 0; }
+static inline int cpu_preserved_map_range(phys_addr_t pa, unsigned long va,
+					  size_t size, pgprot_t prot) { return 0; }
+static inline int cpu_preserved_map_buffer(void *va, size_t size) { return 0; }
+static inline u64 arch_cpu_preserved_get_mpidr(int cpu) { return 0; }
+static inline int arch_cpu_preserved_mpidr_to_cpu(u64 mpidr) { return -EINVAL; }
+static inline bool arch_cpu_preserved_is_active(void) { return false; }
 static inline void arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa) {}
 static inline struct cpu_preserved_stack_context *
 cpu_preserved_get_stack_context(void)

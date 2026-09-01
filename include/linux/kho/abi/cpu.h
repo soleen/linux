@@ -7,6 +7,7 @@
 #ifndef _LINUX_KHO_ABI_CPU_H
 #define _LINUX_KHO_ABI_CPU_H
 
+#include <linux/cpumask.h>
 #include <linux/types.h>
 #include <uapi/linux/liveupdate.h>
 
@@ -24,7 +25,7 @@
  * human-readable identifiers to the incoming kernel.
  *
  * The state is serialized into packed structures
- * (struct cpu_preserved_ser and struct cpu_preserved_entry_ser) which
+ * (struct cpu_preserved_global_ser and struct cpu_preserved_file_ser) which
  * are handed over to the next kernel via the KHO mechanism.
  *
  * This interface is a contract. Any modification to the structure
@@ -75,17 +76,41 @@ struct cpu_preserved_entry_ser {
 } __packed;
 
 /**
- * struct cpu_preserved_ser - Main serialization header for preserved CPUs
- * @count: Number of preserved CPU entries.
- * @entries: Physical address of the first struct kho_block_header_ser
- *           containing the array of struct cpu_preserved_entry_ser elements.
- * @pcpus_pa: Physical address of the static cpu_preserved_pcpu array in
- *            previous kernel.
+ * struct cpu_preserved_global_ser - Minimal global FLB serialization header
+ * @cpu_preserved_mask: Bitmask of physical CPUs preserved across live update.
+ * @text_runtime_pa:    Physical address of preserved Caretaker text.
+ * @text_runtime_size:  Size of preserved Caretaker text in bytes.
+ * @data_runtime_pa:    Physical address of preserved Caretaker data.
+ * @data_runtime_size:  Size of preserved Caretaker data in bytes.
+ * @pcpus_runtime_pa:   Physical address of preserved cpu_preserved_pcpus array.
  */
-struct cpu_preserved_ser {
-	u32 count;
-	u64 entries;
-	u64 pcpus_pa;
+struct cpu_preserved_global_ser {
+	cpumask_t cpu_preserved_mask;
+	u64 text_runtime_pa;
+	u64 text_runtime_size;
+	u64 data_runtime_pa;
+	u64 data_runtime_size;
+	u64 pcpus_runtime_pa;
+} __packed;
+
+#define CPU_PRESERVED_FILE_MAGIC	0x43505546	/* "CPUF" */
+
+/**
+ * struct cpu_preserved_file_ser - Per-file serialized state for preserved CPU fd
+ * @magic:          Magic identifier (CPU_PRESERVED_FILE_MAGIC).
+ * @cpu:            Logical CPU identifier.
+ * @session_ser_pa: Physical address of owning struct caretaker_session_ser.
+ * @stack_pa:       Physical address of this CPU's preserved stack.
+ * @stack_order:    Allocation order of this CPU's preserved stack.
+ * @pcpu_pa:        Physical address of this CPU's preserved pcpu descriptor.
+ */
+struct cpu_preserved_file_ser {
+	u32 magic;
+	u32 cpu;
+	u64 session_ser_pa;
+	u64 stack_pa;
+	u32 stack_order;
+	u64 pcpu_pa;
 } __packed;
 
 #endif /* _LINUX_KHO_ABI_CPU_H */
