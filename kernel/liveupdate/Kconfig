@@ -136,4 +136,18 @@ config LIVEUPDATE_CPU
 
 	  If unsure, say N.
 
+config CARETAKER
+	bool "Caretaker on-core execution framework"
+	depends on LIVEUPDATE_CPU
+	default LIVEUPDATE_CPU
+	help
+	  Enable the Caretaker framework for coordinating preserved on-core
+	  workloads across kexec live updates.
+
+	  This framework provides workload scheduling, session tracking,
+	  and re-attachment protocols for both bare orphaned processes
+	  and virtual machines (KVM Caretaker).
+
+	  If unsure, say N.
+
 endmenu

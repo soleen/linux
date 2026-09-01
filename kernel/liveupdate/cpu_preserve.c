@@ -340,7 +340,12 @@ int cpu_preserved_init_runtime_buffer(void)
 int cpu_preserved_map_range(phys_addr_t pa, unsigned long va,
 			    size_t size, pgprot_t prot)
 {
-	return arch_cpu_preserved_map_range(pa, va, size, prot);
+	int ret = arch_cpu_preserved_map_range(pa, va, size, prot);
+
+	if (ret)
+		return ret;
+	caretaker_map_range_all_sessions(pa, va, size, prot);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(cpu_preserved_map_range);
 
@@ -639,6 +644,47 @@ int cpu_preserved_detach_workload(int cpu)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(cpu_preserved_detach_workload);
+
+/**
+ * cpu_preserved_set_session - Bind or unbind a preserved CPU to a Caretaker session
+ * @cpu: Logical CPU identifier.
+ * @sess: Owning Caretaker session, or NULL to unbind.
+ */
+void cpu_preserved_set_session(int cpu, struct caretaker_session *sess)
+{
+	struct cpu_preserved_pcpu *pcpu;
+
+	if (cpu < 0 || cpu >= nr_cpu_ids)
+		return;
+
+	mutex_lock(&cpu_preserved_lock);
+	pcpu = cpu_preserved_get_pcpu(cpu);
+	if (pcpu && pcpu->stack) {
+		struct cpu_preserved_stack_context *sctx = pcpu->stack;
+
+		sctx->session = sess;
+		sctx->session_pgd_pa = sess ? sess->pgd_pa : 0;
+		pcpu->pgd_pa = sess ? sess->pgd_pa : 0;
+
+		if (sess) {
+			if (cpu_preserved_pcpus_va && cpu_preserved_pcpus_pa) {
+				arch_caretaker_map_session_range(sess,
+								 cpu_preserved_pcpus_pa,
+								 (unsigned long)cpu_preserved_pcpus_va,
+								 sizeof(*pcpu) * nr_cpu_ids,
+								 PAGE_KERNEL);
+			}
+			arch_caretaker_map_session_range(sess,
+							 pcpu->state.stack_pa,
+							 (unsigned long)pcpu->stack,
+							 CPU_PRESERVED_STACK_SIZE,
+							 PAGE_KERNEL);
+		}
+	}
+	mutex_unlock(&cpu_preserved_lock);
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_set_session);
+
 
 static int cpu_wait_dead(int cpu)
 {
