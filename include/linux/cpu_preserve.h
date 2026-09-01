@@ -92,6 +92,12 @@ void cpu_preserved_park(int cpu);
 const struct cpumask *cpu_get_preserved_mask(void);
 phys_addr_t cpu_preserved_get_text_pa(void);
 phys_addr_t cpu_preserved_get_data_pa(void);
+int cpu_preserved_attach_workload(int cpu, const char *name,
+				  void (*entry_fn)(void *data), void *data);
+int cpu_preserved_detach_workload(int cpu);
+void cpu_preserved_set_workload_context(int cpu, void *ctx, phys_addr_t pgd_pa);
+int cpu_preserved_get_stack_info(int cpu, phys_addr_t *pa, unsigned long *va, size_t *size);
+int cpu_preserved_get_pcpus_info(phys_addr_t *pa, unsigned long *va, size_t *size);
 
 /**
  * cpu_preserved_report_dead - Park preserved CPU when reporting dead in hotplug
@@ -270,7 +276,29 @@ static inline const struct cpumask *cpu_get_preserved_mask(void)
 }
 static inline phys_addr_t cpu_preserved_get_text_pa(void) { return 0; }
 static inline phys_addr_t cpu_preserved_get_data_pa(void) { return 0; }
+static inline int cpu_preserved_attach_workload(int cpu, const char *name,
+						void (*entry_fn)(void *data),
+						void *data)
+{
+	return -EOPNOTSUPP;
+}
 
+static inline int cpu_preserved_detach_workload(int cpu)
+{
+	return -EOPNOTSUPP;
+}
+static inline void cpu_preserved_set_workload_context(int cpu, void *ctx,
+						      phys_addr_t pgd_pa) {}
+static inline int cpu_preserved_get_stack_info(int cpu, phys_addr_t *pa,
+					       unsigned long *va, size_t *size)
+{
+	return -EOPNOTSUPP;
+}
+static inline int cpu_preserved_get_pcpus_info(phys_addr_t *pa,
+					       unsigned long *va, size_t *size)
+{
+	return -EOPNOTSUPP;
+}
 static inline void arch_cpu_preserved_kick(int cpu) {}
 static inline void arch_cpu_preserved_park_wait(void) {}
 static inline void arch_cpu_preserved_park_init(int cpu) {}
