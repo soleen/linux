@@ -52,7 +52,57 @@ struct kvm_luo_ser {
 
 #define KVM_VCPU_LUO_FLAG_CARETAKER	BIT(0)
 
-struct caretaker_cb;
+/* KVM Caretaker attachment states */
+#define KVM_CARETAKER_ATTACHED		0	/* Normal host KVM handling */
+#define KVM_CARETAKER_DETACHED		1	/* Exits run in Caretaker */
+#define KVM_CARETAKER_ATTACHING		2	/* Transitioning from Caretaker to host KVM */
+#define KVM_CARETAKER_INVALID_PCPU	U32_MAX	/* Unassigned pCPU identifier */
+
+/**
+ * struct kvm_caretaker_cb - KVM Caretaker Control Block
+ * @attachment_state: Current attachment state (%KVM_CARETAKER_ATTACHED or
+ *                    %KVM_CARETAKER_DETACHED).
+ * @pcpu_id: Physical CPU ID where this vCPU runs while detached.
+ * @vcpu_id: Guest vCPU identifier.
+ * @vm_token: Preserved VM token for LUO lookup and validation.
+ * @vcpu_token: Preserved vCPU token for LUO lookup and validation.
+ * @runtime_pa: Hypervisor private runtime execution context physical address.
+ * @runtime_size: Hypervisor private runtime execution context size in bytes.
+ *
+ * Coordinates vCPU execution state across hypervisor detachment,
+ * live update, and Caretaker CPU preservation.
+ */
+struct kvm_caretaker_cb {
+	u64 attachment_state;
+	u32 pcpu_id;
+	u32 vcpu_id;
+	u64 vm_token;
+	u64 vcpu_token;
+	u64 runtime_pa;
+	u64 runtime_size;
+} __packed;
+
+static inline bool kvm_caretaker_is_attached(const struct kvm_caretaker_cb *cb)
+{
+	return !cb || READ_ONCE(cb->attachment_state) != KVM_CARETAKER_DETACHED;
+}
+
+static inline void kvm_caretaker_cb_init(struct kvm_caretaker_cb *cb, int vcpu_id)
+{
+	cb->attachment_state = KVM_CARETAKER_ATTACHED;
+	cb->pcpu_id = KVM_CARETAKER_INVALID_PCPU;
+	cb->vcpu_id = vcpu_id;
+}
+
+static inline void kvm_caretaker_detach(struct kvm_caretaker_cb *cb)
+{
+	smp_store_release(&cb->attachment_state, KVM_CARETAKER_DETACHED);
+}
+
+static inline void kvm_caretaker_attach(struct kvm_caretaker_cb *cb)
+{
+	smp_store_release(&cb->attachment_state, KVM_CARETAKER_ATTACHED);
+}
 
 /**
  * struct kvm_vcpu_luo_ser - Main serialization structure for a KVM vCPU.
@@ -67,7 +117,7 @@ struct kvm_vcpu_luo_ser {
 	u32 flags;
 	u64 vm_token;
 	DECLARE_KHOSER_PTR(arch_state, struct kvm_vcpu_arch_luo_state *);
-	DECLARE_KHOSER_PTR(cb, struct caretaker_cb *);
+	DECLARE_KHOSER_PTR(cb, struct kvm_caretaker_cb *);
 } __packed;
 
 /* The compatibility string for KVM vCPU file handler */
