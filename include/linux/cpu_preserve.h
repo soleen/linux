@@ -61,7 +61,6 @@ cpu_preserved_get_stack_context(void)
 	return NULL;
 }
 
-
 /*
  * __cpu_preserved_text: Code executed by preserved physical CPUs during live
  * update kexec handover in orphan mode.
@@ -267,6 +266,9 @@ u64 arch_cpu_preserved_get_mpidr(int cpu);
 int arch_cpu_preserved_mpidr_to_cpu(u64 mpidr);
 bool arch_cpu_preserved_is_active(void);
 void arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa);
+void cpu_preserved_set_session(int cpu, struct caretaker_session *sess);
+phys_addr_t cpu_preserved_get_text_pa(void);
+phys_addr_t cpu_preserved_get_data_pa(void);
 
 #else /* !CONFIG_LIVEUPDATE_CPU */
 
@@ -335,6 +337,9 @@ static inline u64 arch_cpu_preserved_get_mpidr(int cpu) { return 0; }
 static inline int arch_cpu_preserved_mpidr_to_cpu(u64 mpidr) { return -EINVAL; }
 static inline bool arch_cpu_preserved_is_active(void) { return false; }
 static inline void arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa) {}
+static inline void cpu_preserved_set_session(int cpu, struct caretaker_session *sess) {}
+static inline phys_addr_t cpu_preserved_get_text_pa(void) { return 0; }
+static inline phys_addr_t cpu_preserved_get_data_pa(void) { return 0; }
 static inline struct cpu_preserved_stack_context *
 cpu_preserved_get_stack_context(void)
 {

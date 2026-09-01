@@ -3,6 +3,7 @@
  * Architecture specific CPU preservation support for ARM64.
  */
 #include <linux/arm-smccc.h>
+#include <linux/caretaker.h>
 #include <linux/cpu_preserve.h>
 #include <linux/irqchip/arm-gic-v3.h>
 #include <linux/kexec_handover.h>
@@ -331,6 +332,19 @@ void *arch_cpu_preserved_get_pgd(void)
 	return arm64_caretaker_pgd;
 }
 EXPORT_SYMBOL_GPL(arch_cpu_preserved_get_pgd);
+
+int arch_caretaker_init_session_pgd(struct caretaker_session *sess,
+				    struct trans_pgd_info *info)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(arch_caretaker_init_session_pgd);
+
+void arch_caretaker_flush_tlb(struct caretaker_session *sess)
+{
+	arm64_flush_host_tlb_all();
+}
+EXPORT_SYMBOL_GPL(arch_caretaker_flush_tlb);
 
 /*
  * Masks DAIF interrupts and enables GIC CPU interface for WFx wakeups.

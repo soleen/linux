@@ -127,6 +127,7 @@
 
 #define pr_fmt(fmt) "cpu_preserve: " fmt
 
+#include <linux/caretaker.h>
 #include <linux/cpu.h>
 #include <linux/cpu_preserve.h>
 #include <linux/debugfs.h>
@@ -331,6 +332,18 @@ int cpu_preserved_init_runtime_buffer(void)
 	return 0;
 }
 
+phys_addr_t cpu_preserved_get_text_pa(void)
+{
+	return cpu_preserved_text_pages ? page_to_phys(cpu_preserved_text_pages) : 0;
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_get_text_pa);
+
+phys_addr_t cpu_preserved_get_data_pa(void)
+{
+	return cpu_preserved_data_pages ? page_to_phys(cpu_preserved_data_pages) : 0;
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_get_data_pa);
+
 /**
  * cpu_preserved_map_range - Map a physical address range into transition page tables
  * @pa: Physical address
@@ -343,7 +356,12 @@ int cpu_preserved_init_runtime_buffer(void)
 int cpu_preserved_map_range(phys_addr_t pa, unsigned long va,
 			    size_t size, pgprot_t prot)
 {
-	return arch_cpu_preserved_map_range(pa, va, size, prot);
+	int ret = arch_cpu_preserved_map_range(pa, va, size, prot);
+
+	if (ret)
+		return ret;
+	caretaker_map_range_all_sessions(pa, va, size, prot);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(cpu_preserved_map_range);
 
@@ -654,6 +672,47 @@ int cpu_preserved_detach_workload(int cpu)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(cpu_preserved_detach_workload);
+
+/**
+ * cpu_preserved_set_session - Bind or unbind a preserved CPU to a Caretaker session
+ * @cpu: Logical CPU identifier.
+ * @sess: Owning Caretaker session, or NULL to unbind.
+ */
+void cpu_preserved_set_session(int cpu, struct caretaker_session *sess)
+{
+	struct cpu_preserved_pcpu *pcpu;
+
+	if (cpu < 0 || cpu >= nr_cpu_ids)
+		return;
+
+	mutex_lock(&cpu_preserved_lock);
+	pcpu = cpu_preserved_get_pcpu(cpu);
+	if (pcpu && pcpu->stack) {
+		struct cpu_preserved_stack_context *sctx = pcpu->stack;
+
+		sctx->session = sess;
+		sctx->session_pgd_pa = sess ? sess->pgd_pa : 0;
+		pcpu->pgd_pa = sess ? sess->pgd_pa : 0;
+
+		if (sess) {
+			if (cpu_preserved_pcpus_va && cpu_preserved_pcpus_pa) {
+				caretaker_map_session_range(sess,
+					cpu_preserved_pcpus_pa,
+					(unsigned long)cpu_preserved_pcpus_va,
+					sizeof(*pcpu) * nr_cpu_ids,
+					PAGE_KERNEL);
+			}
+			caretaker_map_session_range(sess,
+							 pcpu->state.stack_pa,
+							 (unsigned long)pcpu->stack,
+							 CPU_PRESERVED_STACK_SIZE,
+							 PAGE_KERNEL);
+		}
+	}
+	mutex_unlock(&cpu_preserved_lock);
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_set_session);
+
 
 static int cpu_wait_dead(int cpu)
 {
@@ -1218,16 +1277,23 @@ static int cpu_preserve_preserve(struct liveupdate_file_op_args *args)
 	if (ret)
 		return ret;
 
+	ret = caretaker_session_add_cpu(args->session, cpu);
+	if (ret) {
+		cpu_unpreserve(cpu);
+		return ret;
+	}
+
 	fser = kho_alloc_preserve(sizeof(*fser));
 	if (IS_ERR(fser)) {
 		cpu_unpreserve(cpu);
+		caretaker_session_remove_cpu(args->session, cpu);
 		return PTR_ERR(fser);
 	}
 
 	memset(fser, 0, sizeof(*fser));
 	fser->magic = CPU_PRESERVED_FILE_MAGIC;
 	fser->cpu = cpu;
-	fser->session_ser_pa = 0;
+	fser->session_ser_pa = caretaker_session_get_ser_pa(args->session);
 
 	scoped_guard(mutex, &cpu_preserved_lock) {
 		const char *sname = liveupdate_session_name(args->session);
@@ -1269,6 +1335,7 @@ static void cpu_preserve_unpreserve(struct liveupdate_file_op_args *args)
 	cpu = fser->cpu;
 
 	cpu_unpreserve(cpu);
+	caretaker_session_remove_cpu(args->session, cpu);
 
 	kho_unpreserve_free(fser);
 }
@@ -1286,6 +1353,14 @@ static int cpu_preserve_retrieve(struct liveupdate_file_op_args *args)
 	fser = phys_to_virt(args->serialized_data);
 	if (fser->magic != CPU_PRESERVED_FILE_MAGIC)
 		return -EINVAL;
+
+	/* Restore session if serialized */
+	if (fser->session_ser_pa) {
+		struct caretaker_session_ser *cser =
+			phys_to_virt(fser->session_ser_pa);
+
+		caretaker_session_restore(args->session, cser);
+	}
 
 	cpu = fser->cpu;
 
@@ -1359,6 +1434,7 @@ static void cpu_preserve_finish(struct liveupdate_file_op_args *args)
 	cpu = fser->cpu;
 
 	cpu_unpreserve(cpu);
+	caretaker_session_remove_cpu(args->session, cpu);
 
 	kho_restore_free(fser);
 }
