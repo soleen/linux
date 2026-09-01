@@ -17,6 +17,7 @@
 #include <linux/iommu.h>
 #include <linux/iopoll.h>
 #include <linux/irqdomain.h>
+#include <linux/kexec_handover.h>
 #include <linux/list.h>
 #include <linux/log2.h>
 #include <linux/mem_encrypt.h>
@@ -36,6 +37,7 @@
 #include <linux/irqchip.h>
 #include <linux/irqchip/arm-gic-v3.h>
 #include <linux/irqchip/arm-gic-v4.h>
+#include <linux/caretaker.h>
 
 #include <asm/cputype.h>
 #include <asm/exception.h>
@@ -3087,6 +3089,31 @@ static int __init allocate_lpi_tables(void)
 	if (err)
 		return err;
 
+	if (gic_rdists->flags & RDIST_FLAGS_RD_TABLES_PREALLOCATED) {
+		for_each_possible_cpu(cpu) {
+			void __iomem *rbase = gicv3_get_rdist_for_cpu(cpu);
+			phys_addr_t paddr = 0;
+
+			if (rbase) {
+				val = gicr_read_pendbaser(rbase + GICR_PENDBASER);
+				paddr = val & GENMASK_ULL(51, 16);
+			}
+
+			if (paddr && pfn_valid(paddr >> PAGE_SHIFT)) {
+				gic_data_rdist_cpu(cpu)->pend_page = pfn_to_page(paddr >> PAGE_SHIFT);
+				gic_data_rdist_cpu(cpu)->flags |= RD_LOCAL_PENDTABLE_PREALLOCATED;
+			} else {
+				struct page *pend_page = its_allocate_pending_table(GFP_NOWAIT);
+				if (!pend_page) {
+					pr_err("Failed to allocate PENDBASE for CPU%d\n", cpu);
+					return -ENOMEM;
+				}
+				gic_data_rdist_cpu(cpu)->pend_page = pend_page;
+			}
+		}
+		return 0;
+	}
+
 	/*
 	 * We allocate all the pending tables anyway, as we may have a
 	 * mix of RDs that have had LPIs enabled, and some that
@@ -3158,6 +3185,12 @@ static void its_cpu_init_lpis(void)
 		return;
 
 	val = readl_relaxed(rbase + GICR_CTLR);
+	if (caretaker_is_orphaned_cpu(smp_processor_id()) &&
+	    (val & GICR_CTLR_ENABLE_LPIS)) {
+		gic_data_rdist()->flags |= RD_LOCAL_LPI_ENABLED;
+		goto out;
+	}
+
 	if ((gic_rdists->flags & RDIST_FLAGS_RD_TABLES_PREALLOCATED) &&
 	    (val & GICR_CTLR_ENABLE_LPIS)) {
 		/*
@@ -3173,7 +3206,10 @@ static void its_cpu_init_lpis(void)
 		paddr &= GENMASK_ULL(51, 16);
 
 		WARN_ON(!gic_check_reserved_range(paddr, LPI_PENDBASE_SZ));
-		gic_data_rdist()->flags |= RD_LOCAL_PENDTABLE_PREALLOCATED;
+		if (paddr && pfn_valid(paddr >> PAGE_SHIFT))
+			gic_data_rdist()->pend_page = pfn_to_page(paddr >> PAGE_SHIFT);
+		gic_data_rdist()->flags |= (RD_LOCAL_PENDTABLE_PREALLOCATED |
+					    RD_LOCAL_LPI_ENABLED);
 
 		goto out;
 	}
@@ -5386,7 +5422,8 @@ static int redist_disable_lpis(void)
 	 * If running with preallocated tables, there is nothing to do.
 	 */
 	if ((gic_data_rdist()->flags & RD_LOCAL_LPI_ENABLED) ||
-	    (gic_rdists->flags & RDIST_FLAGS_RD_TABLES_PREALLOCATED))
+	    (gic_rdists->flags & RDIST_FLAGS_RD_TABLES_PREALLOCATED) ||
+	    caretaker_is_orphaned_cpu(smp_processor_id()))
 		return 0;
 
 	/*
@@ -5471,14 +5508,10 @@ static int its_cpu_memreserve_lpi(unsigned int cpu)
 		goto out;
 	}
 	/*
-	 * If the pending table was pre-programmed, free the memory we
-	 * preemptively allocated. Otherwise, reserve that memory for
-	 * later kexecs.
+	 * If the pending table was preallocated, it is preserved across
+	 * kexecs. Otherwise, reserve that memory for later kexecs.
 	 */
-	if (gic_data_rdist()->flags & RD_LOCAL_PENDTABLE_PREALLOCATED) {
-		its_free_pending_table(pend_page);
-		gic_data_rdist()->pend_page = NULL;
-	} else {
+	if (!(gic_data_rdist()->flags & RD_LOCAL_PENDTABLE_PREALLOCATED)) {
 		phys_addr_t paddr = page_to_phys(pend_page);
 		WARN_ON(gic_reserve_range(paddr, LPI_PENDBASE_SZ));
 	}
@@ -5890,3 +5923,71 @@ int __init its_init(struct fwnode_handle *handle, struct rdists *rdists,
 
 	return 0;
 }
+
+#ifdef CONFIG_KEXEC_HANDOVER
+void gicv3_its_preserve_kho(void)
+{
+	struct its_node *its;
+	int cpu, i;
+
+	if (gic_rdists && gic_rdists->prop_table_pa) {
+		unsigned long pfn = gic_rdists->prop_table_pa >> PAGE_SHIFT;
+		unsigned long nr_pages = LPI_PROPBASE_SZ >> PAGE_SHIFT;
+		unsigned long p;
+
+		for (p = pfn; p < pfn + nr_pages; p++) {
+			if (pfn_valid(p))
+				kho_preserve_pages(pfn_to_page(p), 1);
+		}
+	}
+
+	for_each_possible_cpu(cpu) {
+		phys_addr_t paddr = 0;
+		void __iomem *rbase = gicv3_get_rdist_for_cpu(cpu);
+
+		if (rbase) {
+			u64 val = gicr_read_pendbaser(rbase + GICR_PENDBASER);
+			paddr = val & GENMASK_ULL(51, 16);
+		}
+		if (!paddr && gic_data_rdist_cpu(cpu)->pend_page)
+			paddr = page_to_phys(gic_data_rdist_cpu(cpu)->pend_page);
+
+		if (paddr) {
+			unsigned long pfn = paddr >> PAGE_SHIFT;
+			unsigned long nr_pages = LPI_PENDBASE_SZ >> PAGE_SHIFT;
+			unsigned long p;
+
+			for (p = pfn; p < pfn + nr_pages; p++) {
+				if (pfn_valid(p))
+					kho_preserve_pages(pfn_to_page(p), 1);
+			}
+		}
+	}
+
+	list_for_each_entry(its, &its_nodes, entry) {
+		if (its->cmd_base) {
+			unsigned long pfn = virt_to_phys(its->cmd_base) >> PAGE_SHIFT;
+			unsigned long nr_pages = ITS_CMD_QUEUE_SZ >> PAGE_SHIFT;
+			unsigned long p;
+
+			for (p = pfn; p < pfn + nr_pages; p++) {
+				if (pfn_valid(p))
+					kho_preserve_pages(pfn_to_page(p), 1);
+			}
+		}
+		for (i = 0; i < GITS_BASER_NR_REGS; i++) {
+			if (its->tables[i].base) {
+				unsigned long pfn = virt_to_phys(its->tables[i].base) >> PAGE_SHIFT;
+				unsigned long nr_pages = (PAGE_ORDER_TO_SIZE(its->tables[i].order)) >> PAGE_SHIFT;
+				unsigned long p;
+
+				for (p = pfn; p < pfn + nr_pages; p++) {
+					if (pfn_valid(p))
+						kho_preserve_pages(pfn_to_page(p), 1);
+				}
+			}
+		}
+	}
+}
+EXPORT_SYMBOL_GPL(gicv3_its_preserve_kho);
+#endif
