@@ -138,6 +138,7 @@
 #include <linux/liveupdate.h>
 #include <linux/mm.h>
 #include <linux/reboot.h>
+#include <linux/seq_file.h>
 
 #include <asm/sections.h>
 
@@ -1376,6 +1377,114 @@ static struct liveupdate_file_handler cpu_preserve_handler = {
 	.compatible = CPU_PRESERVED_LUO_FH_COMPATIBLE,
 };
 
+/*
+ * Debugfs Interface for preserved CPUs
+ */
+static int cpu_preserve_status_show(struct seq_file *m, void *v)
+{
+	int cpu;
+
+	seq_puts(m, "Preserved CPUs Status:\n");
+	for_each_possible_cpu(cpu) {
+		if (cpu_is_preserved(cpu)) {
+			const char *name = cpu_preserved_get_workload_name(cpu);
+			const char *session =
+				cpu_preserved_get_session_name(cpu);
+			const char *origin = cpu_preserved_is_incoming(cpu) ?
+					     "previous kernel" : "this kernel";
+
+			seq_printf(m,
+				   "CPU %d: preserved [workload: %s] [session: %s] [idle loop: %s]\n",
+				   cpu, name, session, origin);
+		} else if (cpu_online(cpu)) {
+			seq_printf(m, "CPU %d: online (host)\n", cpu);
+		} else {
+			seq_printf(m, "CPU %d: offline\n", cpu);
+		}
+	}
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(cpu_preserve_status);
+
+static int cpu_preserve_cpu_status_show(struct seq_file *m, void *v)
+{
+	int cpu = (long)m->private;
+
+	if (cpu_is_preserved(cpu))
+		seq_puts(m, "preserved\n");
+	else if (cpu_online(cpu))
+		seq_puts(m, "online\n");
+	else
+		seq_puts(m, "offline\n");
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(cpu_preserve_cpu_status);
+
+static int cpu_preserve_workload_show(struct seq_file *m, void *v)
+{
+	int cpu = (long)m->private;
+
+	seq_printf(m, "%s\n", cpu_preserved_get_workload_name(cpu));
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(cpu_preserve_workload);
+
+static int cpu_preserve_origin_show(struct seq_file *m, void *v)
+{
+	int cpu = (long)m->private;
+
+	if (cpu_is_preserved(cpu)) {
+		seq_printf(m, "%s\n", cpu_preserved_is_incoming(cpu) ?
+				      "previous kernel" : "this kernel");
+	} else {
+		seq_puts(m, "none\n");
+	}
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(cpu_preserve_origin);
+
+static int cpu_preserve_session_show(struct seq_file *m, void *v)
+{
+	int cpu = (long)m->private;
+
+	seq_printf(m, "%s\n", cpu_preserved_get_session_name(cpu));
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(cpu_preserve_session);
+
+static struct dentry *cpu_preserve_debugfs_dir;
+
+static int __init cpu_preserve_init_debugfs(void)
+{
+	struct dentry *cpu_dir;
+	char name[16];
+	int cpu;
+
+	cpu_preserve_debugfs_dir = debugfs_create_dir("preserved_cpu", NULL);
+
+	debugfs_create_file("status", 0444, cpu_preserve_debugfs_dir, NULL,
+			    &cpu_preserve_status_fops);
+
+	for_each_possible_cpu(cpu) {
+		snprintf(name, sizeof(name), "cpu%d", cpu);
+		cpu_dir = debugfs_create_dir(name, cpu_preserve_debugfs_dir);
+		debugfs_create_file("status", 0444, cpu_dir,
+				    (void *)(long)cpu,
+				    &cpu_preserve_cpu_status_fops);
+		debugfs_create_file("workload", 0444, cpu_dir,
+				    (void *)(long)cpu,
+				    &cpu_preserve_workload_fops);
+		debugfs_create_file("origin", 0444, cpu_dir,
+				    (void *)(long)cpu,
+				    &cpu_preserve_origin_fops);
+		debugfs_create_file("session", 0444, cpu_dir,
+				    (void *)(long)cpu,
+				    &cpu_preserve_session_fops);
+	}
+
+	return 0;
+}
+
 static int cpu_preserve_reboot_notify(struct notifier_block *nb,
 				      unsigned long action, void *data)
 {
@@ -1493,3 +1602,4 @@ static int __init cpu_preserve_early_init(void)
 	return 0;
 }
 early_initcall(cpu_preserve_early_init);
+late_initcall(cpu_preserve_init_debugfs);
