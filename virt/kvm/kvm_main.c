@@ -4961,6 +4961,8 @@ static int kvm_vm_ioctl_check_extension_generic(struct kvm *kvm, long arg)
 	case KVM_CAP_GUEST_MEMFD_FLAGS:
 		return kvm_gmem_get_supported_flags(kvm);
 #endif
+	case KVM_CAP_VCPU_PRESERVE:
+		return IS_ENABLED(CONFIG_HAVE_KVM_ARCH_VCPU_PRESERVE);
 	default:
 		break;
 	}
@@ -5505,6 +5507,12 @@ bool file_is_kvm(struct file *file)
 	return file && file->f_op == &kvm_vm_fops;
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(file_is_kvm);
+
+bool file_is_kvm_vcpu(struct file *file)
+{
+	return file && file->f_op == &kvm_vcpu_fops;
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(file_is_kvm_vcpu);
 
 struct file *kvm_create_vm_file(unsigned long type, const char *fdname)
 {
