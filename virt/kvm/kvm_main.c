@@ -5506,6 +5506,12 @@ bool file_is_kvm(struct file *file)
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(file_is_kvm);
 
+bool file_is_kvm_vcpu(struct file *file)
+{
+	return file && file->f_op == &kvm_vcpu_fops;
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(file_is_kvm_vcpu);
+
 struct file *kvm_create_vm_file(unsigned long type, const char *fdname)
 {
 	struct kvm *kvm = kvm_create_vm(type, fdname);
