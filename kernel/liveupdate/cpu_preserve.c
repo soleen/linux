@@ -315,6 +315,135 @@ EXPORT_SYMBOL_GPL(cpu_preserved_should_exit);
  * Return: 0 on success, -EINVAL if @cpu is invalid, -ENODEV if not preserved,
  * or -EBUSY if a workload is already attached.
  */
+int cpu_preserved_attach_workload(int cpu, const char *name,
+				  void (*entry_fn)(void *data), void *data)
+{
+	struct cpu_preserved_pcpu *pcpu;
+
+	if ((unsigned int)cpu >= nr_cpu_ids)
+		return -EINVAL;
+
+	mutex_lock(&cpu_preserved_lock);
+	if (!cpumask_test_cpu(cpu, &cpu_preserved_outgoing.mask)) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -ENODEV;
+	}
+
+	pcpu = &cpu_preserved_outgoing.pcpus[cpu];
+	if (pcpu->state.workload != CPU_PRESERVED_PARKED || pcpu->entry_fn) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -EBUSY;
+	}
+
+	if (name && name[0] != '\0')
+		strscpy(pcpu->state.name, name, sizeof(pcpu->state.name));
+	WRITE_ONCE(pcpu->entry_data, data);
+	WRITE_ONCE(pcpu->entry_fn, entry_fn);
+
+	cpu_preserved_clean(pcpu);
+
+	arch_cpu_preserved_kick(cpu);
+	mutex_unlock(&cpu_preserved_lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_attach_workload);
+
+/**
+ * cpu_preserved_detach_workload - Detach workload and return core to idle park
+ * @cpu: Logical CPU identifier.
+ *
+ * Clears any attached workload on @cpu, returning the core to the default
+ * idle parking loop.
+ *
+ * Return: 0 on success, -EINVAL if @cpu is invalid, or -ENODEV if
+ * not preserved.
+ */
+int cpu_preserved_detach_workload(int cpu)
+{
+	struct cpu_preserved_pcpu *pcpu;
+
+	if ((unsigned int)cpu >= nr_cpu_ids)
+		return -EINVAL;
+
+	mutex_lock(&cpu_preserved_lock);
+	pcpu = cpu_preserved_get_pcpu(cpu);
+	if (!pcpu) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -ENODEV;
+	}
+
+	strscpy(pcpu->state.name, "parked", sizeof(pcpu->state.name));
+	WRITE_ONCE(pcpu->state.workload, CPU_PRESERVED_PARKED);
+	WRITE_ONCE(pcpu->entry_fn, NULL);
+	WRITE_ONCE(pcpu->entry_data, NULL);
+
+	cpu_preserved_clean(pcpu);
+
+	arch_cpu_preserved_kick(cpu);
+	mutex_unlock(&cpu_preserved_lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_detach_workload);
+
+/**
+ * cpu_preserved_set_workload_context - Set workload context and root page table
+ * @cpu: Logical CPU identifier.
+ * @ctx: Opaque owning workload context pointer.
+ * @pgd_pa: Physical address of workload root page table (or 0 for default).
+ */
+void cpu_preserved_set_workload_context(int cpu, void *ctx, phys_addr_t pgd_pa)
+{
+	struct cpu_preserved_pcpu *pcpu;
+
+	if (cpu < 0 || cpu >= nr_cpu_ids)
+		return;
+
+	mutex_lock(&cpu_preserved_lock);
+	pcpu = cpu_preserved_get_pcpu(cpu);
+	if (pcpu && pcpu->stack) {
+		struct cpu_preserved_stack_context *sctx = pcpu->stack;
+
+		sctx->workload_context = ctx;
+		sctx->session_pgd_pa = pgd_pa;
+		pcpu->pgd_pa = pgd_pa;
+	}
+	mutex_unlock(&cpu_preserved_lock);
+}
+
+int cpu_preserved_get_stack_info(int cpu, phys_addr_t *pa, unsigned long *va, size_t *size)
+{
+	struct cpu_preserved_pcpu *pcpu;
+
+	if (cpu < 0 || cpu >= nr_cpu_ids)
+		return -EINVAL;
+
+	pcpu = cpu_preserved_get_pcpu(cpu);
+	if (!pcpu || !pcpu->stack)
+		return -ENODEV;
+
+	if (pa)
+		*pa = pcpu->state.stack_pa;
+	if (va)
+		*va = (unsigned long)pcpu->stack;
+	if (size)
+		*size = CPU_PRESERVED_STACK_SIZE;
+	return 0;
+}
+
+int cpu_preserved_get_pcpus_info(phys_addr_t *pa, unsigned long *va, size_t *size)
+{
+	if (!cpu_preserved_pcpus_va || !cpu_preserved_pcpus_pa)
+		return -ENODEV;
+
+	if (pa)
+		*pa = cpu_preserved_pcpus_pa;
+	if (va)
+		*va = (unsigned long)cpu_preserved_pcpus_va;
+	if (size)
+		*size = sizeof(struct cpu_preserved_pcpu) * nr_cpu_ids;
+	return 0;
+}
+
 static int cpu_wait_dead(int cpu)
 {
 	struct cpu_preserved_pcpu *pcpu = cpu_preserved_get_pcpu(cpu);
