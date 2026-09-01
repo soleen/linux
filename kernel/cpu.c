@@ -349,6 +349,7 @@ static inline void cpuhp_ap_update_sync_state(enum cpuhp_sync_state state) { }
 void cpuhp_ap_report_dead(void)
 {
 	cpuhp_ap_update_sync_state(SYNC_STATE_DEAD);
+	cpu_preserved_report_dead();
 }
 
 void __weak arch_cpuhp_cleanup_dead_cpu(unsigned int cpu) { }
