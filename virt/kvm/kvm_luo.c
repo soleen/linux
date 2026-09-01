@@ -44,6 +44,9 @@
  */
 #include <linux/liveupdate.h>
 #include <linux/kvm_host.h>
+#include <linux/caretaker.h>
+#include <linux/cpu_preserve.h>
+#include <linux/kvm_caretaker.h>
 #include <linux/pagemap.h>
 #include <linux/fdtable.h>
 #include <linux/file.h>
@@ -216,7 +219,7 @@ static int kvm_vcpu_luo_preserve(struct liveupdate_file_op_args *args)
 	ser->arch_state.phys = 0;
 	ser->cb.phys = 0;
 
-	err = kvm_arch_vcpu_luo_preserve(vcpu, ser);
+	err = kvm_caretaker_vcpu_preserve(vcpu, args->session, ser);
 	if (err) {
 		kho_unpreserve_free(ser);
 		return err;
@@ -288,6 +291,7 @@ static int kvm_vcpu_luo_retrieve(struct liveupdate_file_op_args *args)
 		fput(file);
 		goto err_free_ser;
 	}
+	kvm_caretaker_vcpu_retrieve(vcpu, ser);
 
 	args->file = file;
 	return 0;
@@ -300,18 +304,24 @@ err_free_ser:
 
 static void kvm_vcpu_luo_unpreserve(struct liveupdate_file_op_args *args)
 {
+	struct kvm_vcpu *vcpu = args->file ? args->file->private_data : NULL;
 	struct kvm_vcpu_luo_ser *ser;
 
 	if (WARN_ON_ONCE(!args->serialized_data))
 		return;
 
 	ser = phys_to_virt(args->serialized_data);
+
+	if (vcpu)
+		kvm_caretaker_vcpu_unpreserve(vcpu, args->session, ser);
+
 	kvm_arch_vcpu_luo_unpreserve(ser);
 	kho_unpreserve_free(ser);
 }
 
 static void kvm_vcpu_luo_finish(struct liveupdate_file_op_args *args)
 {
+	struct kvm_vcpu *vcpu = args->file ? args->file->private_data : NULL;
 	struct kvm_vcpu_luo_ser *ser;
 
 	if (args->retrieve_status < 0)
@@ -321,6 +331,10 @@ static void kvm_vcpu_luo_finish(struct liveupdate_file_op_args *args)
 		return;
 
 	ser = phys_to_virt(args->serialized_data);
+
+	if (vcpu)
+		kvm_caretaker_vcpu_finish(vcpu, args->session);
+
 	kvm_arch_vcpu_luo_finish(ser);
 	kho_restore_free(ser);
 }
