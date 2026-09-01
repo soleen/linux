@@ -448,6 +448,7 @@ static void kvm_vcpu_init(struct kvm_vcpu *vcpu, struct kvm *kvm, unsigned id)
 	rcuwait_init(&vcpu->wait);
 #endif
 	kvm_async_pf_vcpu_init(vcpu);
+	caretaker_cb_init(&vcpu->cb, id);
 
 	kvm_vcpu_set_in_spin_loop(vcpu, false);
 	kvm_vcpu_set_dy_eligible(vcpu, false);
@@ -4495,6 +4496,7 @@ static long kvm_vcpu_ioctl(struct file *filp,
 
 			put_pid(oldpid);
 		}
+		caretaker_kvm_attach(&vcpu->cb);
 		vcpu->wants_to_run = !READ_ONCE(vcpu->run->immediate_exit__unsafe);
 		r = kvm_arch_vcpu_ioctl_run(vcpu);
 		vcpu->wants_to_run = false;
@@ -5670,6 +5672,7 @@ static int kvm_online_cpu(unsigned int cpu)
 	 * be enabled. Otherwise running VMs would encounter unrecoverable
 	 * errors when scheduled to this CPU.
 	 */
+	__this_cpu_write(virtualization_enabled, false);
 	return kvm_enable_virtualization_cpu();
 }
 
@@ -5679,6 +5682,9 @@ static void kvm_disable_virtualization_cpu(void *ign)
 		return;
 
 	kvm_arch_disable_virtualization_cpu();
+
+	if (cpu_is_preserved(raw_smp_processor_id()))
+		return;
 
 	__this_cpu_write(virtualization_enabled, false);
 }
@@ -6439,6 +6445,9 @@ static void kvm_sched_in(struct preempt_notifier *pn, int cpu)
 {
 	struct kvm_vcpu *vcpu = preempt_notifier_to_vcpu(pn);
 
+	if (!caretaker_kvm_is_attached(&vcpu->cb))
+		return;
+
 	WRITE_ONCE(vcpu->preempted, false);
 	WRITE_ONCE(vcpu->ready, false);
 
@@ -6452,6 +6461,9 @@ static void kvm_sched_out(struct preempt_notifier *pn,
 			  struct task_struct *next)
 {
 	struct kvm_vcpu *vcpu = preempt_notifier_to_vcpu(pn);
+
+	if (!caretaker_kvm_is_attached(&vcpu->cb))
+		return;
 
 	WRITE_ONCE(vcpu->scheduled_out, true);
 
