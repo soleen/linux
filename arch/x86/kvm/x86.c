@@ -10042,6 +10042,7 @@ void kvm_arch_destroy_vm(struct kvm *kvm)
 	kvm_xen_destroy_vm(kvm);
 	kvm_hv_destroy_vm(kvm);
 	kvm_x86_call(vm_destroy)(kvm);
+	kvm_arch_vm_luo_destroy(kvm);
 }
 
 static void memslot_rmap_free(struct kvm_memory_slot *slot)

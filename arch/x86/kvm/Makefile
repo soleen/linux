@@ -96,3 +96,5 @@ undefine check_kvm_exports
 undefine get_kvm_exports
 undefine exports_grep_trailer
 endif # CONFIG_KVM_X86
+
+kvm-y += kvm_luo.o
