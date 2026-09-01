@@ -508,6 +508,83 @@ EXPORT_SYMBOL_GPL(cpu_preserved_should_exit);
  * Return: 0 on success, -EINVAL if @cpu is invalid, -ENODEV if not preserved,
  * or -EBUSY if a workload is already attached.
  */
+int cpu_preserved_attach_workload(int cpu, const char *name,
+				  void (*entry_fn)(void *data), void *data)
+{
+	struct cpu_preserved_pcpu *pcpu;
+
+	if (cpu < 0 || cpu >= nr_cpu_ids)
+		return -EINVAL;
+
+	mutex_lock(&cpu_preserved_lock);
+	if (!cpumask_test_cpu(cpu, &cpu_preserved_outgoing.mask) ||
+	    !cpu_preserved_outgoing.pcpus) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -ENODEV;
+	}
+
+	pcpu = &cpu_preserved_outgoing.pcpus[cpu];
+	if (pcpu->state.workload != CPU_PRESERVED_PARKED || pcpu->entry_fn) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -EBUSY;
+	}
+
+	if (name && name[0] != '\0')
+		strscpy(pcpu->state.name, name, sizeof(pcpu->state.name));
+	WRITE_ONCE(pcpu->entry_data, data);
+	WRITE_ONCE(pcpu->entry_fn, entry_fn);
+	cpu_preserved_sync_outgoing();
+
+	arch_cpu_preserved_dcache_clean((unsigned long)pcpu,
+					(unsigned long)pcpu + sizeof(*pcpu));
+
+	cpu_kick(cpu);
+	mutex_unlock(&cpu_preserved_lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_attach_workload);
+
+/**
+ * cpu_preserved_detach_workload - Detach workload and return core to idle park
+ * @cpu: Logical CPU identifier.
+ *
+ * Clears any attached workload on @cpu, returning the core to the default
+ * idle parking loop.
+ *
+ * Return: 0 on success, -EINVAL if @cpu is invalid, or -ENODEV if
+ * not preserved.
+ */
+int cpu_preserved_detach_workload(int cpu)
+{
+	struct cpu_preserved_pcpu *pcpu;
+
+	if (cpu < 0 || cpu >= nr_cpu_ids)
+		return -EINVAL;
+
+	mutex_lock(&cpu_preserved_lock);
+	pcpu = cpu_preserved_get_pcpu(cpu);
+	if (!pcpu) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -ENODEV;
+	}
+
+	strscpy(pcpu->state.name, "parked", sizeof(pcpu->state.name));
+	WRITE_ONCE(pcpu->state.workload, CPU_PRESERVED_PARKED);
+	WRITE_ONCE(pcpu->entry_fn, NULL);
+	WRITE_ONCE(pcpu->entry_data, NULL);
+	if (!cpu_preserved_is_incoming(cpu))
+		cpu_preserved_sync_outgoing();
+
+	arch_cpu_preserved_dcache_clean((unsigned long)pcpu,
+					(unsigned long)pcpu + sizeof(*pcpu));
+
+	cpu_kick(cpu);
+	mutex_unlock(&cpu_preserved_lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_detach_workload);
+
+
 static int cpu_wait_dead(int cpu)
 {
 	struct cpu_preserved_pcpu *pcpu = cpu_preserved_get_pcpu(cpu);

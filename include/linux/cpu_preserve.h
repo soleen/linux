@@ -91,7 +91,9 @@ const char *cpu_preserved_get_session_name(int cpu);
 void cpu_preserved_park(int cpu);
 const struct cpumask *cpu_get_preserved_mask(void);
 void cpu_preserved_filter_offline_mask(struct cpumask *mask);
+int cpu_preserved_attach_workload(int cpu, const char *name,
 				  void (*entry_fn)(void *data), void *data);
+int cpu_preserved_detach_workload(int cpu);
 
 /**
  * cpu_preserved_report_dead - Park preserved CPU when reporting dead in hotplug
@@ -279,11 +281,13 @@ static inline const struct cpumask *cpu_get_preserved_mask(void)
 }
 static inline void cpu_preserved_filter_offline_mask(struct cpumask *mask) {}
 
+static inline int cpu_preserved_attach_workload(int cpu, const char *name,
 						void (*entry_fn)(void *data),
 						void *data)
 {
 	return -EOPNOTSUPP;
 }
+static inline int cpu_preserved_detach_workload(int cpu) { return -EOPNOTSUPP; }
 
 static inline void arch_cpu_preserved_kick(int cpu) {}
 static inline void arch_cpu_preserved_park_wait(void) {}
