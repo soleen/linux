@@ -11,6 +11,7 @@
 #include <linux/sched.h>
 #include <asm/kvm_mmu.h>
 #include <asm/kvm_pgtable.h>
+#include "caretaker.h"
 
 #define KVM_ARM64_LUO_STATE_ORDER	get_order(sizeof(struct kvm_vcpu_arch_luo_state))
 
@@ -57,6 +58,11 @@ int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *s
 	struct kvm_vcpu_arch_luo_state *state;
 	struct page *page;
 	int num_sysregs;
+
+#ifdef CONFIG_KVM_CARETAKER
+	if (ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER)
+		return arm64_kvm_caretaker_preserve(vcpu, ser);
+#endif
 
 	BUILD_BUG_ON(sizeof(struct kvm_vcpu_arch_luo_state) != 5180);
 
@@ -123,6 +129,11 @@ int kvm_arch_vcpu_luo_retrieve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *s
 	struct kvm_vcpu_arch_luo_state *state;
 	int num_sysregs;
 
+#ifdef CONFIG_KVM_CARETAKER
+	if (ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER)
+		return 0;
+#endif
+
 	if (!ser || !ser->arch_state.phys || !vcpu)
 		return 0;
 
@@ -166,6 +177,15 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_retrieve);
 
 void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_luo_ser *ser)
 {
+#ifdef CONFIG_KVM_CARETAKER
+	if (ser && ser->cb.phys) {
+		struct caretaker_cb *cb = phys_to_virt(ser->cb.phys);
+
+		if (cb && cb->runtime_pa)
+			kho_unpreserve_free(phys_to_virt(cb->runtime_pa));
+		ser->cb.phys = 0;
+	}
+#endif
 	if (ser && ser->arch_state.phys) {
 		kho_unpreserve_pages(pfn_to_page(ser->arch_state.phys >> PAGE_SHIFT),
 				     1 << KVM_ARM64_LUO_STATE_ORDER);
@@ -178,6 +198,15 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_unpreserve);
 
 void kvm_arch_vcpu_luo_finish(struct kvm_vcpu_luo_ser *ser)
 {
+#ifdef CONFIG_KVM_CARETAKER
+	if (ser && ser->cb.phys) {
+		struct caretaker_cb *cb = phys_to_virt(ser->cb.phys);
+
+		if (cb && cb->runtime_pa)
+			kho_restore_free(phys_to_virt(cb->runtime_pa));
+		ser->cb.phys = 0;
+	}
+#endif
 	if (ser && ser->arch_state.phys) {
 		kho_restore_pages(ser->arch_state.phys, 1 << KVM_ARM64_LUO_STATE_ORDER);
 		__free_pages(pfn_to_page(ser->arch_state.phys >> PAGE_SHIFT),

@@ -11,8 +11,9 @@
 #include <linux/irqchip/arm-gic-v3.h>
 #include <asm/barrier.h>
 #include <asm/cacheflush.h>
-struct caretaker_session;
-struct caretaker_sched_config;
+#include <asm/caretaker.h>
+#include <linux/caretaker.h>
+#include <linux/kvm_host.h>
 #include <asm/cpu_ops.h>
 #include <asm/daifflags.h>
 #include <asm/kernel-pgtable.h>
@@ -30,6 +31,7 @@ void __cpu_preserved_text arch_cpu_preserved_kick(int cpu)
 {
 	dsb(ishst);
 	sev();
+	gicv3_caretaker_kick_cpu(cpu);
 	isb();
 }
 
@@ -425,7 +427,7 @@ void __cpu_preserved_text arch_cpu_preserved_park_init(int cpu)
 		write_sysreg(pgd_pa, ttbr1_el1);
 	isb();
 	asm volatile("tlbi alle2is\n dsb ish\n isb\n" ::: "memory");
-	write_sysreg((unsigned long)__kvm_hyp_vector, vbar_el1);
+	write_sysreg((unsigned long)caretaker_hyp_vector, vbar_el1);
 	write_sysreg_s(0xff, SYS_ICC_PMR_EL1);
 	write_sysreg_s(1, SYS_ICC_IGRPEN1_EL1);
 	write_sysreg_s(1, SYS_ICC_IGRPEN0_EL1);
@@ -628,4 +630,26 @@ void arch_cpu_preserved_wait_dead(int cpu)
 	if (ops && ops->cpu_kill)
 		ops->cpu_kill(cpu);
 }
+
+u64 __cpu_preserved_text arch_caretaker_ticks_to_ns(u64 ticks)
+{
+	u32 cntfrq = arch_timer_get_cntfrq();
+
+	if (cntfrq > 0)
+		return mul_u64_u32_div(ticks, 1000000000U, cntfrq);
+	return ticks;
+}
+EXPORT_SYMBOL_GPL(arch_caretaker_ticks_to_ns);
+
+void arch_caretaker_update_quantum_ticks(struct caretaker_sched_config *cfg)
+{
+	u32 ms = cfg->quantum_ms;
+	u32 cntfrq = arch_timer_get_cntfrq();
+
+	if (cntfrq > 0)
+		cfg->quantum_ticks = ((u64)ms * cntfrq) / 1000ULL;
+	else
+		cfg->quantum_ticks = (u64)ms * 25000000ULL / 1000ULL;
+}
+EXPORT_SYMBOL_GPL(arch_caretaker_update_quantum_ticks);
 
