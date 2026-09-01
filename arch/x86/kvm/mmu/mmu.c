@@ -23,6 +23,8 @@
 #include "tdp_mmu.h"
 #include "x86.h"
 #include "regs.h"
+#include "lapic.h"
+#include <linux/kexec_handover.h>
 #include "smm.h"
 #include "kvm_emulate.h"
 #include "page_track.h"
@@ -8300,3 +8302,43 @@ void kvm_mmu_init_memslot_memory_attributes(struct kvm *kvm,
 	}
 }
 #endif
+
+void kvm_mmu_preserve_kho(struct kvm *kvm)
+{
+	struct kvm_mmu_page *sp;
+	struct kvm_vcpu *vcpu;
+	unsigned long i;
+
+	if (!kvm)
+		return;
+
+	if (tdp_mmu_enabled)
+		kvm_tdp_mmu_preserve_kho(kvm);
+
+	write_lock(&kvm->mmu_lock);
+	list_for_each_entry(sp, &kvm->arch.active_mmu_pages, link) {
+		if (sp->spt)
+			kho_preserve_pages(virt_to_page(sp->spt), 1);
+	}
+	write_unlock(&kvm->mmu_lock);
+
+	kvm_for_each_vcpu(i, vcpu, kvm) {
+		if (vcpu->arch.mmu) {
+			if (vcpu->arch.mmu->pae_root)
+				kho_preserve_pages(virt_to_page(vcpu->arch.mmu->pae_root), 1);
+			if (vcpu->arch.mmu->pml4_root)
+				kho_preserve_pages(virt_to_page(vcpu->arch.mmu->pml4_root), 1);
+			if (vcpu->arch.mmu->pml5_root)
+				kho_preserve_pages(virt_to_page(vcpu->arch.mmu->pml5_root), 1);
+		}
+		if (vcpu->arch.guest_mmu.pae_root)
+			kho_preserve_pages(virt_to_page(vcpu->arch.guest_mmu.pae_root), 1);
+		if (vcpu->arch.guest_mmu.pml4_root)
+			kho_preserve_pages(virt_to_page(vcpu->arch.guest_mmu.pml4_root), 1);
+		if (vcpu->arch.guest_mmu.pml5_root)
+			kho_preserve_pages(virt_to_page(vcpu->arch.guest_mmu.pml5_root), 1);
+		if (vcpu->arch.apic && vcpu->arch.apic->regs)
+			kho_preserve_pages(virt_to_page(vcpu->arch.apic->regs), 1);
+	}
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_mmu_preserve_kho);

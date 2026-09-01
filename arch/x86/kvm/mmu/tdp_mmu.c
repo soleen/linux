@@ -8,6 +8,7 @@
 #include "tdp_mmu.h"
 #include "spte.h"
 
+#include <linux/kexec_handover.h>
 #include <asm/cmpxchg.h>
 #include <trace/events/kvm.h>
 
@@ -1947,4 +1948,24 @@ u64 *kvm_tdp_mmu_fast_pf_get_last_sptep(struct kvm_vcpu *vcpu, gfn_t gfn,
 	 * outside of mmu_lock.
 	 */
 	return rcu_dereference(sptep);
+}
+
+void kvm_tdp_mmu_preserve_kho(struct kvm *kvm)
+{
+	struct kvm_mmu_page *root;
+	struct tdp_iter iter;
+	gfn_t end = kvm_mmu_max_gfn() + 1;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(root, &kvm->arch.tdp_mmu_roots, link) {
+		if (root->spt)
+			kho_preserve_pages(virt_to_page(root->spt), 1);
+		tdp_root_for_each_pte(iter, kvm, root, 0, end) {
+			if (is_shadow_present_pte(iter.old_spte) &&
+			    !is_last_spte(iter.old_spte, iter.level)) {
+				kho_preserve_pages(pfn_to_page(spte_to_pfn(iter.old_spte)), 1);
+			}
+		}
+	}
+	rcu_read_unlock();
 }

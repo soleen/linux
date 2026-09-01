@@ -150,6 +150,16 @@ int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *s
 	}
 	vcpu_put(vcpu);
 
+#ifdef CONFIG_KVM_CARETAKER
+	if (ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER) {
+		kvm_arch_vcpu_caretaker_init(vcpu, &ser->cb.phys);
+		if (!ser->cb.phys) {
+			kho_unpreserve_free(state);
+			return -ENOMEM;
+		}
+	}
+#endif
+
 	KHOSER_STORE_PTR(ser->arch_state, state);
 	return 0;
 }
@@ -200,27 +210,29 @@ int kvm_arch_vcpu_luo_retrieve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *s
 	if (ret)
 		return ret;
 
-	ret = kvm_arch_vcpu_ioctl_set_fpu(vcpu, &state->fpu);
-	if (ret)
-		return ret;
-
-	vcpu_load(vcpu);
-	if (state->has_lapic && lapic_in_kernel(vcpu)) {
-		ret = kvm_apic_set_state(vcpu, &state->lapic);
-		if (ret) {
-			vcpu_put(vcpu);
+	if (!(ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER)) {
+		ret = kvm_arch_vcpu_ioctl_set_fpu(vcpu, &state->fpu);
+		if (ret)
 			return ret;
+
+		vcpu_load(vcpu);
+		if (state->has_lapic && lapic_in_kernel(vcpu)) {
+			ret = kvm_apic_set_state(vcpu, &state->lapic);
+			if (ret) {
+				vcpu_put(vcpu);
+				return ret;
+			}
 		}
+
+		for (i = 0; i < state->num_msrs; i++)
+			kvm_msr_write(vcpu, state->msrs[i].index, state->msrs[i].data);
+
+		vcpu_put(vcpu);
+
+		ret = kvm_arch_vcpu_ioctl_set_regs(vcpu, &state->regs);
+		if (ret)
+			return ret;
 	}
-
-	for (i = 0; i < state->num_msrs; i++)
-		kvm_msr_write(vcpu, state->msrs[i].index, state->msrs[i].data);
-
-	vcpu_put(vcpu);
-
-	ret = kvm_arch_vcpu_ioctl_set_regs(vcpu, &state->regs);
-	if (ret)
-		return ret;
 
 	return 0;
 }
@@ -228,8 +240,20 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_retrieve);
 
 void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_luo_ser *ser)
 {
+#ifdef CONFIG_KVM_CARETAKER
+	if (ser->cb.phys) {
+		struct caretaker_cb *cb = phys_to_virt(__sme_clr(ser->cb.phys));
+
+		if (cb && cb->runtime_pa)
+			kho_unpreserve_free(phys_to_virt(__sme_clr(cb->runtime_pa)));
+		ser->cb.phys = 0;
+	}
+#endif
 	if (ser->arch_state.phys) {
-		kho_unpreserve_free(phys_to_virt(__sme_clr(ser->arch_state.phys)));
+		struct kvm_vcpu_arch_luo_state *state =
+			phys_to_virt(__sme_clr(ser->arch_state.phys));
+
+		kho_unpreserve_free(state);
 		ser->arch_state.phys = 0;
 	}
 }
@@ -237,8 +261,20 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_unpreserve);
 
 void kvm_arch_vcpu_luo_finish(struct kvm_vcpu_luo_ser *ser)
 {
+#ifdef CONFIG_KVM_CARETAKER
+	if (ser->cb.phys) {
+		struct caretaker_cb *cb = phys_to_virt(__sme_clr(ser->cb.phys));
+
+		if (cb && cb->runtime_pa)
+			kho_restore_free(phys_to_virt(__sme_clr(cb->runtime_pa)));
+		ser->cb.phys = 0;
+	}
+#endif
 	if (ser->arch_state.phys) {
-		kho_restore_free(phys_to_virt(__sme_clr(ser->arch_state.phys)));
+		struct kvm_vcpu_arch_luo_state *state =
+			phys_to_virt(__sme_clr(ser->arch_state.phys));
+
+		kho_restore_free(state);
 		ser->arch_state.phys = 0;
 	}
 }

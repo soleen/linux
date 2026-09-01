@@ -1029,6 +1029,7 @@ struct kvm_vcpu_arch {
 #if IS_ENABLED(CONFIG_HYPERV)
 	hpa_t hv_root_tdp;
 #endif
+	u64 cb_pa;
 };
 
 struct kvm_lpage_info {
@@ -1912,9 +1913,27 @@ static inline bool kvm_arch_has_irq_bypass(void)
 	return enable_device_posted_irqs;
 }
 
+#ifdef CONFIG_HAVE_KVM_ARCH_CARETAKER
+void kvm_arch_vcpu_caretaker_init(struct kvm_vcpu *vcpu, u64 *cb_pa);
+u32 kvm_arch_luo_vm_type(struct kvm *kvm);
+#else
+static inline void kvm_arch_vcpu_caretaker_init(struct kvm_vcpu *vcpu,
+						u64 *cb_pa)
+{
+	if (cb_pa)
+		*cb_pa = 0;
+}
+static inline u32 kvm_arch_luo_vm_type(struct kvm *kvm)
+{
+	return 0;
+}
+#endif
+
 struct kvm_cpuid_entry2;
 int kvm_set_cpuid(struct kvm_vcpu *vcpu, struct kvm_cpuid_entry2 *e2,
 		  int nent);
 void kvm_arch_vm_luo_destroy(struct kvm *kvm);
+void kvm_mmu_preserve_kho(struct kvm *kvm);
+void kvm_tdp_mmu_preserve_kho(struct kvm *kvm);
 
 #endif /* _ASM_X86_KVM_HOST_H */
