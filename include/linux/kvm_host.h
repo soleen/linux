@@ -1094,6 +1094,7 @@ void kvm_get_kvm(struct kvm *kvm);
 bool kvm_get_kvm_safe(struct kvm *kvm);
 void kvm_put_kvm(struct kvm *kvm);
 bool file_is_kvm(struct file *file);
+bool file_is_kvm_vcpu(struct file *file);
 struct file *kvm_create_vm_file(unsigned long type, const char *fdname);
 void kvm_put_kvm_no_destroy(struct kvm *kvm);
 void kvm_uevent_notify_vm_create(struct kvm *kvm);
@@ -2659,6 +2660,31 @@ void kvm_arch_gmem_invalidate_range(struct kvm *kvm, struct kvm_gfn_range *range
 #ifdef CONFIG_KVM_GENERIC_PRE_FAULT_MEMORY
 long kvm_arch_vcpu_pre_fault_memory(struct kvm_vcpu *vcpu,
 				    struct kvm_pre_fault_memory *range);
+#endif
+
+struct kvm_luo_ser;
+struct kvm_vcpu_luo_ser;
+
+#ifdef CONFIG_HAVE_KVM_ARCH_VCPU_PRESERVE
+int kvm_arch_vm_luo_preserve(struct kvm *kvm, struct kvm_luo_ser *ser);
+int kvm_arch_vm_luo_retrieve(struct kvm *kvm, struct kvm_luo_ser *ser);
+void kvm_arch_vm_luo_unpreserve(struct kvm_luo_ser *ser);
+void kvm_arch_vm_luo_finish(struct kvm_luo_ser *ser);
+
+int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *ser);
+int kvm_arch_vcpu_luo_retrieve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *ser);
+void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_luo_ser *ser);
+void kvm_arch_vcpu_luo_finish(struct kvm_vcpu_luo_ser *ser);
+#else
+static inline int kvm_arch_vm_luo_preserve(struct kvm *kvm, struct kvm_luo_ser *ser) { return 0; }
+static inline int kvm_arch_vm_luo_retrieve(struct kvm *kvm, struct kvm_luo_ser *ser) { return 0; }
+static inline void kvm_arch_vm_luo_unpreserve(struct kvm_luo_ser *ser) {}
+static inline void kvm_arch_vm_luo_finish(struct kvm_luo_ser *ser) {}
+
+static inline int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *ser) { return 0; }
+static inline int kvm_arch_vcpu_luo_retrieve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *ser) { return 0; }
+static inline void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_luo_ser *ser) {}
+static inline void kvm_arch_vcpu_luo_finish(struct kvm_vcpu_luo_ser *ser) {}
 #endif
 
 #endif
