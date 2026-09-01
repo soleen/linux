@@ -136,4 +136,16 @@ config LIVEUPDATE_CPU
 
 	  If unsure, say N.
 
+config ONCORE_SCHED
+	bool "On-core session and scheduling framework"
+	depends on LIVEUPDATE_CPU
+	default LIVEUPDATE_CPU
+	help
+	  Enable the on-core session and scheduling framework for coordinating
+	  preserved execution directly on physical CPU cores across host live
+	  updates. Workloads (such as KVM vCPUs or bare processes) are scheduled
+	  on preserved cores without returning to host userspace during kexec.
+
+	  If unsure, say N.
+
 endmenu

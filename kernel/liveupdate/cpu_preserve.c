@@ -132,6 +132,7 @@
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/device.h>
+#include <linux/oncore.h>
 #include <linux/device/bus.h>
 #include <linux/kexec.h>
 #include <linux/kexec_handover.h>
@@ -143,6 +144,8 @@
 #include <linux/reboot.h>
 
 #include <asm/sections.h>
+
+#include "oncore_internal.h"
 
 
 /**
@@ -333,6 +336,16 @@ int cpu_preserved_init_runtime_buffer(void)
 	return 0;
 }
 
+phys_addr_t cpu_preserved_get_text_pa(void)
+{
+	return cpu_preserved_text_pages ? page_to_phys(cpu_preserved_text_pages) : 0;
+}
+
+phys_addr_t cpu_preserved_get_data_pa(void)
+{
+	return cpu_preserved_data_pages ? page_to_phys(cpu_preserved_data_pages) : 0;
+}
+
 /**
  * cpu_preserved_map_range - Map a physical address range into transition page tables
  * @pa: Physical address
@@ -345,7 +358,12 @@ int cpu_preserved_init_runtime_buffer(void)
 int cpu_preserved_map_range(phys_addr_t pa, unsigned long va,
 			    size_t size, pgprot_t prot)
 {
-	return arch_cpu_preserved_map_range(pa, va, size, prot);
+	int ret = arch_cpu_preserved_map_range(pa, va, size, prot);
+
+	if (ret)
+		return ret;
+	oncore_map_range_all_sessions(pa, va, size, prot);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(cpu_preserved_map_range);
 
@@ -612,7 +630,6 @@ int cpu_preserved_attach_workload(int cpu, const char *name,
 	mutex_unlock(&cpu_preserved_lock);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(cpu_preserved_attach_workload);
 
 /**
  * cpu_preserved_detach_workload - Detach workload and return core to idle park
@@ -650,7 +667,66 @@ int cpu_preserved_detach_workload(int cpu)
 	mutex_unlock(&cpu_preserved_lock);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(cpu_preserved_detach_workload);
+
+/**
+ * cpu_preserved_set_workload_context - Set workload context and root page table
+ * @cpu: Logical CPU identifier.
+ * @ctx: Opaque owning workload context pointer.
+ * @pgd_pa: Physical address of workload root page table (or 0 for default).
+ */
+void cpu_preserved_set_workload_context(int cpu, void *ctx, phys_addr_t pgd_pa)
+{
+	struct cpu_preserved_pcpu *pcpu;
+
+	if (cpu < 0 || cpu >= nr_cpu_ids)
+		return;
+
+	mutex_lock(&cpu_preserved_lock);
+	pcpu = cpu_preserved_get_pcpu(cpu);
+	if (pcpu && pcpu->stack) {
+		struct cpu_preserved_stack_context *sctx = pcpu->stack;
+
+		sctx->workload_context = ctx;
+		sctx->session_pgd_pa = pgd_pa;
+		pcpu->pgd_pa = pgd_pa;
+	}
+	mutex_unlock(&cpu_preserved_lock);
+}
+
+int cpu_preserved_get_stack_info(int cpu, phys_addr_t *pa, unsigned long *va, size_t *size)
+{
+	struct cpu_preserved_pcpu *pcpu;
+
+	if (cpu < 0 || cpu >= nr_cpu_ids)
+		return -EINVAL;
+
+	pcpu = cpu_preserved_get_pcpu(cpu);
+	if (!pcpu || !pcpu->stack)
+		return -ENODEV;
+
+	if (pa)
+		*pa = pcpu->state.stack_pa;
+	if (va)
+		*va = (unsigned long)pcpu->stack;
+	if (size)
+		*size = CPU_PRESERVED_STACK_SIZE;
+	return 0;
+}
+
+int cpu_preserved_get_pcpus_info(phys_addr_t *pa, unsigned long *va, size_t *size)
+{
+	if (!cpu_preserved_pcpus_va || !cpu_preserved_pcpus_pa)
+		return -ENODEV;
+
+	if (pa)
+		*pa = cpu_preserved_pcpus_pa;
+	if (va)
+		*va = (unsigned long)cpu_preserved_pcpus_va;
+	if (size)
+		*size = sizeof(struct cpu_preserved_pcpu) * nr_cpu_ids;
+	return 0;
+}
+
 
 static int cpu_wait_dead(int cpu)
 {
@@ -1212,16 +1288,23 @@ static int cpu_preserve_preserve(struct liveupdate_file_op_args *args)
 	if (ret)
 		return ret;
 
+	ret = oncore_session_add_cpu(args->session, cpu);
+	if (ret) {
+		cpu_unpreserve(cpu);
+		return ret;
+	}
+
 	fser = kho_alloc_preserve(sizeof(*fser));
 	if (IS_ERR(fser)) {
 		cpu_unpreserve(cpu);
+		oncore_session_remove_cpu(args->session, cpu);
 		return PTR_ERR(fser);
 	}
 
 	memset(fser, 0, sizeof(*fser));
 	fser->magic = CPU_PRESERVED_FILE_MAGIC;
 	fser->cpu = cpu;
-	fser->session_ser_pa = 0;
+	fser->session_ser_pa = oncore_session_get_ser_pa(args->session);
 
 	scoped_guard(mutex, &cpu_preserved_lock) {
 		const char *sname = liveupdate_session_name(args->session);
@@ -1257,6 +1340,7 @@ static void cpu_preserve_unpreserve(struct liveupdate_file_op_args *args)
 	cpu = fser->cpu;
 
 	cpu_unpreserve(cpu);
+	oncore_session_remove_cpu(args->session, cpu);
 
 	kho_unpreserve_free(fser);
 }
@@ -1274,6 +1358,14 @@ static int cpu_preserve_retrieve(struct liveupdate_file_op_args *args)
 	fser = phys_to_virt(args->serialized_data);
 	if (fser->magic != CPU_PRESERVED_FILE_MAGIC)
 		return -EINVAL;
+
+	/* Restore session if serialized */
+	if (fser->session_ser_pa) {
+		struct oncore_session_ser *cser =
+			phys_to_virt(fser->session_ser_pa);
+
+		oncore_session_restore(args->session, cser);
+	}
 
 	cpu = fser->cpu;
 
@@ -1347,6 +1439,7 @@ static void cpu_preserve_finish(struct liveupdate_file_op_args *args)
 	cpu = fser->cpu;
 
 	cpu_unpreserve(cpu);
+	oncore_session_remove_cpu(args->session, cpu);
 
 	kho_restore_free(fser);
 }
