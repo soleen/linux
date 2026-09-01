@@ -44,6 +44,7 @@
 
 #include <asm/kvm_host.h>
 #include <linux/kvm_dirty_ring.h>
+#include <linux/caretaker.h>
 
 #ifndef KVM_MAX_VCPU_IDS
 #define KVM_MAX_VCPU_IDS KVM_MAX_VCPUS
@@ -398,6 +399,8 @@ struct kvm_vcpu {
 	 */
 	struct kvm_memory_slot *last_used_slot;
 	u64 last_used_slot_gen;
+	struct caretaker_cb cb;
+	struct caretaker_job *caretaker_job;
 };
 
 /*
@@ -1065,6 +1068,13 @@ void kvm_unlock_all_vcpus(struct kvm *kvm);
 
 void vcpu_load(struct kvm_vcpu *vcpu);
 void vcpu_put(struct kvm_vcpu *vcpu);
+
+static inline bool kvm_vcpu_should_exit_immediate(struct kvm_vcpu *vcpu)
+{
+	return ((vcpu->run && READ_ONCE(vcpu->run->immediate_exit__unsafe)) ||
+		signal_pending(current)) &&
+	       caretaker_kvm_is_attached(&vcpu->cb);
+}
 
 #ifdef CONFIG_KVM_IOAPIC
 void kvm_arch_post_irq_ack_notifier_list_update(struct kvm *kvm);
@@ -2686,5 +2696,5 @@ static inline int kvm_arch_vcpu_luo_retrieve(struct kvm_vcpu *vcpu, struct kvm_v
 static inline void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_luo_ser *ser) {}
 static inline void kvm_arch_vcpu_luo_finish(struct kvm_vcpu_luo_ser *ser) {}
 #endif
-
 #endif
+

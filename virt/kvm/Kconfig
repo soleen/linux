@@ -125,3 +125,31 @@ config HAVE_KVM_ARCH_GMEM_INVALIDATE
 config HAVE_KVM_ARCH_GMEM_POPULATE
        bool
        depends on KVM_GUEST_MEMFD
+
+config HAVE_KVM_ARCH_CARETAKER
+       bool
+
+config KVM_CARETAKER
+       bool "Orphaned VM Caretaker execution and lifecycle management"
+       depends on KVM
+       depends on LIVEUPDATE
+       depends on CARETAKER
+       depends on SMP
+       depends on HOTPLUG_CPU
+       depends on HAVE_KVM_ARCH_CARETAKER
+       default y
+       help
+         Enable Caretaker CPU preservation and standalone execution for
+         orphaned virtual machines across host kernel live updates.
+
+         During a host kernel live update, user space hypervisors
+         and host services terminate, leaving running guest virtual
+         machines in an orphaned state. Caretaker keeps designated physical
+         CPUs running their respective guest vCPUs on-core in a standalone
+         execution loop throughout the entire live update transition.
+
+         Caretaker attaches to preserved CPUs via the cpu_preserve subsystem
+         and continues guest vCPU execution across the kexec live update
+         without pausing the guest.
+
+         If unsure, say N.
