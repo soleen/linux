@@ -17,6 +17,7 @@
 #include <linux/highmem.h>
 #include <linux/hrtimer.h>
 #include <linux/kernel.h>
+#include <linux/cpu_preserve.h>
 #include <linux/kvm_host.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -73,6 +74,7 @@
 #include "x86_ops.h"
 #include "smm.h"
 #include "tss.h"
+#include "caretaker.h"
 #include "vmx_onhyperv.h"
 #include "vmenter.h"
 #include "posted_intr.h"
@@ -839,13 +841,26 @@ static void __loaded_vmcs_clear(void *arg)
 	loaded_vmcs->launched = 0;
 }
 
-static void loaded_vmcs_clear(struct loaded_vmcs *loaded_vmcs)
+void loaded_vmcs_clear(struct loaded_vmcs *loaded_vmcs)
 {
 	int cpu = loaded_vmcs->cpu;
 
-	if (cpu != -1)
-		smp_call_function_single(cpu,
-			 __loaded_vmcs_clear, loaded_vmcs, 1);
+	if (cpu != -1) {
+		if (cpu == raw_smp_processor_id()) {
+			__loaded_vmcs_clear(loaded_vmcs);
+		} else if (cpu_online(cpu)) {
+			smp_call_function_single(cpu,
+				 __loaded_vmcs_clear, loaded_vmcs, 1);
+		} else {
+			if (!list_empty(&loaded_vmcs->loaded_vmcss_on_cpu_link) &&
+			    loaded_vmcs->loaded_vmcss_on_cpu_link.next)
+				list_del_init(&loaded_vmcs->loaded_vmcss_on_cpu_link);
+			/* Pairs with smp_rmb() in vmx_vcpu_load_vmcs() */
+			smp_wmb();
+			loaded_vmcs->cpu = -1;
+			loaded_vmcs->launched = 0;
+		}
+	}
 }
 
 static bool vmx_segment_cache_test_set(struct vcpu_vmx *vmx, unsigned seg,
@@ -1513,7 +1528,7 @@ static void shrink_ple_window(struct kvm_vcpu *vcpu)
 void vmx_vcpu_load_vmcs(struct kvm_vcpu *vcpu, int cpu)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
-	bool already_loaded = vmx->loaded_vmcs->cpu == cpu;
+	bool already_loaded = vmx->loaded_vmcs->cpu == cpu && vmx->loaded_vmcs->launched;
 	struct vmcs *prev;
 
 	if (!already_loaded) {
@@ -1534,7 +1549,7 @@ void vmx_vcpu_load_vmcs(struct kvm_vcpu *vcpu, int cpu)
 	}
 
 	prev = per_cpu(current_vmcs, cpu);
-	if (prev != vmx->loaded_vmcs->vmcs) {
+	if (!already_loaded || prev != vmx->loaded_vmcs->vmcs) {
 		per_cpu(current_vmcs, cpu) = vmx->loaded_vmcs->vmcs;
 		vmcs_load(vmx->loaded_vmcs->vmcs);
 	}
@@ -1555,6 +1570,10 @@ void vmx_vcpu_load_vmcs(struct kvm_vcpu *vcpu, int cpu)
 		vmcs_writel(HOST_TR_BASE,
 			    (unsigned long)&get_cpu_entry_area(cpu)->tss.x86_tss);
 		vmcs_writel(HOST_GDTR_BASE, (unsigned long)gdt);   /* 22.2.4 */
+		vmcs_writel(HOST_IDTR_BASE, host_idt_base);
+		vmcs_writel(HOST_CR3, __read_cr3());
+		vmcs_writel(HOST_RIP, (unsigned long)vmx_vmexit);
+		vmx->loaded_vmcs->host_state.rsp = 0;
 
 		if (IS_ENABLED(CONFIG_IA32_EMULATION) || IS_ENABLED(CONFIG_X86_32)) {
 			/* 22.2.3 */
@@ -1583,6 +1602,10 @@ void vmx_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 void vmx_vcpu_put(struct kvm_vcpu *vcpu)
 {
 	vmx_vcpu_pi_put(vcpu);
+
+	kvm_rip_read(vcpu);
+	kvm_rsp_read(vcpu);
+	kvm_get_rflags(vcpu);
 
 	vmx_prepare_switch_to_host(to_vmx(vcpu));
 }
@@ -3017,6 +3040,9 @@ int vmx_enable_virtualization_cpu(void)
 	if (kvm_is_using_evmcs() && !hv_get_vp_assist_page(cpu))
 		return -EFAULT;
 
+	INIT_LIST_HEAD(&per_cpu(loaded_vmcss_on_cpu, cpu));
+	per_cpu(current_vmcs, cpu) = NULL;
+
 	return x86_virt_get_ref(X86_FEATURE_VMX);
 }
 
@@ -3033,6 +3059,9 @@ static void vmclear_local_loaded_vmcss(void)
 void vmx_disable_virtualization_cpu(void)
 {
 	vmclear_local_loaded_vmcss();
+
+	if (caretaker_is_orphaned_cpu(raw_smp_processor_id()))
+		return;
 
 	x86_virt_put_ref(X86_FEATURE_VMX);
 
@@ -3090,6 +3119,7 @@ int alloc_loaded_vmcs(struct loaded_vmcs *loaded_vmcs)
 
 	vmcs_clear(loaded_vmcs->vmcs);
 
+	INIT_LIST_HEAD(&loaded_vmcs->loaded_vmcss_on_cpu_link);
 	loaded_vmcs->shadow_vmcs = NULL;
 	loaded_vmcs->hv_timer_soft_disabled = false;
 	loaded_vmcs->cpu = -1;
@@ -5578,11 +5608,19 @@ static int handle_exception_nmi(struct kvm_vcpu *vcpu)
 static __always_inline int handle_external_interrupt(struct kvm_vcpu *vcpu)
 {
 	++vcpu->stat.irq_exits;
+	if (kvm_vcpu_should_exit_immediate(vcpu))
+		return 0;
 	return 1;
 }
 
 static int handle_triple_fault(struct kvm_vcpu *vcpu)
 {
+	pr_err("kvm_intel: vcpu%d TRIPLE FAULT! rip=0x%lx rsp=0x%lx cr3=0x%lx cs=0x%x gdtr=0x%lx idtr=0x%lx tr=0x%x\n",
+	       vcpu->vcpu_id, kvm_rip_read(vcpu), kvm_rsp_read(vcpu),
+	       vcpu->arch.cr3, vmcs_read16(GUEST_CS_SELECTOR),
+	       vmcs_readl(GUEST_GDTR_BASE), vmcs_readl(GUEST_IDTR_BASE),
+	       vmcs_read16(GUEST_TR_SELECTOR));
+	dump_vmcs(vcpu);
 	vcpu->run->exit_reason = KVM_EXIT_SHUTDOWN;
 	vcpu->mmio_needed = 0;
 	return 0;
@@ -7414,6 +7452,9 @@ void noinstr vmx_update_host_rsp(struct vcpu_vmx *vmx, unsigned long host_rsp)
 static fastpath_t vmx_exit_handlers_fastpath(struct kvm_vcpu *vcpu,
 					     bool force_immediate_exit)
 {
+	if (kvm_vcpu_should_exit_immediate(vcpu))
+		return EXIT_FASTPATH_EXIT_USERSPACE;
+
 	/*
 	 * If L2 is active, some VMX preemption timer exits can be handled in
 	 * the fastpath even, all other exits must use the slow path.
@@ -7575,6 +7616,9 @@ fastpath_t vmx_vcpu_run(struct kvm_vcpu *vcpu, u64 run_flags)
 	atomic_switch_perf_msrs(vmx);
 	if (intel_pmu_lbr_is_enabled(vcpu))
 		vmx_passthrough_lbr_msrs(vcpu);
+
+	if (kvm_vcpu_should_exit_immediate(vcpu))
+		return EXIT_FASTPATH_EXIT_USERSPACE;
 
 	if (enable_preemption_timer)
 		vmx_update_hv_timer(vcpu, force_immediate_exit);
@@ -8548,6 +8592,7 @@ void vmx_migrate_timers(struct kvm_vcpu *vcpu)
 
 void vmx_hardware_unsetup(void)
 {
+	vmx_caretaker_unregister();
 	kvm_set_posted_intr_wakeup_handler(NULL);
 
 	if (nested)
@@ -8855,8 +8900,11 @@ __init int vmx_hardware_setup(void)
 
 	kvm_caps.inapplicable_quirks &= ~KVM_X86_QUIRK_IGNORE_GUEST_PAT;
 
+	vmx_caretaker_register();
+
 	return 0;
 }
+
 
 void vmx_exit(void)
 {
