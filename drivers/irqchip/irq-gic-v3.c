@@ -25,6 +25,7 @@
 #include <linux/irqchip.h>
 #include <linux/irqchip/arm-gic-common.h>
 #include <linux/irqchip/arm-gic-v3.h>
+#include <linux/irqchip/arm-gic-v3-caretaker.h>
 #include <linux/irqchip/arm-gic-v3-prio.h>
 #include <linux/bitfield.h>
 #include <linux/bits.h>
@@ -1037,6 +1038,10 @@ static int __gic_populate_rdist(struct redist_region *region, void __iomem *ptr)
 	typer = gic_read_typer(ptr + GICR_TYPER);
 	if ((typer >> 32) == aff) {
 		u64 offset = ptr - region->redist_base;
+
+		gicv3_caretaker_set_rdist(smp_processor_id(), ptr, mpidr, region->phys_base,
+					  region->redist_base, gic_data.redist_stride);
+
 		raw_spin_lock_init(&gic_data_rdist()->rd_lock);
 		gic_data_rdist_rd_base() = ptr;
 		gic_data_rdist()->phys_base = region->phys_base + offset;

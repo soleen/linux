@@ -40,6 +40,10 @@ config ARM_GIC_V3
 	select HAVE_ARM_SMCCC_DISCOVERY
 	select IRQ_MSI_IOMMU
 
+config ARM_GIC_V3_CARETAKER
+	def_bool LIVEUPDATE_CPU && ARM64
+	depends on ARM_GIC_V3
+
 config ARM_GIC_ITS_PARENT
 	bool
 
