@@ -143,6 +143,8 @@ static __always_inline int psci_to_linux_errno(int errno)
 		return -EINVAL;
 	case PSCI_RET_DENIED:
 		return -EPERM;
+	case PSCI_RET_ALREADY_ON:
+		return -EALREADY;
 	}
 
 	return -EINVAL;
