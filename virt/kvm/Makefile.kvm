@@ -14,3 +14,7 @@ kvm-$(CONFIG_HAVE_KVM_DIRTY_RING) += $(KVM)/dirty_ring.o
 kvm-$(CONFIG_HAVE_KVM_PFNCACHE) += $(KVM)/pfncache.o
 kvm-$(CONFIG_KVM_GUEST_MEMFD) += $(KVM)/guest_memfd.o
 kvm-$(CONFIG_LIVEUPDATE_GUEST_MEMFD) += $(KVM)/guest_memfd_luo.o $(KVM)/kvm_luo.o
+kvm-$(CONFIG_KVM_CARETAKER) += $(KVM)/caretaker.o
+CFLAGS_$(KVM)/caretaker.o += -fno-stack-protector $(call cc-option,-ftrivial-auto-var-init=uninitialized) -fno-builtin-memset -fno-builtin-memcpy $(call cc-option,-fno-tree-loop-distribute-patterns) $(call cc-option,-fno-jump-tables)
+CFLAGS_caretaker.o += -fno-stack-protector $(call cc-option,-ftrivial-auto-var-init=uninitialized) -fno-builtin-memset -fno-builtin-memcpy $(call cc-option,-fno-tree-loop-distribute-patterns) $(call cc-option,-fno-jump-tables)
+

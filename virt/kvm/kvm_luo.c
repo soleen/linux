@@ -9,6 +9,9 @@
 
 #include <linux/liveupdate.h>
 #include <linux/kvm_host.h>
+#include <linux/cpu_preserve.h>
+#include <linux/caretaker.h>
+#include <linux/kvm_caretaker.h>
 #include <linux/pagemap.h>
 #include <linux/file.h>
 #include <linux/fdtable.h>
@@ -155,7 +158,10 @@ static bool kvm_vcpu_luo_can_preserve(struct liveupdate_file_handler *handler,
 static int kvm_vcpu_luo_preserve(struct liveupdate_file_op_args *args)
 {
 	struct kvm_vcpu *vcpu = args->file->private_data;
+	struct caretaker_job *job;
 	struct kvm_vcpu_luo_ser *ser;
+	struct task_struct *task = NULL;
+	int target_cpu = -1;
 	int ret;
 
 	if (!vcpu)
@@ -163,20 +169,84 @@ static int kvm_vcpu_luo_preserve(struct liveupdate_file_op_args *args)
 
 	BUILD_BUG_ON(sizeof(*ser) != 32);
 
+	read_lock(&vcpu->pid_lock);
+	task = vcpu->pid ? pid_task(vcpu->pid, PIDTYPE_PID) : NULL;
+	if (task)
+		get_task_struct(task);
+	read_unlock(&vcpu->pid_lock);
+
+	if (task) {
+		if (task->nr_cpus_allowed == 1) {
+			int cpu = cpumask_first(task->cpus_ptr);
+			if (cpu > 0)
+				target_cpu = cpu;
+		}
+		put_task_struct(task);
+	}
+
+	if (target_cpu < 0 && vcpu->cb.pcpu_id > 0 && vcpu->cb.pcpu_id < nr_cpu_ids)
+		target_cpu = vcpu->cb.pcpu_id;
+
+	if (target_cpu < 0 && vcpu->cpu > 0)
+		target_cpu = vcpu->cpu;
+
+	char name[32];
+	snprintf(name, sizeof(name), "vcpu%d", vcpu->vcpu_id);
+
+	job = caretaker_session_submit_job(args->session, name, target_cpu,
+					   kvm_arch_vcpu_caretaker_run, vcpu);
+	if (IS_ERR(job))
+		return PTR_ERR(job);
+
+	vcpu->caretaker_job = job;
+	target_cpu = job->assigned_cpu;
+
 	ser = kho_alloc_preserve(sizeof(*ser));
-	if (IS_ERR(ser))
+	if (IS_ERR(ser)) {
+		caretaker_session_cancel_job(args->session, job);
+		vcpu->caretaker_job = NULL;
 		return PTR_ERR(ser);
+	}
 
 	ser->vcpu_id = vcpu->vcpu_id;
 	ser->flags = 0;
+	if (target_cpu >= 0)
+		ser->flags |= KVM_VCPU_LUO_FLAG_CARETAKER;
 	ser->vm_token = 0;
 	ser->arch_state.phys = 0;
 	ser->cb.phys = 0;
 
+	if (target_cpu >= 0) {
+		vcpu->cb.pcpu_id = target_cpu;
+		caretaker_kvm_detach(&vcpu->cb);
+	} else {
+		vcpu->cb.pcpu_id = CARETAKER_INVALID_PCPU;
+	}
+
 	ret = kvm_arch_vcpu_luo_preserve(vcpu, ser);
 	if (ret) {
+		caretaker_session_cancel_job(args->session, job);
+		vcpu->caretaker_job = NULL;
+		if (target_cpu >= 0)
+			caretaker_kvm_attach(&vcpu->cb);
 		kho_unpreserve_free(ser);
 		return ret;
+	}
+
+	if (target_cpu >= 0) {
+		job->data = kvm_arch_vcpu_caretaker_data(vcpu);
+		if (job->data)
+			caretaker_kvm_detach(job->data);
+		ret = caretaker_session_activate_job(args->session, job);
+		if (ret) {
+			caretaker_session_cancel_job(args->session, job);
+			vcpu->caretaker_job = NULL;
+			caretaker_kvm_attach(&vcpu->cb);
+			if (job->data)
+				caretaker_kvm_attach(job->data);
+			kho_unpreserve_free(ser);
+			return ret;
+		}
 	}
 
 	args->serialized_data = virt_to_phys(ser);
@@ -248,6 +318,10 @@ static int kvm_vcpu_luo_retrieve(struct liveupdate_file_op_args *args)
 			fput(file);
 			goto err_free_ser;
 		}
+		kvm_arch_vcpu_luo_attach_caretaker(vcpu, ser);
+
+		vcpu->cb.vcpu_id = ser->vcpu_id;
+		vcpu->cb.vm_token = ser->vm_token;
 	}
 
 	args->file = file;
@@ -261,24 +335,41 @@ err_free_ser:
 
 static void kvm_vcpu_luo_unpreserve(struct liveupdate_file_op_args *args)
 {
+	struct kvm_vcpu *vcpu = args->file ? args->file->private_data : NULL;
 	struct kvm_vcpu_luo_ser *ser;
 
 	if (WARN_ON_ONCE(!args->serialized_data))
 		return;
 
 	ser = phys_to_virt(args->serialized_data);
+
+	if (vcpu) {
+		kvm_arch_vcpu_luo_attach_caretaker(vcpu, ser);
+		if (vcpu->caretaker_job) {
+			caretaker_session_cancel_job(args->session, vcpu->caretaker_job);
+			vcpu->caretaker_job = NULL;
+		}
+	}
+
 	kvm_arch_vcpu_luo_unpreserve(ser);
 	kho_unpreserve_free(ser);
 }
 
 static void kvm_vcpu_luo_finish(struct liveupdate_file_op_args *args)
 {
+	struct kvm_vcpu *vcpu = args->file ? args->file->private_data : NULL;
 	struct kvm_vcpu_luo_ser *ser;
 
 	if (!args->serialized_data)
 		return;
 
 	ser = phys_to_virt(args->serialized_data);
+
+	if (vcpu && vcpu->caretaker_job) {
+		caretaker_session_cancel_job(args->session, vcpu->caretaker_job);
+		vcpu->caretaker_job = NULL;
+	}
+
 	kvm_arch_vcpu_luo_finish(ser);
 	kho_restore_free(ser);
 }
