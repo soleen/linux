@@ -20,6 +20,7 @@
 #include <linux/cache.h>
 #include <linux/interrupt.h>
 #include <linux/cpu.h>
+#include <linux/cpu_preserve.h>
 #include <linux/gfp.h>
 #include <linux/kexec.h>
 
@@ -149,7 +150,7 @@ static int register_stop_handler(void)
 
 static void native_stop_other_cpus(int wait)
 {
-	unsigned int old_cpu, this_cpu;
+	unsigned int old_cpu, this_cpu, cpu;
 	unsigned long flags, timeout;
 
 	if (reboot_force)
@@ -190,9 +191,11 @@ static void native_stop_other_cpus(int wait)
 	 */
 	cpumask_copy(&cpus_stop_mask, cpu_online_mask);
 	cpumask_clear_cpu(this_cpu, &cpus_stop_mask);
+	cpumask_andnot(&cpus_stop_mask, &cpus_stop_mask, cpu_get_preserved_mask());
 
 	if (!cpumask_empty(&cpus_stop_mask)) {
-		apic_send_IPI_allbutself(REBOOT_VECTOR);
+		for_each_cpu(cpu, &cpus_stop_mask)
+			__apic_send_IPI(cpu, REBOOT_VECTOR);
 
 		/*
 		 * Don't wait longer than a second for IPI completion. The
