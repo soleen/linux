@@ -14,20 +14,18 @@
 #include <linux/smp.h>
 #include <linux/types.h>
 
-struct caretaker_session;
-
 /**
  * struct cpu_preserved_stack_context - Context header at base of preserved CPU stack
- * @magic:          Validation signature (CPU_PRESERVED_STACK_MAGIC)
- * @cpu:            Logical CPU ID of the preserved physical core
- * @session:        Owning Caretaker session
- * @session_pgd_pa: Session root page table physical address
- * @entry_data:     Private workload callback data
+ * @magic:            Validation signature (CPU_PRESERVED_STACK_MAGIC)
+ * @cpu:              Logical CPU ID of the preserved physical core
+ * @workload_context: Opaque owning workload or session context
+ * @session_pgd_pa:   Session root page table physical address
+ * @entry_data:       Private workload callback data
  */
 struct cpu_preserved_stack_context {
 	u64				magic;
 	int				cpu;
-	struct caretaker_session	*session;
+	void				*workload_context;
 	phys_addr_t			session_pgd_pa;
 	void				*entry_data;
 };
@@ -60,7 +58,6 @@ cpu_preserved_get_stack_context(void)
 		return sctx;
 	return NULL;
 }
-
 
 /*
  * __cpu_preserved_text: Code executed by preserved physical CPUs during live
@@ -267,6 +264,11 @@ u64 arch_cpu_preserved_get_mpidr(int cpu);
 int arch_cpu_preserved_mpidr_to_cpu(u64 mpidr);
 bool arch_cpu_preserved_is_active(void);
 void arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa);
+void cpu_preserved_set_workload_context(int cpu, void *ctx, phys_addr_t pgd_pa);
+int cpu_preserved_get_stack_info(int cpu, phys_addr_t *pa, unsigned long *va, size_t *size);
+int cpu_preserved_get_pcpus_info(phys_addr_t *pa, unsigned long *va, size_t *size);
+phys_addr_t cpu_preserved_get_text_pa(void);
+phys_addr_t cpu_preserved_get_data_pa(void);
 
 #else /* !CONFIG_LIVEUPDATE_CPU */
 
@@ -335,6 +337,11 @@ static inline u64 arch_cpu_preserved_get_mpidr(int cpu) { return 0; }
 static inline int arch_cpu_preserved_mpidr_to_cpu(u64 mpidr) { return -EINVAL; }
 static inline bool arch_cpu_preserved_is_active(void) { return false; }
 static inline void arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa) {}
+static inline void cpu_preserved_set_workload_context(int cpu, void *ctx, phys_addr_t pgd_pa) {}
+static inline int cpu_preserved_get_stack_info(int cpu, phys_addr_t *pa, unsigned long *va, size_t *size) { return -EOPNOTSUPP; }
+static inline int cpu_preserved_get_pcpus_info(phys_addr_t *pa, unsigned long *va, size_t *size) { return -EOPNOTSUPP; }
+static inline phys_addr_t cpu_preserved_get_text_pa(void) { return 0; }
+static inline phys_addr_t cpu_preserved_get_data_pa(void) { return 0; }
 static inline struct cpu_preserved_stack_context *
 cpu_preserved_get_stack_context(void)
 {
