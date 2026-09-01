@@ -442,6 +442,17 @@ static int decode_instructions(struct objtool_file *file)
 		if (!strcmp(sec->name, ".init.text") && !opts.module)
 			sec->init = true;
 
+		/*
+		 * Preserved CPUs run .text.cpu_preserved in an isolated execution
+		 * buffer during live update kexec handover. It cannot use external
+		 * return thunks or retpolines in regular .text (which reside in
+		 * scratch memory and get overwritten during kexec handover).
+		 * Preserved code either stays in orphan mode or transitions to the
+		 * incoming kernel, never returning to the outgoing kernel text.
+		 */
+		if (!strcmp(sec->name, ".text.cpu_preserved"))
+			sec->init = true;
+
 		for (offset = 0; offset < sec_size(sec); offset += insn->len) {
 			if (!insns || idx == INSN_CHUNK_MAX) {
 				insns = calloc(INSN_CHUNK_SIZE, sizeof(*insn));
@@ -4243,6 +4254,14 @@ static bool ignore_unreachable_insn(struct objtool_file *file, struct instructio
 	 */
 	if (!strcmp(insn->sec->name, ".altinstr_replacement") ||
 	    !strcmp(insn->sec->name, ".altinstr_aux"))
+		return true;
+
+	/*
+	 * Preserved CPU code is entered directly by hardware (VMCS VM-exit
+	 * HOST_RIP or IDT interrupt gates) during live update kexec handover
+	 * rather than standard C function calls within the kernel image.
+	 */
+	if (!strcmp(insn->sec->name, ".text.cpu_preserved"))
 		return true;
 
 	if (!func)
