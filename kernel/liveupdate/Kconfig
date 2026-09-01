@@ -101,4 +101,39 @@ config LIVEUPDATE_GUEST_MEMFD
 
 	  If unsure, say N.
 
+config ARCH_SUPPORTS_LIVEUPDATE_CPU
+	bool
+
+config LIVEUPDATE_CPU
+	bool "Live update support for preserved CPUs"
+	depends on LIVEUPDATE
+	depends on ARCH_SUPPORTS_LIVEUPDATE_CPU
+	depends on HOTPLUG_CPU
+	default LIVEUPDATE
+	help
+	  Enable live update support for physical CPU preservation.
+
+	  This feature allows physical CPU cores to be preserved across
+	  kexec-based live updates without undergoing a hardware reset or
+	  full kernel offline/online cycle.
+
+	  When a core is preserved, it is isolated from host scheduling and
+	  parked in a dedicated execution loop within preserved memory pages.
+	  Its execution context, state, and necessary page tables are handed
+	  over across the kexec transition using the KHO
+	  framework. The incoming kernel detects preserved cores during early
+	  boot and avoids bringing them up during smp_init(), keeping them
+	  isolated and running their assigned workloads.
+
+	  This capability is a core building block for live-updating virtual
+	  machine hosts (e.g. Caretaker/OrphanVM) without pausing or
+	  disrupting running guest workloads, and can also speed up kernel
+	  live updates by skipping CPU re-initialization.
+
+	  Preservation lifecycle is managed from userspace via LUO sessions
+	  associated with /sys/devices/system/cpu/cpu<N>/preserve file
+	  descriptors, and monitored via sysfs and debugfs interfaces.
+
+	  If unsure, say N.
+
 endmenu
