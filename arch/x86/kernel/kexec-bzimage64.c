@@ -109,7 +109,6 @@ static int setup_e820_entries(struct boot_params *params)
 
 	nr_e820_entries = e820_table_kexec->nr_entries;
 
-	/* TODO: Pass entries more than E820_MAX_ENTRIES_ZEROPAGE in bootparams setup data */
 	if (nr_e820_entries > E820_MAX_ENTRIES_ZEROPAGE)
 		nr_e820_entries = E820_MAX_ENTRIES_ZEROPAGE;
 
@@ -117,6 +116,36 @@ static int setup_e820_entries(struct boot_params *params)
 	memcpy(&params->e820_table, &e820_table_kexec->entries, nr_e820_entries*sizeof(struct e820_entry));
 
 	return 0;
+}
+
+static void setup_e820_ext(struct boot_params *params,
+			   unsigned long params_load_addr,
+			   unsigned int e820_ext_offset)
+{
+	unsigned int nr_e820_entries = e820_table_kexec->nr_entries;
+	struct setup_data *sd;
+	struct boot_e820_entry *ext_entries;
+	unsigned int nr_ext, i;
+
+	if (nr_e820_entries <= E820_MAX_ENTRIES_ZEROPAGE)
+		return;
+
+	nr_ext = nr_e820_entries - E820_MAX_ENTRIES_ZEROPAGE;
+	sd = (void *)params + e820_ext_offset;
+	sd->type = SETUP_E820_EXT;
+	sd->len = nr_ext * sizeof(struct boot_e820_entry);
+	ext_entries = (void *)sd->data;
+
+	for (i = 0; i < nr_ext; i++) {
+		struct e820_entry *e = &e820_table_kexec->entries[E820_MAX_ENTRIES_ZEROPAGE + i];
+
+		ext_entries[i].addr = e->addr;
+		ext_entries[i].size = e->size;
+		ext_entries[i].type = e->type;
+	}
+
+	sd->next = params->hdr.setup_data;
+	params->hdr.setup_data = params_load_addr + e820_ext_offset;
 }
 
 enum { RNG_SEED_LENGTH = 32 };
@@ -395,6 +424,16 @@ setup_boot_parameters(struct kimage *image, struct boot_params *params,
 				     sizeof(struct kho_data);
 	}
 
+	if (e820_table_kexec->nr_entries > E820_MAX_ENTRIES_ZEROPAGE) {
+		unsigned int nr_ext = e820_table_kexec->nr_entries -
+				      E820_MAX_ENTRIES_ZEROPAGE;
+		unsigned int ext_sz = sizeof(struct setup_data) +
+				      nr_ext * sizeof(struct boot_e820_entry);
+
+		setup_e820_ext(params, params_load_addr, setup_data_offset);
+		setup_data_offset += ALIGN(ext_sz, 16);
+	}
+
 	/* Setup RNG seed */
 	setup_rng_seed(params, params_load_addr, setup_data_offset);
 
@@ -582,6 +621,15 @@ static void *bzImage64_load(struct kimage *image, char *kernel,
 	if (IS_ENABLED(CONFIG_KEXEC_HANDOVER))
 		kbuf.bufsz += sizeof(struct setup_data) +
 			      sizeof(struct kho_data);
+
+	if (e820_table_kexec->nr_entries > E820_MAX_ENTRIES_ZEROPAGE) {
+		unsigned int nr_ext = e820_table_kexec->nr_entries -
+				      E820_MAX_ENTRIES_ZEROPAGE;
+		unsigned int ext_sz = sizeof(struct setup_data) +
+				      nr_ext * sizeof(struct boot_e820_entry);
+
+		kbuf.bufsz += ALIGN(ext_sz, 16);
+	}
 
 	params = kvzalloc(kbuf.bufsz, GFP_KERNEL);
 	if (!params)
