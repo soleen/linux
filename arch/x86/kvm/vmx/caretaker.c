@@ -55,6 +55,7 @@ static void vmx_caretaker_init_page(struct caretaker_vmx_page *cvp,
 
 	kvm_x86_caretaker_init_common_page(&cvp->common, vcpu, sizeof(*cvp));
 	cvp->common.vmcs_pa = virt_to_phys(vmx->vmcs01.vmcs);
+	cvp->common.vmxon_pa = x86_virt_vmxon_pa(cvp->common.pcpu_id);
 
 	vcpu_load(vcpu);
 
@@ -94,6 +95,7 @@ void vmx_caretaker_init(struct kvm_vcpu *vcpu, u64 *cb_pa)
 	BUILD_BUG_ON(offsetof(struct caretaker_vmx_page, common.last_exit_rip) != CXP_LAST_EXIT_RIP);
 	BUILD_BUG_ON(offsetof(struct caretaker_vmx_page, common.kernel_gs_base) != CXP_KERNEL_GS_BASE);
 	BUILD_BUG_ON(offsetof(struct caretaker_vmx_page, common.apic_eoi_va) != CXP_APIC_EOI_VA);
+	BUILD_BUG_ON(offsetof(struct caretaker_vmx_page, common.vmxon_pa) != CXP_VMXON_PA);
 	BUILD_BUG_ON(offsetof(struct caretaker_vmx_page, common.stack) != CXP_STACK_OFFSET);
 	BUILD_BUG_ON(offsetof(struct caretaker_vmx_page, common.gdt) != CXP_GDT_BASE);
 	BUILD_BUG_ON(offsetof(struct caretaker_vmx_page, common.tss) != CXP_TSS_BASE);
@@ -415,11 +417,35 @@ vmx_caretaker_run_page(struct caretaker_vmx_page *cvp,
 		return CARETAKER_EXIT_ERROR;
 
 	pcpu = cvp->common.pcpu_id;
+	if (pcpu < 0 || pcpu >= NR_CPUS) {
+		struct cpu_preserved_stack_context *sctx = caretaker_get_current_context();
+
+		if (sctx && sctx->cpu >= 0 && sctx->cpu < NR_CPUS)
+			pcpu = sctx->cpu;
+	}
 	cvp->common.deadline_tsc = deadline_ticks;
 
 	/* Ensure VMX is active on this core */
-	if (!(__read_cr4() & X86_CR4_VMXE))
+	if (!(__read_cr4() & X86_CR4_VMXE)) {
+		struct cpu_preserved_stack_context *sctx = caretaker_get_current_context();
+		u64 vmxon_pa = 0;
+
+		if (sctx && sctx->cpu >= 0 && sctx->cpu < NR_CPUS)
+			vmxon_pa = x86_virt_vmxon_pa(sctx->cpu);
+		if (!vmxon_pa)
+			vmxon_pa = cvp->common.vmxon_pa;
+		if (!vmxon_pa)
+			vmxon_pa = x86_virt_vmxon_pa(pcpu);
+
 		asm volatile("mov %0, %%cr4" : : "r" (__read_cr4() | X86_CR4_VMXE) : "memory");
+		if (vmxon_pa) {
+			asm volatile("1: vmxon %[vmxon_pa]\n\t"
+				     "2:\n\t"
+				     _ASM_EXTABLE(1b, 2b)
+				     : : [vmxon_pa] "m" (vmxon_pa)
+				     : "memory", "cc");
+		}
+	}
 
 	/* Save host context, switch to Caretaker descriptors and CR3 */
 	kvm_x86_caretaker_save_host_state(&host_state, &cvp->common);

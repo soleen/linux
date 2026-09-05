@@ -60,6 +60,7 @@
 
 #define CXP_APIC_ID		0x138
 #define CXP_HSAVE_PA		0x140
+#define CXP_VMXON_PA		0x140
 #define CXP_UART		0x148
 
 #define CXP_GDT_BASE		0x300
@@ -166,7 +167,10 @@ struct caretaker_x86_page {
 	/* Hardware APIC ID & Per-vCPU UART state */
 	u32 apic_id;
 	u32 pad1;
-	u64 hsave_pa;
+	union {
+		u64 hsave_pa;
+		u64 vmxon_pa;
+	};
 	struct caretaker_uart uart;
 	u8 pad2[2];
 	caretaker_enter_fn enter_fn;

@@ -6,6 +6,7 @@
 #include <linux/list.h>
 #include <linux/percpu.h>
 #include <linux/kexec_handover.h>
+#include <linux/cpu_preserve.h>
 
 #include <asm/perf_event.h>
 #include <asm/processor.h>
@@ -71,6 +72,9 @@ static void x86_virt_invoke_kvm_emergency_callback(void)
 
 #if IS_ENABLED(CONFIG_KVM_INTEL)
 static DEFINE_PER_CPU(struct vmcs *, root_vmcs);
+#ifdef CONFIG_LIVEUPDATE_CPU
+static phys_addr_t x86_vmxon_pa_array[NR_CPUS] __cpu_preserved_data;
+#endif
 
 static int x86_virt_cpu_vmxon(void)
 {
@@ -207,6 +211,9 @@ static __init int __x86_vmx_init(void)
 		vmcs = page_address(page);
 		vmcs->hdr.revision_id = rev_id;
 		per_cpu(root_vmcs, cpu) = vmcs;
+#ifdef CONFIG_LIVEUPDATE_CPU
+		x86_vmxon_pa_array[cpu] = __pa(vmcs);
+#endif
 	}
 
 	memcpy(&virt_ops, &vmx_ops, sizeof(virt_ops));
@@ -396,3 +403,13 @@ void x86_virt_vmx_preserve_kho(void)
 #endif
 }
 EXPORT_SYMBOL_FOR_KVM(x86_virt_vmx_preserve_kho);
+
+phys_addr_t __cpu_preserved_text x86_virt_vmxon_pa(int cpu)
+{
+#if IS_ENABLED(CONFIG_KVM_INTEL) && defined(CONFIG_LIVEUPDATE_CPU)
+	if (cpu >= 0 && cpu < NR_CPUS)
+		return x86_vmxon_pa_array[cpu];
+#endif
+	return 0;
+}
+EXPORT_SYMBOL_FOR_KVM(x86_virt_vmxon_pa);
