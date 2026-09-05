@@ -24,6 +24,7 @@ void kho_unpreserve_pages(struct page *page, unsigned long nr_pages);
 int kho_preserve_vmalloc(void *ptr, struct kho_vmalloc *preservation);
 void kho_unpreserve_vmalloc(struct kho_vmalloc *preservation);
 void *kho_alloc_preserve(size_t size);
+void *kho_alloc_preserve_flags(size_t size, gfp_t gfp_mask);
 void kho_unpreserve_free(void *mem);
 void kho_restore_free(void *mem);
 struct folio *kho_restore_folio(phys_addr_t phys);
@@ -82,6 +83,11 @@ static inline int kho_preserve_vmalloc(void *ptr,
 static inline void kho_unpreserve_vmalloc(struct kho_vmalloc *preservation) { }
 
 static inline void *kho_alloc_preserve(size_t size)
+{
+	return ERR_PTR(-EOPNOTSUPP);
+}
+
+static inline void *kho_alloc_preserve_flags(size_t size, gfp_t gfp_mask)
 {
 	return ERR_PTR(-EOPNOTSUPP);
 }

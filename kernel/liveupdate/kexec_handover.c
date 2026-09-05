@@ -97,6 +97,7 @@ static struct kho_out kho_out = {
 
 struct kho_in {
 	phys_addr_t fdt_phys;
+	phys_addr_t mem_map_phys;
 	phys_addr_t scratch_phys;
 	char previous_release[__NEW_UTS_LEN + 1];
 	u32 kexec_count;
@@ -1542,7 +1543,7 @@ EXPORT_SYMBOL_GPL(kho_restore_vmalloc);
  * @return A virtual pointer to the allocated and preserved memory on success,
  * or an ERR_PTR() encoded error on failure.
  */
-void *kho_alloc_preserve(size_t size)
+void *kho_alloc_preserve_flags(size_t size, gfp_t gfp_mask)
 {
 	struct folio *folio;
 	int order, ret;
@@ -1554,7 +1555,7 @@ void *kho_alloc_preserve(size_t size)
 	if (order > MAX_PAGE_ORDER)
 		return ERR_PTR(-E2BIG);
 
-	folio = folio_alloc(GFP_KERNEL | __GFP_ZERO, order);
+	folio = folio_alloc(gfp_mask, order);
 	if (!folio)
 		return ERR_PTR(-ENOMEM);
 
@@ -1565,6 +1566,12 @@ void *kho_alloc_preserve(size_t size)
 	}
 
 	return folio_address(folio);
+}
+EXPORT_SYMBOL_GPL(kho_alloc_preserve_flags);
+
+void *kho_alloc_preserve(size_t size)
+{
+	return kho_alloc_preserve_flags(size, GFP_KERNEL | __GFP_ZERO);
 }
 EXPORT_SYMBOL_GPL(kho_alloc_preserve);
 
@@ -1828,7 +1835,7 @@ static __init int kho_init(void)
 	if (err)
 		goto err_free_scratch;
 
-	kho_out.fdt = kho_alloc_preserve(PAGE_SIZE);
+	kho_out.fdt = kho_alloc_preserve_flags(PAGE_SIZE, GFP_DMA32 | __GFP_ZERO);
 	if (IS_ERR(kho_out.fdt)) {
 		err = PTR_ERR(kho_out.fdt);
 		goto err_free_kho_radix_tree;
@@ -1899,18 +1906,16 @@ fs_initcall(kho_init);
 
 void __init kho_memory_init_early(void)
 {
-	const void *fdt = kho_get_fdt();
 	void *mem_map;
 
 	if (!is_kho_boot())
 		return;
 
 	/*
-	 * kho_get_mem_map() should always succeed. If it fails, kho_populate()
-	 * catches that and never sets kho_in.scratch_phys, which stops memory
-	 * retrieval.
+	 * Retrieve the preserved memory map root table using the physical
+	 * address validated during kho_populate().
 	 */
-	mem_map = kho_get_mem_map(fdt);
+	mem_map = kho_in.mem_map_phys ? phys_to_virt(kho_in.mem_map_phys) : NULL;
 	if (WARN_ON(!mem_map))
 		goto err;
 
@@ -1934,6 +1939,7 @@ err:
 	 * and scratch so KHO users don't treat it as a KHO boot.
 	 */
 	kho_in.fdt_phys = 0;
+	kho_in.mem_map_phys = 0;
 	kho_in.scratch_phys = 0;
 }
 
@@ -2016,6 +2022,7 @@ void __init kho_populate(phys_addr_t fdt_phys, u64 fdt_len,
 	memblock_set_kho_scratch_only();
 
 	kho_in.fdt_phys = fdt_phys;
+	kho_in.mem_map_phys = mem_map_phys;
 	kho_in.scratch_phys = scratch_phys;
 	kho_scratch_cnt = scratch_cnt;
 
