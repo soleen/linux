@@ -21,6 +21,9 @@
 static bool x86_preserved_is_x2apic __cpu_preserved_data;
 unsigned long x86_preserved_apic_eoi_va __cpu_preserved_data;
 EXPORT_SYMBOL_GPL(x86_preserved_apic_eoi_va);
+static u32 x86_preserved_apicid[NR_CPUS] __cpu_preserved_data = {
+	[0 ... NR_CPUS - 1] = BAD_APICID,
+};
 
 /*
  * Signal or wake up a preserved physical CPU via APIC ICR NMI.
@@ -29,10 +32,12 @@ void __cpu_preserved_text arch_cpu_preserved_kick(int cpu)
 {
 	u32 apicid;
 
-	if (cpu <= 0 || cpu >= NR_CPUS || !cpu_is_preserved(cpu))
+	if (cpu < 0 || cpu >= NR_CPUS || !cpu_is_preserved(cpu))
 		return;
 
-	apicid = cpuid_to_apicid[cpu];
+	apicid = x86_preserved_apicid[cpu];
+	if (apicid == BAD_APICID)
+		apicid = cpuid_to_apicid[cpu];
 	if (apicid == BAD_APICID)
 		apicid = cpu;
 
@@ -154,10 +159,18 @@ void __cpu_preserved_text arch_cpu_preserved_park_init(int cpu __maybe_unused)
 
 void arch_cpu_preserved_early_init(void)
 {
+	int i;
+
 	if (!x86_preserved_apic_eoi_va)
 		x86_preserved_apic_eoi_va = (unsigned long)(fix_to_virt(FIX_APIC_BASE) + APIC_EOI);
 	x86_preserved_has_svm = boot_cpu_has(X86_FEATURE_SVM);
 	x86_preserved_is_x2apic = x2apic_enabled();
+
+	for (i = 0; i < nr_cpu_ids && i < NR_CPUS; i++)
+		x86_preserved_apicid[i] = cpuid_to_apicid[i];
+	arch_cpu_preserved_dcache_clean((unsigned long)&x86_preserved_apicid,
+					(unsigned long)&x86_preserved_apicid +
+					sizeof(x86_preserved_apicid));
 }
 EXPORT_SYMBOL_GPL(arch_cpu_preserved_early_init);
 
@@ -242,6 +255,8 @@ static void __cpu_preserved_text arch_cpu_preserved_park_worker(int cpu)
 {
 	struct cpu_preserved_stack_context *sctx = cpu_preserved_get_stack_context();
 	phys_addr_t pgd_pa = 0;
+	unsigned long orig_cr3 = __read_cr3();
+	int is_kexec;
 
 	if (sctx && sctx->session_pgd_pa)
 		pgd_pa = sctx->session_pgd_pa;
@@ -254,13 +269,25 @@ static void __cpu_preserved_text arch_cpu_preserved_park_worker(int cpu)
 	if (pgd_pa)
 		write_cr3(pgd_pa);
 
-	cpu_preserved_park_loop(cpu);
+	is_kexec = cpu_preserved_park_loop(cpu);
 
 	arch_cpu_preserved_park_finish(cpu);
-	while (1) {
-		native_irq_disable();
-		asm volatile("hlt");
+
+	if (is_kexec) {
+		while (1) {
+			native_irq_disable();
+			asm volatile("hlt");
+		}
 	}
+
+	/*
+	 * Returning from park on cancel: restore original CR3, GDT, IDT
+	 * and return back up arch_cpu_preserved_call_on_stack to the caller stack.
+	 */
+	write_cr3(orig_cr3);
+	load_direct_gdt(cpu);
+	load_fixmap_gdt(cpu);
+	load_current_idt();
 }
 
 /*
