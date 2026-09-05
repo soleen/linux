@@ -17,6 +17,7 @@
 #include <asm/apic.h>
 #include <asm/fixmap.h>
 #include <asm/irq_vectors.h>
+#include <asm/sync_core.h>
 #include "caretaker.h"
 #include "cpuid.h"
 #include "x86.h"
@@ -726,6 +727,8 @@ kvm_x86_caretaker_run(struct caretaker_x86_page *cxp,
 	cxp->running = 1;
 
 	reason = kvm_caretaker_vcpu_run(&cxp->vcpu, deadline_ticks);
+
+	iret_to_self();
 
 	cxp->running = 0;
 	return reason;
