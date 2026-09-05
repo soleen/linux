@@ -117,7 +117,7 @@ struct caretaker_cpu_worker_arg {
 	int cpu;
 };
 
-#define CARETAKER_MAX_PGD_PAGES		128
+#define CARETAKER_MAX_PGD_PAGES		1024
 
 /**
  * struct caretaker_session - Per-LUO session Caretaker context

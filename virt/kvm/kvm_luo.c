@@ -235,8 +235,24 @@ static int kvm_vcpu_luo_preserve(struct liveupdate_file_op_args *args)
 
 	if (target_cpu >= 0) {
 		job->data = kvm_arch_vcpu_caretaker_data(vcpu);
-		if (job->data)
-			caretaker_kvm_detach(job->data);
+		if (job->data) {
+			struct caretaker_cb *cb = job->data;
+			struct caretaker_session *sess = caretaker_get_session(args->session);
+
+			caretaker_kvm_detach(cb);
+			if (cb->runtime_size && cb->runtime_pa) {
+				if (sess)
+					caretaker_session_map_range(sess,
+								    cb->runtime_pa,
+								    (unsigned long)phys_to_virt(cb->runtime_pa),
+								    cb->runtime_size,
+								    PAGE_KERNEL);
+				cpu_preserved_map_range(cb->runtime_pa,
+							(unsigned long)phys_to_virt(cb->runtime_pa),
+							cb->runtime_size,
+							PAGE_KERNEL);
+			}
+		}
 		ret = caretaker_session_activate_job(args->session, job);
 		if (ret) {
 			caretaker_session_cancel_job(args->session, job);

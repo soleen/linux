@@ -162,6 +162,7 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_caretaker_init_common_vcpu);
 bool __cpu_preserved_text __no_stack_protector
 kvm_caretaker_should_exit(struct kvm_caretaker_vcpu *cvcpu)
 {
+	struct cpu_preserved_stack_context *sctx;
 	int pcpu;
 
 	if (!cvcpu)
@@ -171,6 +172,11 @@ kvm_caretaker_should_exit(struct kvm_caretaker_vcpu *cvcpu)
 					(unsigned long)&cvcpu->cb + sizeof(cvcpu->cb));
 
 	if (READ_ONCE(cvcpu->cb.attachment_state) != CARETAKER_KVM_DETACHED)
+		return true;
+
+	sctx = cpu_preserved_get_stack_context();
+	if (sctx && sctx->cpu >= 0 && sctx->cpu < NR_CPUS &&
+	    cpu_preserved_should_exit(sctx->cpu))
 		return true;
 
 	pcpu = cvcpu->cb.pcpu_id;
@@ -381,6 +387,7 @@ kvm_caretaker_vcpu_run(struct kvm_caretaker_vcpu *cvcpu, u64 deadline_ticks)
 {
 	const struct kvm_caretaker_ops *ops;
 	void *arch_data;
+	int enter_res = 0;
 
 	if (!cvcpu || !cvcpu->ops)
 		return CARETAKER_EXIT_ERROR;
@@ -403,7 +410,6 @@ kvm_caretaker_vcpu_run(struct kvm_caretaker_vcpu *cvcpu, u64 deadline_ticks)
 
 	while (true) {
 		struct kvm_caretaker_exit exit __uninitialized;
-		int enter_res;
 		bool handled = false;
 
 		caretaker_memset(&exit, 0, sizeof(exit));
@@ -462,6 +468,9 @@ kvm_caretaker_vcpu_run(struct kvm_caretaker_vcpu *cvcpu, u64 deadline_ticks)
 
 	if (kvm_caretaker_should_exit(cvcpu))
 		return CARETAKER_EXIT_ATTACH_SIGNALED;
+
+	if (enter_res != 0)
+		return CARETAKER_EXIT_ERROR;
 
 	return CARETAKER_EXIT_QUANTUM_EXPIRED;
 }
