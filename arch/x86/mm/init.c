@@ -8,6 +8,7 @@
 #include <linux/kmemleak.h>
 #include <linux/sched/task.h>
 #include <linux/execmem.h>
+#include <linux/liveupdate.h>
 
 #include <asm/set_memory.h>
 #include <asm/cpu_device_id.h>
@@ -866,6 +867,9 @@ void __init poking_init(void)
  */
 int devmem_is_allowed(unsigned long pagenr)
 {
+	if (liveupdate_enabled())
+		return 1;
+
 	if (region_intersects(PFN_PHYS(pagenr), PAGE_SIZE,
 				IORESOURCE_SYSTEM_RAM, IORES_DESC_NONE)
 			!= REGION_DISJOINT) {
