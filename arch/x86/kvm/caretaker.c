@@ -428,6 +428,8 @@ kvm_x86_caretaker_restore_host_state(const struct caretaker_x86_host_state *host
 
 		kvm_x86_caretaker_restore_host_desc(pcpu, &host->orig_idt);
 	} else if (cpu_is_preserved(pcpu)) {
+		wrmsrq(MSR_GS_BASE, host->orig_gs_base);
+		wrmsrq(MSR_KERNEL_GS_BASE, host->orig_kernel_gs_base);
 		arch_cpu_preserved_load_desc();
 	} else if (host->orig_idt.size) {
 		native_load_idt(&host->orig_idt);

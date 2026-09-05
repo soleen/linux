@@ -70,9 +70,11 @@ extern void x86_preserved_apic_eoi_stub(void);
 
 static gate_desc x86_preserved_idt[256] __cpu_preserved_data __aligned(PAGE_SIZE);
 static bool x86_preserved_idt_initialized __cpu_preserved_data;
+static struct desc_ptr x86_preserved_idt_desc __cpu_preserved_data;
 
 static struct desc_struct x86_preserved_gdt[GDT_ENTRIES] __cpu_preserved_data __aligned(PAGE_SIZE);
 static bool x86_preserved_gdt_initialized __cpu_preserved_data;
+static struct desc_ptr x86_preserved_gdt_desc __cpu_preserved_data;
 static bool x86_preserved_has_svm __cpu_preserved_data;
 
 static void init_preserved_idt(void)
@@ -94,9 +96,13 @@ static void init_preserved_idt(void)
 		pack_gate(&x86_preserved_idt[v], GATE_INTERRUPT, handler, 0,
 			  0, __KERNEL_CS);
 	}
+	x86_preserved_idt_desc.size = sizeof(x86_preserved_idt) - 1;
+	x86_preserved_idt_desc.address = (unsigned long)&x86_preserved_idt[0];
 	x86_preserved_idt_initialized = true;
 	arch_cpu_preserved_dcache_clean((unsigned long)&x86_preserved_idt,
 					(unsigned long)&x86_preserved_idt + sizeof(x86_preserved_idt));
+	arch_cpu_preserved_dcache_clean((unsigned long)&x86_preserved_idt_desc,
+					(unsigned long)&x86_preserved_idt_desc + sizeof(x86_preserved_idt_desc));
 }
 
 static void init_preserved_gdt(void)
@@ -110,24 +116,19 @@ static void init_preserved_gdt(void)
 	gdt = get_current_gdt_rw();
 	for (i = 0; i < GDT_ENTRIES; i++)
 		x86_preserved_gdt[i] = gdt[i];
+	x86_preserved_gdt_desc.size = GDT_SIZE - 1;
+	x86_preserved_gdt_desc.address = (unsigned long)&x86_preserved_gdt[0];
 	x86_preserved_gdt_initialized = true;
 	arch_cpu_preserved_dcache_clean((unsigned long)&x86_preserved_gdt,
 					(unsigned long)&x86_preserved_gdt + sizeof(x86_preserved_gdt));
+	arch_cpu_preserved_dcache_clean((unsigned long)&x86_preserved_gdt_desc,
+					(unsigned long)&x86_preserved_gdt_desc + sizeof(x86_preserved_gdt_desc));
 }
 
 void __cpu_preserved_text arch_cpu_preserved_load_desc(void)
 {
-	struct desc_ptr idt_desc = {
-		.size = sizeof(x86_preserved_idt) - 1,
-		.address = (unsigned long)&x86_preserved_idt[0],
-	};
-	struct desc_ptr gdt_desc = {
-		.size = GDT_SIZE - 1,
-		.address = (unsigned long)&x86_preserved_gdt[0],
-	};
-
-	native_load_gdt(&gdt_desc);
-	native_load_idt(&idt_desc);
+	native_load_gdt(&x86_preserved_gdt_desc);
+	native_load_idt(&x86_preserved_idt_desc);
 }
 EXPORT_SYMBOL_GPL(arch_cpu_preserved_load_desc);
 
@@ -171,6 +172,9 @@ void arch_cpu_preserved_early_init(void)
 	arch_cpu_preserved_dcache_clean((unsigned long)&x86_preserved_apicid,
 					(unsigned long)&x86_preserved_apicid +
 					sizeof(x86_preserved_apicid));
+
+	init_preserved_idt();
+	init_preserved_gdt();
 }
 EXPORT_SYMBOL_GPL(arch_cpu_preserved_early_init);
 
@@ -258,6 +262,8 @@ static void __cpu_preserved_text arch_cpu_preserved_park_worker(int cpu)
 	unsigned long orig_cr3 = __read_cr3();
 	int is_kexec;
 
+	arch_cpu_preserved_park_init(cpu);
+
 	if (sctx && sctx->session_pgd_pa)
 		pgd_pa = sctx->session_pgd_pa;
 	else
@@ -281,13 +287,25 @@ static void __cpu_preserved_text arch_cpu_preserved_park_worker(int cpu)
 	}
 
 	/*
-	 * Returning from park on cancel: restore original CR3, GDT, IDT
-	 * and return back up arch_cpu_preserved_call_on_stack to the caller stack.
+	 * Returning from park on cancel: restore original CR3, GDT, TR, IDT,
+	 * per-CPU segment bases, and APIC state before returning back up
+	 * arch_cpu_preserved_call_on_stack to the caller stack.
 	 */
 	write_cr3(orig_cr3);
 	load_direct_gdt(cpu);
+	{
+		struct desc_struct *gdt = get_cpu_gdt_rw(cpu);
+		tss_desc tss = *(tss_desc *)&gdt[GDT_ENTRY_TSS];
+
+		tss.type = DESC_TSS;
+		write_gdt_entry(gdt, GDT_ENTRY_TSS, &tss, DESC_TSS);
+	}
+	load_TR_desc();
 	load_fixmap_gdt(cpu);
 	load_current_idt();
+	wrmsrq(MSR_GS_BASE, cpu_kernelmode_gs_base(cpu));
+	wrmsrq(MSR_KERNEL_GS_BASE, 0);
+	apic_soft_disable();
 }
 
 /*
@@ -620,10 +638,16 @@ EXPORT_SYMBOL_GPL(arch_caretaker_map_session_range);
 
 u64 __cpu_preserved_text arch_caretaker_ticks_to_ns(u64 ticks)
 {
-	u32 khz = global_sched_config.tsc_khz;
+	u64 khz = global_sched_config.tsc_khz;
 
-	if (khz > 0)
-		return mul_u64_u32_div(ticks, 1000000U, khz);
+	if (khz > 0) {
+		u64 mul = 1000000ULL;
+		u64 low, high;
+
+		asm("mulq %3" : "=a"(low), "=d"(high) : "a"(ticks), "r"(mul) : "cc");
+		asm("divq %2" : "=a"(low), "=d"(high) : "r"(khz), "a"(low), "d"(high) : "cc");
+		return low;
+	}
 	return ticks;
 }
 EXPORT_SYMBOL_GPL(arch_caretaker_ticks_to_ns);
