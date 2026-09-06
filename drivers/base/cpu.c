@@ -207,8 +207,19 @@ static ssize_t preserve_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(preserve);
 
+static ssize_t caretaker_diag_show(struct device *dev,
+				   struct device_attribute *attr,
+				   char *buf)
+{
+	struct cpu *cpu = container_of(dev, struct cpu, dev);
+
+	return arch_cpu_preserved_diag_show(cpu->dev.id, buf);
+}
+static DEVICE_ATTR_RO(caretaker_diag);
+
 static struct attribute *cpu_preserve_attrs[] = {
 	&dev_attr_preserve.attr,
+	&dev_attr_caretaker_diag.attr,
 	NULL
 };
 

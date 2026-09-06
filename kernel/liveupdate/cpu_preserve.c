@@ -312,6 +312,13 @@ int cpu_preserved_init_runtime_buffer(void)
 	memcpy(page_address(cpu_preserved_data_pages),
 	       __cpu_preserved_data_start, data_size);
 
+	arch_cpu_preserved_dcache_clean(
+		(unsigned long)page_address(cpu_preserved_text_pages),
+		(unsigned long)page_address(cpu_preserved_text_pages) + text_size);
+	arch_cpu_preserved_dcache_clean(
+		(unsigned long)page_address(cpu_preserved_data_pages),
+		(unsigned long)page_address(cpu_preserved_data_pages) + data_size);
+
 	ret = arch_cpu_preserved_setup_buffer(cpu_preserved_text_pages,
 					      text_nr_pages,
 					      cpu_preserved_data_pages,
@@ -523,6 +530,32 @@ EXPORT_SYMBOL_GPL(cpu_preserved_get_session_name);
 #define CPU_PRESERVED_EXITING_KEXEC	3
 #define CPU_PRESERVED_DEAD		4
 
+void __cpu_preserved_text cpu_preserved_set_dead(int cpu)
+{
+	struct cpu_preserved_pcpu *pcpu = cpu_preserved_get_pcpu(cpu);
+
+	if (pcpu) {
+		WRITE_ONCE(pcpu->state.workload, CPU_PRESERVED_DEAD);
+		pcpu->state.name[0] = '\0';
+		arch_cpu_preserved_dcache_clean((unsigned long)&pcpu->state,
+						(unsigned long)(&pcpu->state + 1));
+	}
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_set_dead);
+
+ssize_t __weak arch_cpu_preserved_diag_show(int cpu, char *buf)
+{
+	return -EOPNOTSUPP;
+}
+
+void __weak arch_cpu_preserved_set_stage(int cpu, u64 stage, u64 sub_stage)
+{
+}
+
+void __weak arch_cpu_preserved_dump_diag(int cpu)
+{
+}
+
 static void cpu_kick(int cpu)
 {
 	arch_cpu_preserved_kick(cpu);
@@ -666,6 +699,11 @@ void cpu_preserved_set_session(int cpu, struct caretaker_session *sess)
 		sctx->session_pgd_pa = sess ? sess->pgd_pa : 0;
 		pcpu->pgd_pa = sess ? sess->pgd_pa : 0;
 
+		arch_cpu_preserved_dcache_clean((unsigned long)sctx,
+						(unsigned long)sctx + sizeof(*sctx));
+		arch_cpu_preserved_dcache_clean((unsigned long)pcpu,
+						(unsigned long)pcpu + sizeof(*pcpu));
+
 		if (sess) {
 			if (cpu_preserved_pcpus_va && cpu_preserved_pcpus_pa) {
 				arch_caretaker_map_session_range(sess,
@@ -708,6 +746,8 @@ static int cpu_wait_dead(int cpu)
 		retries++;
 	}
 
+	arch_cpu_preserved_dump_diag(cpu);
+
 	if (READ_ONCE(pcpu->state.workload) != CPU_PRESERVED_DEAD) {
 		pr_err("cpu_wait_dead: cpu=%d workload=%d name='%s' retries=%d\n",
 		       cpu, READ_ONCE(pcpu->state.workload), pcpu->state.name, retries);
@@ -727,6 +767,8 @@ int __cpu_preserved_text cpu_preserved_park_loop(int cpu)
 	if (!pcpu)
 		return 0;
 
+	arch_cpu_preserved_set_stage(cpu, 3, 0);
+
 	entry = &pcpu->state;
 	entry->cpu = cpu;
 	WRITE_ONCE(entry->workload, CPU_PRESERVED_PARKED);
@@ -742,7 +784,9 @@ int __cpu_preserved_text cpu_preserved_park_loop(int cpu)
 	arch_cpu_preserved_dcache_clean((unsigned long)pcpu,
 					(unsigned long)pcpu + sizeof(*pcpu));
 
+	arch_cpu_preserved_set_stage(cpu, 4, 0);
 	arch_cpu_preserved_park_init(cpu);
+	arch_cpu_preserved_set_stage(cpu, 5, 0);
 
 	while (1) {
 		void (*fn)(void *);
@@ -751,25 +795,32 @@ int __cpu_preserved_text cpu_preserved_park_loop(int cpu)
 		arch_cpu_preserved_dcache_inval((unsigned long)pcpu,
 						(unsigned long)pcpu +
 						sizeof(*pcpu));
-		if (READ_ONCE(entry->workload) != CPU_PRESERVED_PARKED)
+		if (READ_ONCE(entry->workload) != CPU_PRESERVED_PARKED) {
+			arch_cpu_preserved_set_stage(cpu, 6, READ_ONCE(entry->workload));
 			break;
+		}
 
 		fn = READ_ONCE(pcpu->entry_fn);
 		arg = READ_ONCE(pcpu->entry_data);
 
 		if (fn) {
+			arch_cpu_preserved_set_stage(cpu, 7, (u64)fn);
 			fn(arg);
+			arch_cpu_preserved_set_stage(cpu, 8, 0);
 			WRITE_ONCE(pcpu->entry_fn, NULL);
 			WRITE_ONCE(pcpu->entry_data, NULL);
 			arch_cpu_preserved_dcache_clean((unsigned long)&pcpu->entry_fn,
 							(unsigned long)(&pcpu->stack + 1));
 		} else {
+			arch_cpu_preserved_set_stage(cpu, 9, 0);
 			arch_cpu_preserved_park_wait();
+			arch_cpu_preserved_set_stage(cpu, 10, 0);
 		}
 		barrier();
 	}
 
 	final_workload = READ_ONCE(entry->workload);
+	arch_cpu_preserved_set_stage(cpu, 11, final_workload);
 	WRITE_ONCE(entry->workload, CPU_PRESERVED_DEAD);
 	entry->name[0] = '\0';
 	arch_cpu_preserved_dcache_clean((unsigned long)&pcpu->state,
@@ -791,9 +842,12 @@ void __cpu_preserved_text cpu_preserved_park(int cpu)
 {
 	struct cpu_preserved_pcpu *pcpu = cpu_preserved_get_pcpu(cpu);
 
+	arch_cpu_preserved_set_stage(cpu, 1, 0);
+
 	if (pcpu && pcpu->stack) {
 		unsigned long top_of_stack = (unsigned long)pcpu->stack +
 			CPU_PRESERVED_STACK_SIZE - CPU_PRESERVED_STACK_HEADROOM;
+		arch_cpu_preserved_set_stage(cpu, 2, top_of_stack);
 		arch_cpu_preserved_park_on_stack(cpu, top_of_stack);
 	} else {
 		int is_kexec = cpu_preserved_park_loop(cpu);
@@ -864,8 +918,8 @@ static int cpu_preserve(unsigned int cpu)
 
 		outgoing->pcpus = kho_alloc_preserve(
 			sizeof(*outgoing->pcpus) * nr_cpu_ids);
-		if (IS_ERR(outgoing->pcpus)) {
-			ret = PTR_ERR(outgoing->pcpus);
+		if (IS_ERR_OR_NULL(outgoing->pcpus)) {
+			ret = outgoing->pcpus ? PTR_ERR(outgoing->pcpus) : -ENOMEM;
 			outgoing->pcpus = NULL;
 			mutex_unlock(&cpu_preserved_lock);
 			kho_unpreserve_pages(stack_page,
@@ -881,10 +935,21 @@ static int cpu_preserve(unsigned int cpu)
 						(unsigned long)&cpu_preserved_pcpus_va + sizeof(cpu_preserved_pcpus_va));
 		arch_cpu_preserved_dcache_clean((unsigned long)&cpu_preserved_pcpus_pa,
 						(unsigned long)&cpu_preserved_pcpus_pa + sizeof(cpu_preserved_pcpus_pa));
+		arch_cpu_preserved_dcache_clean((unsigned long)&outgoing->pcpus,
+						(unsigned long)&outgoing->pcpus + sizeof(outgoing->pcpus));
+	}
+
+	if (WARN_ON(!outgoing->pcpus)) {
+		mutex_unlock(&cpu_preserved_lock);
+		kho_unpreserve_pages(stack_page, 1 << CPU_PRESERVED_STACK_ORDER);
+		__free_pages(stack_page, CPU_PRESERVED_STACK_ORDER);
+		return -EINVAL;
 	}
 
 	cpumask_set_cpu(cpu, &outgoing->mask);
 	cpumask_set_cpu(cpu, &cpu_preserved_mask);
+	arch_cpu_preserved_dcache_clean((unsigned long)&outgoing->mask,
+					(unsigned long)&outgoing->mask + sizeof(outgoing->mask));
 	arch_cpu_preserved_dcache_clean((unsigned long)&cpu_preserved_mask,
 					(unsigned long)&cpu_preserved_mask + sizeof(cpu_preserved_mask));
 	pcpu = &outgoing->pcpus[cpu];
@@ -1279,9 +1344,13 @@ static int cpu_preserve_preserve(struct liveupdate_file_op_args *args)
 			fser->stack_pa = pcpu->state.stack_pa;
 			fser->stack_order = pcpu->state.stack_order;
 			fser->pcpu_pa = virt_to_phys(pcpu);
+			arch_cpu_preserved_dcache_clean((unsigned long)pcpu,
+							(unsigned long)pcpu + sizeof(*pcpu));
 		}
 	}
 
+	arch_cpu_preserved_dcache_clean((unsigned long)fser,
+					(unsigned long)fser + sizeof(*fser));
 	args->serialized_data = virt_to_phys(fser);
 	return 0;
 }

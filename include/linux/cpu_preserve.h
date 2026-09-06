@@ -84,6 +84,10 @@ extern char __cpu_preserved_data_start[], __cpu_preserved_data_end[];
 bool cpu_is_preserved(int cpu);
 bool cpu_preserved_is_incoming(int cpu);
 bool cpu_preserved_should_exit(int cpu);
+void cpu_preserved_set_dead(int cpu);
+ssize_t arch_cpu_preserved_diag_show(int cpu, char *buf);
+void arch_cpu_preserved_set_stage(int cpu, u64 stage, u64 sub_stage);
+void arch_cpu_preserved_dump_diag(int cpu);
 const char *cpu_preserved_get_workload_name(int cpu);
 const char *cpu_preserved_get_session_name(int cpu);
 void cpu_preserved_park(int cpu);
@@ -297,6 +301,7 @@ static inline int cpu_preserved_attach_workload(int cpu, const char *name,
 static inline int cpu_preserved_detach_workload(int cpu) { return -EOPNOTSUPP; }
 
 static inline void arch_cpu_preserved_kick(int cpu) {}
+static inline void arch_cpu_preserved_set_stage(int cpu, u64 stage, u64 sub_stage) {}
 static inline void arch_cpu_preserved_park_wait(void) {}
 static inline void arch_cpu_preserved_park_init(int cpu) {}
 static inline void arch_cpu_preserved_early_init(void) {}

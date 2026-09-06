@@ -205,13 +205,24 @@ caretaker_sched_pick_next(struct caretaker_runqueue *rq, int cpu)
 {
 	struct caretaker_job *job = NULL, *iter;
 
-	if (!rq || READ_ONCE(rq->nr_runnable) == 0)
+	if (!rq)
+		return NULL;
+
+	arch_cpu_preserved_dcache_inval((unsigned long)rq,
+					(unsigned long)rq + sizeof(*rq));
+
+	arch_cpu_preserved_set_stage(cpu, 40, READ_ONCE(rq->nr_runnable));
+
+	if (READ_ONCE(rq->nr_runnable) == 0)
 		return NULL;
 
 	caretaker_rq_lock(rq);
+	arch_cpu_preserved_set_stage(cpu, 41, 0);
 
 	/* 1. Search for first eligible runnable job in FIFO order */
 	list_for_each_entry(iter, &rq->runnable, node) {
+		arch_cpu_preserved_dcache_inval((unsigned long)iter,
+						(unsigned long)iter + sizeof(*iter));
 		if (iter->preferred_cpu == cpu ||
 		    iter->preferred_cpu < 0 ||
 		    !cpu_is_preserved(iter->preferred_cpu)) {
@@ -223,6 +234,8 @@ caretaker_sched_pick_next(struct caretaker_runqueue *rq, int cpu)
 	/* 2. Fallback: only pick jobs whose preferred CPU is not preserved */
 	if (!job && !list_empty(&rq->runnable)) {
 		list_for_each_entry(iter, &rq->runnable, node) {
+			arch_cpu_preserved_dcache_inval((unsigned long)iter,
+							(unsigned long)iter + sizeof(*iter));
 			if (iter->preferred_cpu < 0 ||
 			    !cpu_is_preserved(iter->preferred_cpu)) {
 				job = iter;
@@ -234,9 +247,14 @@ caretaker_sched_pick_next(struct caretaker_runqueue *rq, int cpu)
 	if (job) {
 		list_del_init(&job->node);
 		rq->nr_runnable--;
+		arch_cpu_preserved_dcache_clean((unsigned long)rq,
+						(unsigned long)rq + sizeof(*rq));
+		arch_cpu_preserved_dcache_clean((unsigned long)job,
+						(unsigned long)job + sizeof(*job));
 	}
 
 	caretaker_rq_unlock(rq);
+	arch_cpu_preserved_set_stage(cpu, 42, (u64)job);
 	return job;
 }
 
@@ -252,6 +270,11 @@ caretaker_sched_put_prev(struct caretaker_runqueue *rq,
 	list_add_tail(&job->node, &rq->runnable);
 	rq->nr_runnable++;
 	caretaker_rq_unlock(rq);
+
+	arch_cpu_preserved_dcache_clean((unsigned long)job,
+					(unsigned long)job + sizeof(*job));
+	arch_cpu_preserved_dcache_clean((unsigned long)rq,
+					(unsigned long)rq + sizeof(*rq));
 }
 
 static void __cpu_preserved_text
@@ -268,10 +291,13 @@ caretaker_cpu_schedule_loop(int cpu, struct caretaker_runqueue *rq,
 	while (!cpu_preserved_should_exit(cpu)) {
 		/* 1. Pick the next runnable job from the FIFO queue */
 		if (!curr) {
+			arch_cpu_preserved_set_stage(cpu, 30, READ_ONCE(rq->nr_runnable));
 			curr = caretaker_sched_pick_next(rq, cpu);
 			if (!curr) {
 				/* No runnable jobs; execute low-power park wait */
+				arch_cpu_preserved_set_stage(cpu, 31, 0);
 				arch_cpu_preserved_park_wait();
+				arch_cpu_preserved_set_stage(cpu, 32, 0);
 				continue;
 			}
 		}
@@ -286,7 +312,9 @@ caretaker_cpu_schedule_loop(int cpu, struct caretaker_runqueue *rq,
 		/* 3. Execute workload on physical silicon */
 		curr->last_cpu = cpu;
 		curr->state = CARETAKER_JOB_RUNNING;
+		arch_cpu_preserved_set_stage(cpu, 33, (u64)curr->run_fn);
 		reason = curr->run_fn(curr->data, deadline);
+		arch_cpu_preserved_set_stage(cpu, 34, (u64)reason);
 
 		/* 4. Update telemetry and accounting */
 		end_ticks = arch_caretaker_read_counter();
@@ -323,19 +351,34 @@ caretaker_cpu_schedule_loop(int cpu, struct caretaker_runqueue *rq,
 		caretaker_sched_put_prev(rq, curr);
 		curr = NULL;
 	}
+	arch_cpu_preserved_set_stage(cpu, 35, 0);
 }
 
 static void __caretaker_text caretaker_sched_cpu_worker(void *data)
 {
 	struct caretaker_cpu_worker_arg *arg = data;
 	struct cpu_preserved_stack_context *sctx = caretaker_get_current_context();
-	int cpu = sctx ? sctx->cpu : arg->cpu;
-	struct caretaker_session *sess = (sctx && sctx->session) ? sctx->session : arg->sess;
+	int cpu;
+	struct caretaker_session *sess;
 
-	if (sctx && sctx->session_pgd_pa)
+	if (sctx)
+		arch_cpu_preserved_dcache_inval((unsigned long)sctx,
+						(unsigned long)sctx + sizeof(*sctx));
+
+	cpu = sctx ? sctx->cpu : arg->cpu;
+	sess = (sctx && sctx->session) ? sctx->session : arg->sess;
+
+	arch_cpu_preserved_set_stage(cpu, 20, (u64)sess);
+
+	if (sctx && sctx->session_pgd_pa) {
+		arch_cpu_preserved_set_stage(cpu, 21, sctx->session_pgd_pa);
 		arch_cpu_preserved_switch_pgd(sctx->session_pgd_pa);
+		arch_cpu_preserved_set_stage(cpu, 22, sctx->session_pgd_pa);
+	}
 
+	arch_cpu_preserved_set_stage(cpu, 23, 0);
 	caretaker_cpu_schedule_loop(cpu, &sess->rq, &sess->sched_config);
+	arch_cpu_preserved_set_stage(cpu, 24, 0);
 }
 
 static DEFINE_MUTEX(caretaker_sessions_lock);
@@ -430,6 +473,12 @@ static struct caretaker_session *caretaker_get_or_create_session(struct liveupda
 		list_add_tail(&sess->node, &caretaker_sessions);
 	}
 
+	arch_cpu_preserved_dcache_clean((unsigned long)sess,
+					(unsigned long)sess + sizeof(*sess));
+	if (sess->ser)
+		arch_cpu_preserved_dcache_clean((unsigned long)sess->ser,
+						(unsigned long)sess->ser + sizeof(*sess->ser));
+
 	return sess;
 }
 
@@ -486,6 +535,14 @@ int caretaker_session_add_cpu(struct liveupdate_session *s, int cpu)
 		sess->ser->nr_cpus = cpumask_weight(&sess->cpus);
 		sess->ser->pgd_pa = sess->pgd_pa;
 	}
+
+	arch_cpu_preserved_dcache_clean((unsigned long)&sess->cpu_args[cpu],
+					(unsigned long)&sess->cpu_args[cpu] + sizeof(sess->cpu_args[cpu]));
+	arch_cpu_preserved_dcache_clean((unsigned long)&sess->cpus,
+					(unsigned long)&sess->cpus + sizeof(sess->cpus));
+	if (sess->ser)
+		arch_cpu_preserved_dcache_clean((unsigned long)sess->ser,
+						(unsigned long)sess->ser + sizeof(*sess->ser));
 
 	cpu_preserved_set_session(cpu, sess);
 
@@ -677,6 +734,9 @@ caretaker_session_submit_job(struct liveupdate_session *s,
 		job->assigned_cpu = -1;
 	}
 
+	arch_cpu_preserved_dcache_clean((unsigned long)job,
+					(unsigned long)job + sizeof(*job));
+
 	return job;
 }
 EXPORT_SYMBOL_GPL(caretaker_session_submit_job);
@@ -707,6 +767,10 @@ int caretaker_session_activate_job(struct liveupdate_session *s,
 	}
 	if (job->assigned_cpu >= 0) {
 		caretaker_sched_enqueue(&sess->rq, job);
+		arch_cpu_preserved_dcache_clean((unsigned long)job,
+						(unsigned long)job + sizeof(*job));
+		arch_cpu_preserved_dcache_clean((unsigned long)&sess->rq,
+						(unsigned long)&sess->rq + sizeof(sess->rq));
 		if (cpu_is_preserved(job->assigned_cpu))
 			arch_cpu_preserved_kick(job->assigned_cpu);
 	}
