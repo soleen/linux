@@ -49,7 +49,10 @@ SYM_CODE_START(caretaker_hyp_vector)
 SYM_CODE_END(caretaker_hyp_vector)
 
 SYM_CODE_START_LOCAL(caretaker_invalid)
-	b	caretaker_invalid
+	mrs	x0, elr_el2
+	mrs	x1, esr_el2
+	mrs	x2, far_el2
+	b	arm64_caretaker_handle_invalid
 SYM_CODE_END(caretaker_invalid)
 
 SYM_CODE_START_LOCAL(caretaker_el2h_irq)
@@ -69,12 +72,6 @@ SYM_CODE_START_LOCAL(caretaker_el2h_irq)
 	msr_s	SYS_ICC_EOIR1_EL1, x0
 	msr_s	SYS_ICC_DIR_EL1, x0
 1:
-	mrs_s	x0, SYS_ICC_IAR0_EL1
-	cmp	x0, #1020
-	b.ge	2f
-	msr_s	SYS_ICC_EOIR0_EL1, x0
-	msr_s	SYS_ICC_DIR_EL1, x0
-2:
 	ldp	x29, x30, [sp], #16
 	ldp	x16, x17, [sp], #16
 	ldp	x14, x15, [sp], #16
