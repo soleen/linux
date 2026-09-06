@@ -15,6 +15,7 @@
 #include <asm/tlbflush.h>
 #include <asm/caretaker.h>
 #include <asm/fixmap.h>
+#include <asm/msr.h>
 #include <asm/trans_pgd.h>
 #include <linux/caretaker.h>
 
@@ -132,8 +133,57 @@ void __cpu_preserved_text arch_cpu_preserved_load_desc(void)
 }
 EXPORT_SYMBOL_GPL(arch_cpu_preserved_load_desc);
 
+static void __cpu_preserved_text arch_cpu_preserved_set_max_perf(void)
+{
+	if (boot_cpu_data.x86_vendor == X86_VENDOR_INTEL) {
+		u64 plat_info, turbo_limit, cur_ctl;
+		int max_ratio = 0;
+
+		if (rdmsrq_safe(MSR_PLATFORM_INFO, &plat_info) == 0)
+			max_ratio = (plat_info >> 8) & 0xff;
+
+		if (rdmsrq_safe(MSR_TURBO_RATIO_LIMIT, &turbo_limit) == 0) {
+			int turbo_ratio = turbo_limit & 0xff;
+
+			if (turbo_ratio > max_ratio)
+				max_ratio = turbo_ratio;
+		}
+
+		if (rdmsrq_safe(MSR_IA32_PERF_CTL, &cur_ctl) == 0) {
+			int cur_ratio = (cur_ctl >> 8) & 0xff;
+
+			if (cur_ratio > max_ratio)
+				max_ratio = cur_ratio;
+		}
+
+		if (max_ratio > 0)
+			native_wrmsrq(MSR_IA32_PERF_CTL, (u64)max_ratio << 8);
+
+		if (boot_cpu_has(X86_FEATURE_HWP)) {
+			u64 cap;
+
+			if (rdmsrq_safe(MSR_HWP_CAPABILITIES, &cap) == 0) {
+				u32 highest = cap & 0xff;
+
+				if (highest > 0) {
+					u64 hwp_req = (highest & 0xff) |
+						      ((u64)(highest & 0xff) << 8) |
+						      ((u64)(highest & 0xff) << 16);
+					native_wrmsrq(MSR_HWP_REQUEST, hwp_req);
+				}
+			}
+		}
+	} else if (boot_cpu_data.x86_vendor == X86_VENDOR_AMD) {
+		u64 cur_ctl;
+
+		if (rdmsrq_safe(MSR_AMD_PERF_CTL, &cur_ctl) == 0)
+			native_wrmsrq(MSR_AMD_PERF_CTL, cur_ctl);
+	}
+}
+
 /*
- * Disables local interrupts on the physical core and loads preserved IDT and GDT.
+ * Disables local interrupts on the physical core, loads preserved IDT and GDT,
+ * and sets maximum CPU performance while preserved in Caretaker mode.
  */
 void __cpu_preserved_text arch_cpu_preserved_park_init(int cpu __maybe_unused)
 {
@@ -156,6 +206,9 @@ void __cpu_preserved_text arch_cpu_preserved_park_init(int cpu __maybe_unused)
 			writel(spiv, spiv_va);
 		}
 	}
+
+	/* Set CPU to maximum performance while preserved */
+	arch_cpu_preserved_set_max_perf();
 }
 
 void arch_cpu_preserved_early_init(void)
