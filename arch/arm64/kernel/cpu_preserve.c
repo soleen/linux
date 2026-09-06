@@ -57,6 +57,109 @@ static unsigned long preserved_text_sz;
 static phys_addr_t preserved_data_pa;
 static unsigned long preserved_data_sz;
 static u64 arm64_cpu_mpidr[NR_CPUS] __cpu_preserved_data;
+struct arm64_caretaker_diag arm64_caretaker_diag[NR_CPUS] __cpu_preserved_data;
+EXPORT_SYMBOL_GPL(arm64_caretaker_diag);
+
+void __cpu_preserved_text arch_cpu_preserved_set_stage(int cpu, u64 stage, u64 sub_stage)
+{
+	if (cpu < 0 || cpu >= NR_CPUS)
+		cpu = arm64_caretaker_get_pcpu();
+	if (cpu >= 0 && cpu < NR_CPUS) {
+		struct arm64_caretaker_diag *d = &arm64_caretaker_diag[cpu];
+		d->stage = stage;
+		d->sub_stage = sub_stage;
+		__arch_cpu_preserved_dcache_clean((unsigned long)d, (unsigned long)(d + 1));
+	}
+}
+EXPORT_SYMBOL_GPL(arch_cpu_preserved_set_stage);
+
+ssize_t arch_cpu_preserved_diag_show(int cpu, char *buf)
+{
+	struct arm64_caretaker_diag *d;
+	void __iomem *rdist;
+	u32 isenabler = 0;
+
+	if (cpu < 0 || cpu >= NR_CPUS)
+		return -EINVAL;
+
+	d = &arm64_caretaker_diag[cpu];
+	arch_cpu_preserved_dcache_inval((unsigned long)d, (unsigned long)(d + 1));
+	arch_cpu_preserved_dcache_inval((unsigned long)&arm64_caretaker_faults[cpu],
+					(unsigned long)(&arm64_caretaker_faults[cpu] + 1));
+
+	rdist = gicv3_get_rdist_for_cpu(cpu);
+	if (rdist)
+		isenabler = readl_relaxed(rdist + SZ_64K + GICR_ISENABLER0);
+
+	return sysfs_emit(buf,
+			  "enter_count: %llu\n"
+			  "exit_count: %llu\n"
+			  "last_enter_ticks: %llu\n"
+			  "last_exit_ticks: %llu\n"
+			  "last_ret: 0x%llx\n"
+			  "last_pc: 0x%llx\n"
+			  "last_esr: 0x%llx\n"
+			  "last_far: 0x%llx\n"
+			  "last_hpfar: 0x%llx\n"
+			  "last_exit_type: %llu\n"
+			  "last_handled: %llu\n"
+			  "rdist_ptr: 0x%lx\n"
+			  "rdist_isenabler: 0x%x\n"
+			  "cnthp_ctl: 0x%llx\n"
+			  "cnthp_cval: 0x%llx\n"
+			  "counter_val: %llu\n"
+			  "deadline_val: %llu\n"
+			  "vcpu_run_loops: %llu\n"
+			  "stage: %llu\n"
+			  "sub_stage: %llu\n"
+			  "fault_count: %llu\n"
+			  "fault_elr: 0x%llx\n"
+			  "fault_esr: 0x%llx\n"
+			  "fault_far: 0x%llx\n",
+			  d->enter_count, d->exit_count,
+			  d->last_enter_ticks, d->last_exit_ticks,
+			  d->last_ret, d->last_pc, d->last_esr,
+			  d->last_far, d->last_hpfar, d->last_exit_type,
+			  d->last_handled, (unsigned long)rdist, isenabler,
+			  d->cnthp_ctl, d->cnthp_cval, d->counter_val,
+			  d->deadline_val, d->vcpu_run_loops,
+			  d->stage, d->sub_stage,
+			  arm64_caretaker_faults[cpu].count,
+			  arm64_caretaker_faults[cpu].elr,
+			  arm64_caretaker_faults[cpu].esr,
+			  arm64_caretaker_faults[cpu].far);
+}
+
+void arch_cpu_preserved_dump_diag(int cpu)
+{
+	struct arm64_caretaker_diag *d;
+	void __iomem *rdist;
+	u32 isenabler = 0;
+
+	if (cpu < 0 || cpu >= NR_CPUS)
+		return;
+
+	if (arm64_caretaker_faults[cpu].count) {
+		pr_err("cpu_wait_dead: cpu=%d caretaker exception count=%llu elr=0x%llx esr=0x%llx far=0x%llx\n",
+		       cpu,
+		       arm64_caretaker_faults[cpu].count,
+		       arm64_caretaker_faults[cpu].elr,
+		       arm64_caretaker_faults[cpu].esr,
+		       arm64_caretaker_faults[cpu].far);
+	}
+
+	d = &arm64_caretaker_diag[cpu];
+	arch_cpu_preserved_dcache_inval((unsigned long)d, (unsigned long)(d + 1));
+	rdist = gicv3_get_rdist_for_cpu(cpu);
+	if (rdist)
+		isenabler = readl_relaxed(rdist + SZ_64K + GICR_ISENABLER0);
+
+	pr_err("cpu_wait_dead: cpu=%d diag: stage=%llu sub=%llu enter=%llu exit=%llu ret=0x%llx pc=0x%llx esr=0x%llx far=0x%llx hpfar=0x%llx type=%llu handled=%llu loops=%llu cnthp_ctl=0x%llx rdist=0x%lx isenable=0x%x\n",
+	       cpu, d->stage, d->sub_stage, d->enter_count, d->exit_count, d->last_ret, d->last_pc,
+	       d->last_esr, d->last_far, d->last_hpfar, d->last_exit_type,
+	       d->last_handled, d->vcpu_run_loops, d->cnthp_ctl, (unsigned long)rdist, isenabler);
+}
+EXPORT_SYMBOL_GPL(arch_cpu_preserved_dump_diag);
 
 u64 __cpu_preserved_text arch_cpu_preserved_get_mpidr(int cpu)
 {
@@ -90,11 +193,13 @@ EXPORT_SYMBOL_GPL(arch_cpu_preserved_is_active);
 
 void __cpu_preserved_text arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa)
 {
+	arch_cpu_preserved_set_stage(-1, 13, pgd_pa);
 	if (pgd_pa && read_sysreg(ttbr1_el1) != pgd_pa) {
 		write_sysreg(pgd_pa, ttbr1_el1);
 		isb();
-		asm volatile("tlbi alle2is\n dsb ish\n isb\n" ::: "memory");
+		arm64_flush_host_tlb_local();
 	}
+	arch_cpu_preserved_set_stage(-1, 14, pgd_pa);
 }
 EXPORT_SYMBOL_GPL(arch_cpu_preserved_switch_pgd);
 EXPORT_SYMBOL_GPL(arch_cpu_preserved_mpidr_to_cpu);
@@ -194,13 +299,41 @@ int arch_cpu_preserved_map_range(phys_addr_t pa, unsigned long va,
 			kho_preserve_pages(page, 1);
 		}
 
-		dsb(ish);
-		asm volatile("tlbi alle2is\n dsb ish\n isb\n" ::: "memory");
+		arm64_flush_host_tlb_all();
 	}
 
 	return 0;
 }
 EXPORT_SYMBOL_GPL(arch_cpu_preserved_map_range);
+
+static void arm64_split_contpte_range(unsigned long start, unsigned long end)
+{
+	unsigned long addr;
+
+	if (start >= end)
+		return;
+
+	for (addr = ALIGN_DOWN(start, CONT_PTE_SIZE); addr < end; addr += CONT_PTE_SIZE) {
+		pte_t *ptep = arm64_get_kernel_pte(addr);
+		int i;
+
+		if (!ptep)
+			continue;
+
+		ptep = PTR_ALIGN_DOWN(ptep, sizeof(*ptep) * CONT_PTES);
+
+		for (i = 0; i < CONT_PTES; i++) {
+			pte_t pte = __ptep_get(&ptep[i]);
+
+			if (pte_valid_cont(pte))
+				__set_pte(&ptep[i], pte_mknoncont(pte));
+		}
+	}
+
+	flush_tlb_kernel_range(ALIGN_DOWN(start, CONT_PTE_SIZE),
+			       ALIGN(end, CONT_PTE_SIZE));
+	arm64_flush_host_tlb_all();
+}
 
 /**
  * arch_cpu_preserved_setup_buffer - Set up runtime buffer and page tables
@@ -233,30 +366,48 @@ int arch_cpu_preserved_setup_buffer(struct page *text_page,
 	if (arm64_caretaker_pgd)
 		return 0;
 
+	/* Split any contiguous 64KB mappings before replacing individual PTEs */
+	arm64_split_contpte_range(text_start, text_start + text_nr_pages * PAGE_SIZE);
+	arm64_split_contpte_range(data_start, data_start + data_nr_pages * PAGE_SIZE);
+
+	/* Clean old mappings before switching PTEs */
+	__arch_cpu_preserved_dcache_clean(text_start, text_start + text_nr_pages * PAGE_SIZE);
+	__arch_cpu_preserved_dcache_clean(data_start, data_start + data_nr_pages * PAGE_SIZE);
+
 	/* Remap init_mm kernel mappings to point to allocated buffer pages */
 	for (i = 0; i < text_nr_pages; i++) {
 		unsigned long va = text_start + i * PAGE_SIZE;
 		pte_t *ptep = arm64_get_kernel_pte(va);
 
-		if (ptep) {
-			phys_addr_t pa = page_to_phys(text_page) + i * PAGE_SIZE;
+		if (!ptep)
+			return -EINVAL;
 
-			set_pte_at(&init_mm, va, ptep, pfn_pte(PHYS_PFN(pa), pte_pgprot(*ptep)));
-		}
+		pgprot_t prot = __pgprot(pgprot_val(pte_pgprot(*ptep)) & ~PTE_CONT);
+		phys_addr_t pa = page_to_phys(text_page) + i * PAGE_SIZE;
+
+		pte_clear(&init_mm, va, ptep);
+		arm64_flush_host_tlb_page(va);
+		set_ptes(&init_mm, va, ptep, pfn_pte(PHYS_PFN(pa), prot), 1);
+		arm64_flush_host_tlb_page(va);
 	}
 
 	for (i = 0; i < data_nr_pages; i++) {
 		unsigned long va = data_start + i * PAGE_SIZE;
 		pte_t *ptep = arm64_get_kernel_pte(va);
 
-		if (ptep) {
-			phys_addr_t pa = page_to_phys(data_page) + i * PAGE_SIZE;
+		if (!ptep)
+			return -EINVAL;
 
-			set_pte_at(&init_mm, va, ptep, pfn_pte(PHYS_PFN(pa), pte_pgprot(*ptep)));
-		}
+		pgprot_t prot = __pgprot(pgprot_val(pte_pgprot(*ptep)) & ~PTE_CONT);
+		phys_addr_t pa = page_to_phys(data_page) + i * PAGE_SIZE;
+
+		pte_clear(&init_mm, va, ptep);
+		arm64_flush_host_tlb_page(va);
+		set_ptes(&init_mm, va, ptep, pfn_pte(PHYS_PFN(pa), prot), 1);
+		arm64_flush_host_tlb_page(va);
 	}
 
-	flush_tlb_all();
+	arm64_flush_host_tlb_all();
 	flush_icache_range(text_start, text_start + (text_nr_pages * PAGE_SIZE));
 
 	preserved_text_pa = page_to_phys(text_page);
@@ -307,7 +458,7 @@ int arch_caretaker_alloc_session_pgd(struct caretaker_session *sess)
 	};
 	unsigned long text_start = (unsigned long)__cpu_preserved_text_start;
 	unsigned long data_start = (unsigned long)__cpu_preserved_data_start;
-	int ret;
+	int ret, i;
 
 	if (!sess)
 		return -EINVAL;
@@ -335,8 +486,15 @@ int arch_caretaker_alloc_session_pgd(struct caretaker_session *sess)
 
 	sess->pgd_pa = virt_to_phys(sess->pgd);
 
-	dsb(ish);
-	asm volatile("tlbi alle2is\n dsb ish\n isb\n" ::: "memory");
+	for (i = 0; i < sess->nr_pgd_pages; i++) {
+		unsigned long addr = (unsigned long)phys_to_virt(sess->pgd_pages[i]);
+
+		__arch_cpu_preserved_dcache_clean(addr, addr + PAGE_SIZE);
+	}
+	__arch_cpu_preserved_dcache_clean((unsigned long)&sess->pgd_pa,
+					  (unsigned long)&sess->pgd_pa + sizeof(sess->pgd_pa));
+
+	arm64_flush_host_tlb_all();
 
 	return 0;
 }
@@ -378,7 +536,7 @@ int arch_caretaker_map_session_range(struct caretaker_session *sess,
 	unsigned long offset = va & ~PAGE_MASK;
 	phys_addr_t page_pa = (pa & PAGE_MASK);
 	size_t page_size = PAGE_ALIGN(offset + size);
-	int ret;
+	int ret, i;
 
 	if (!sess || !sess->pgd || !size)
 		return 0;
@@ -390,8 +548,15 @@ int arch_caretaker_map_session_range(struct caretaker_session *sess,
 	if (ret)
 		return ret;
 
-	dsb(ish);
-	asm volatile("tlbi alle2is\n dsb ish\n isb\n" ::: "memory");
+	for (i = 0; i < sess->nr_pgd_pages; i++) {
+		unsigned long addr = (unsigned long)phys_to_virt(sess->pgd_pages[i]);
+
+		__arch_cpu_preserved_dcache_clean(addr, addr + PAGE_SIZE);
+	}
+	__arch_cpu_preserved_dcache_clean((unsigned long)&sess->pgd_pa,
+					  (unsigned long)&sess->pgd_pa + sizeof(sess->pgd_pa));
+
+	arm64_flush_host_tlb_all();
 
 	return 0;
 }
@@ -422,16 +587,26 @@ void __cpu_preserved_text arch_cpu_preserved_park_init(int cpu)
 		pgd_pa = READ_ONCE(arm64_caretaker_pgd_pa);
 	}
 
+	write_sysreg((unsigned long)caretaker_hyp_vector, vbar_el1);
+	write_sysreg_s((unsigned long)caretaker_hyp_vector, SYS_VBAR_EL2);
+	isb();
+
+	arch_cpu_preserved_set_stage(cpu, 10, pgd_pa);
 	write_sysreg(0, ttbr0_el1);
 	if (pgd_pa)
 		write_sysreg(pgd_pa, ttbr1_el1);
 	isb();
-	asm volatile("tlbi alle2is\n dsb ish\n isb\n" ::: "memory");
-	write_sysreg((unsigned long)caretaker_hyp_vector, vbar_el1);
+	arm64_flush_host_tlb_local();
+
+	arch_cpu_preserved_set_stage(cpu, 11, 1);
 	write_sysreg_s(0xff, SYS_ICC_PMR_EL1);
-	write_sysreg_s(1, SYS_ICC_IGRPEN1_EL1);
-	write_sysreg_s(1, SYS_ICC_IGRPEN0_EL1);
 	isb();
+
+	arch_cpu_preserved_set_stage(cpu, 11, 2);
+	write_sysreg_s(1, SYS_ICC_IGRPEN1_EL1);
+	isb();
+
+	arch_cpu_preserved_set_stage(cpu, 12, 0);
 }
 
 void arch_cpu_preserved_early_init(void)
@@ -458,6 +633,8 @@ void __cpu_preserved_text arch_cpu_preserved_park_finish(int cpu)
 	enum arm_smccc_conduit conduit;
 	u32 el = (read_sysreg(CurrentEL) >> 2) & 3;
 
+	arch_cpu_preserved_set_stage(cpu, 36, 0);
+
 	arch_cpu_preserved_dcache_inval((unsigned long)&arm64_psci_conduit,
 					(unsigned long)&arm64_psci_conduit + sizeof(arm64_psci_conduit));
 	conduit = READ_ONCE(arm64_psci_conduit);
@@ -465,7 +642,6 @@ void __cpu_preserved_text arch_cpu_preserved_park_finish(int cpu)
 	local_daif_mask();
 	write_sysreg_s(0, SYS_ICC_PMR_EL1);
 	write_sysreg_s(0, SYS_ICC_IGRPEN1_EL1);
-	write_sysreg_s(0, SYS_ICC_IGRPEN0_EL1);
 	isb();
 
 	if (el == 2 || conduit == SMCCC_CONDUIT_NONE)
@@ -557,6 +733,7 @@ asm(
 "	.global __arch_cpu_preserved_dcache_clean\n"
 "	.type __arch_cpu_preserved_dcache_clean, %function\n"
 "__arch_cpu_preserved_dcache_clean:\n"
+"	dsb	sy\n"
 "	mrs	x3, ctr_el0\n"
 "	ubfx	x3, x3, #16, #4\n"
 "	mov	x2, #4\n"
@@ -573,6 +750,7 @@ asm(
 "	.global arch_cpu_preserved_dcache_inval\n"
 "	.type arch_cpu_preserved_dcache_inval, %function\n"
 "arch_cpu_preserved_dcache_inval:\n"
+"	dsb	sy\n"
 "	mrs	x3, ctr_el0\n"
 "	ubfx	x3, x3, #16, #4\n"
 "	mov	x2, #4\n"
