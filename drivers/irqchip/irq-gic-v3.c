@@ -52,6 +52,7 @@ static struct cpumask broken_rdists __read_mostly __maybe_unused;
 struct redist_region {
 	void __iomem		*redist_base;
 	phys_addr_t		phys_base;
+	size_t			size;
 	bool			single_redist;
 };
 
@@ -82,12 +83,19 @@ static DEFINE_STATIC_KEY_FALSE(gic_nvidia_t241_erratum);
 
 static DEFINE_STATIC_KEY_FALSE(gic_arm64_2941627_erratum);
 
+struct caretaker_cpu_rdist {
+	void __iomem		*rdist_base;
+	phys_addr_t		phys_base;
+	u64			mpidr;
+};
+
 struct caretaker_gic_state {
 	void __iomem		*dist_base;
 	phys_addr_t		dist_phys_base;
 	struct redist_region	redist_regions[4];
 	u64			redist_stride;
 	u32			nr_redist_regions;
+	struct caretaker_cpu_rdist cpu_rdists[NR_CPUS];
 };
 static struct caretaker_gic_state caretaker_gic __caretaker_data;
 
@@ -1051,6 +1059,16 @@ static int __gic_populate_rdist(struct redist_region *region, void __iomem *ptr)
 	typer = gic_read_typer(ptr + GICR_TYPER);
 	if ((typer >> 32) == aff) {
 		u64 offset = ptr - region->redist_base;
+		int cpu = smp_processor_id();
+
+		if (cpu >= 0 && cpu < NR_CPUS) {
+			caretaker_gic.cpu_rdists[cpu].rdist_base = ptr;
+			caretaker_gic.cpu_rdists[cpu].phys_base = region->phys_base + offset;
+			caretaker_gic.cpu_rdists[cpu].mpidr = mpidr;
+			arch_cpu_preserved_dcache_clean((unsigned long)&caretaker_gic.cpu_rdists[cpu],
+							(unsigned long)&caretaker_gic.cpu_rdists[cpu + 1]);
+		}
+
 		raw_spin_lock_init(&gic_data_rdist()->rd_lock);
 		gic_data_rdist_rd_base() = ptr;
 		gic_data_rdist()->phys_base = region->phys_base + offset;
@@ -1313,8 +1331,14 @@ static void gic_cpu_init(void)
 
 __caretaker_text static u64 gicv3_caretaker_cpu_to_affinity(int cpu)
 {
-	u64 mpidr = (cpu >= 0) ? arch_cpu_preserved_get_mpidr(cpu) :
-				 read_sysreg(mpidr_el1);
+	u64 mpidr;
+
+	if (cpu >= 0 && cpu < NR_CPUS && caretaker_gic.cpu_rdists[cpu].mpidr)
+		mpidr = caretaker_gic.cpu_rdists[cpu].mpidr;
+	else if (cpu >= 0)
+		mpidr = arch_cpu_preserved_get_mpidr(cpu);
+	else
+		mpidr = read_sysreg(mpidr_el1);
 
 	if (mpidr == INVALID_HWID && cpu >= 0 && cpu < NR_CPUS)
 		mpidr = cpu;
@@ -1327,48 +1351,24 @@ __caretaker_text static u64 gicv3_caretaker_cpu_to_affinity(int cpu)
 
 __caretaker_text void __iomem *gicv3_get_rdist_for_cpu(int cpu)
 {
-	u32 aff = gicv3_caretaker_cpu_to_affinity(cpu);
-	bool has_caretaker_regions = (caretaker_gic.redist_regions[0].redist_base != NULL);
-	u32 nr_regions = has_caretaker_regions ?
-		caretaker_gic.nr_redist_regions : gic_data.nr_redist_regions;
-	struct redist_region *regions = has_caretaker_regions ?
-		caretaker_gic.redist_regions : gic_data.redist_regions;
-	u64 stride = has_caretaker_regions ?
-		caretaker_gic.redist_stride : gic_data.redist_stride;
-	int i;
+	if (cpu < 0) {
+		u64 mpidr = read_sysreg(mpidr_el1) & MPIDR_HWID_BITMASK;
+		int i;
 
-	if (!regions)
-		return NULL;
-
-	for (i = 0; i < nr_regions; i++) {
-		void __iomem *ptr = regions[i].redist_base;
-		u64 typer;
-		u32 reg;
-
-		if (!ptr)
-			continue;
-
-		reg = readl_relaxed(ptr + GICR_PIDR2) & GIC_PIDR2_ARCH_MASK;
-		if (reg != GIC_PIDR2_ARCH_GICv3 && reg != GIC_PIDR2_ARCH_GICv4)
-			continue;
-
-		do {
-			typer = gic_read_typer(ptr + GICR_TYPER);
-			if ((typer >> 32) == aff)
-				return ptr;
-
-			if (regions[i].single_redist)
+		for (i = 0; i < NR_CPUS; i++) {
+			if (caretaker_gic.cpu_rdists[i].rdist_base &&
+			    (caretaker_gic.cpu_rdists[i].mpidr & MPIDR_HWID_BITMASK) == mpidr) {
+				cpu = i;
 				break;
-
-			if (stride) {
-				ptr += stride;
-			} else {
-				ptr += SZ_64K * 2;
-				if (typer & GICR_TYPER_VLPIS)
-					ptr += SZ_64K * 2;
 			}
-		} while (!(typer & GICR_TYPER_LAST));
+		}
+		if (cpu < 0)
+			cpu = arch_cpu_preserved_mpidr_to_cpu(mpidr);
 	}
+
+	if (cpu >= 0 && cpu < NR_CPUS && caretaker_gic.cpu_rdists[cpu].rdist_base)
+		return caretaker_gic.cpu_rdists[cpu].rdist_base;
+
 	return NULL;
 }
 EXPORT_SYMBOL_GPL(gicv3_get_rdist_for_cpu);
@@ -1382,7 +1382,9 @@ int gicv3_caretaker_get_redist_region(int idx, phys_addr_t *pa,
 		return -ENOENT;
 	*va = (unsigned long)caretaker_gic.redist_regions[idx].redist_base;
 	*pa = caretaker_gic.redist_regions[idx].phys_base;
-	*size = nr_cpu_ids * (caretaker_gic.redist_stride ? : SZ_128K);
+	*size = caretaker_gic.redist_regions[idx].size;
+	if (!*size)
+		*size = nr_cpu_ids * (caretaker_gic.redist_stride ? : SZ_128K);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(gicv3_caretaker_get_redist_region);
@@ -1426,18 +1428,14 @@ __caretaker_text void gicv3_caretaker_enable_sgi(void)
 		case 7:
 			write_sysreg_s(0, SYS_ICC_AP1R3_EL1);
 			write_sysreg_s(0, SYS_ICC_AP1R2_EL1);
-			write_sysreg_s(0, SYS_ICC_AP0R3_EL1);
-			write_sysreg_s(0, SYS_ICC_AP0R2_EL1);
 			fallthrough;
 		case 6:
 			write_sysreg_s(0, SYS_ICC_AP1R1_EL1);
-			write_sysreg_s(0, SYS_ICC_AP0R1_EL1);
 			fallthrough;
 		case 5:
 		case 4:
 		default:
 			write_sysreg_s(0, SYS_ICC_AP1R0_EL1);
-			write_sysreg_s(0, SYS_ICC_AP0R0_EL1);
 			break;
 		}
 		isb();
@@ -2218,12 +2216,14 @@ static int __init gic_init_bases(phys_addr_t dist_phys_base,
 	caretaker_gic.dist_base = dist_base;
 	caretaker_gic.dist_phys_base = dist_phys_base;
 	caretaker_gic.redist_stride = redist_stride;
-	caretaker_gic.nr_redist_regions = nr_redist_regions;
+	caretaker_gic.nr_redist_regions = min_t(u32, nr_redist_regions, ARRAY_SIZE(caretaker_gic.redist_regions));
 	if (rdist_regs != caretaker_gic.redist_regions) {
 		int reg_idx;
 		for (reg_idx = 0; reg_idx < min_t(u32, nr_redist_regions, ARRAY_SIZE(caretaker_gic.redist_regions)); reg_idx++)
 			caretaker_gic.redist_regions[reg_idx] = rdist_regs[reg_idx];
 	}
+	arch_cpu_preserved_dcache_clean((unsigned long)&caretaker_gic,
+					(unsigned long)&caretaker_gic + sizeof(caretaker_gic));
 
 	/*
 	 * Find out how many interrupts are supported.
@@ -2473,6 +2473,7 @@ static int __init gic_of_init(struct device_node *node, struct device_node *pare
 			goto out_unmap_rdist;
 		}
 		rdist_regs[i].phys_base = res.start;
+		rdist_regs[i].size = resource_size(&res);
 	}
 
 	if (of_property_read_u64(node, "redistributor-stride", &redist_stride))
@@ -2518,12 +2519,13 @@ static struct
 } acpi_data __initdata;
 
 static void __init
-gic_acpi_register_redist(phys_addr_t phys_base, void __iomem *redist_base)
+gic_acpi_register_redist(phys_addr_t phys_base, void __iomem *redist_base, size_t size)
 {
 	static int count = 0;
 
 	acpi_data.redist_regs[count].phys_base = phys_base;
 	acpi_data.redist_regs[count].redist_base = redist_base;
+	acpi_data.redist_regs[count].size = size;
 	acpi_data.redist_regs[count].single_redist = acpi_data.single_redist;
 	count++;
 }
@@ -2548,7 +2550,7 @@ gic_acpi_parse_madt_redist(union acpi_subtable_headers *header,
 
 	gic_request_region(redist->base_address, redist->length, "GICR");
 
-	gic_acpi_register_redist(redist->base_address, redist_base);
+	gic_acpi_register_redist(redist->base_address, redist_base, redist->length);
 	return 0;
 }
 
@@ -2590,7 +2592,7 @@ gic_acpi_parse_madt_gicc(union acpi_subtable_headers *header,
 	    (gicc->flags & ACPI_MADT_GICC_NON_COHERENT))
 		gic_data.rdists.flags |= RDIST_FLAGS_FORCE_NON_SHAREABLE;
 
-	gic_acpi_register_redist(gicc->gicr_base_address, redist_base);
+	gic_acpi_register_redist(gicc->gicr_base_address, redist_base, size);
 	return 0;
 }
 
