@@ -500,6 +500,10 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 			r = kvm_supports_cacheable_pfnmap();
 		break;
 
+	case KVM_CAP_CARETAKER:
+		r = IS_ENABLED(CONFIG_KVM_CARETAKER);
+		break;
+
 	default:
 		r = 0;
 	}
