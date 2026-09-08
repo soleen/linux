@@ -11,8 +11,9 @@
 #include <linux/irqchip/arm-gic-v3.h>
 #include <asm/barrier.h>
 #include <asm/cacheflush.h>
-struct caretaker_session;
-struct caretaker_sched_config;
+#include <asm/caretaker.h>
+#include <linux/caretaker.h>
+#include <linux/kvm_host.h>
 #include <asm/cpu_ops.h>
 #include <asm/daifflags.h>
 #include <asm/kernel-pgtable.h>
@@ -29,6 +30,7 @@ void __cpu_preserved_text arch_cpu_preserved_kick(int cpu)
 {
 	dsb(ishst);
 	sev();
+	gicv3_caretaker_kick_cpu(cpu);
 	isb();
 }
 
@@ -54,6 +56,8 @@ static unsigned long preserved_text_sz;
 static phys_addr_t preserved_data_pa;
 static unsigned long preserved_data_sz;
 static u64 arm64_cpu_mpidr[NR_CPUS] __cpu_preserved_data;
+bool arm64_caretaker_has_ptrauth __cpu_preserved_data;
+EXPORT_SYMBOL_GPL(arm64_caretaker_has_ptrauth);
 
 u64 __cpu_preserved_text arch_cpu_preserved_get_mpidr(int cpu)
 {
@@ -457,13 +461,19 @@ void __cpu_preserved_text arch_cpu_preserved_park_init(int cpu)
 		pgd_pa = READ_ONCE(arm64_caretaker_pgd_pa);
 	}
 
+	write_sysreg((unsigned long)caretaker_hyp_vector, vbar_el1);
+	write_sysreg_s((unsigned long)caretaker_hyp_vector, SYS_VBAR_EL2);
+	isb();
+
 	write_sysreg(0, ttbr0_el1);
 	if (pgd_pa)
 		write_sysreg(pgd_pa, ttbr1_el1);
 	isb();
 	arm64_flush_host_tlb_local();
-	write_sysreg((unsigned long)__kvm_hyp_vector, vbar_el1);
+
 	write_sysreg_s(0xff, SYS_ICC_PMR_EL1);
+	isb();
+
 	write_sysreg_s(1, SYS_ICC_IGRPEN1_EL1);
 	isb();
 }
@@ -484,6 +494,10 @@ void arch_cpu_preserved_early_init(void)
 		arch_cpu_preserved_dcache_clean((unsigned long)&arm64_psci_conduit,
 						(unsigned long)&arm64_psci_conduit + sizeof(arm64_psci_conduit));
 	}
+
+	arm64_caretaker_has_ptrauth = IS_ENABLED(CONFIG_ARM64_PTR_AUTH) && system_has_full_ptr_auth();
+	arch_cpu_preserved_dcache_clean((unsigned long)&arm64_caretaker_has_ptrauth,
+					(unsigned long)&arm64_caretaker_has_ptrauth + sizeof(arm64_caretaker_has_ptrauth));
 }
 EXPORT_SYMBOL_GPL(arch_cpu_preserved_early_init);
 
@@ -590,4 +604,26 @@ void arch_cpu_preserved_wait_dead(int cpu)
 	if (ops && ops->cpu_kill)
 		ops->cpu_kill(cpu);
 }
+
+u64 __cpu_preserved_text arch_caretaker_ticks_to_ns(u64 ticks)
+{
+	u32 cntfrq = arch_timer_get_cntfrq();
+
+	if (cntfrq > 0)
+		return mul_u64_u32_div(ticks, 1000000000U, cntfrq);
+	return ticks;
+}
+EXPORT_SYMBOL_GPL(arch_caretaker_ticks_to_ns);
+
+void arch_caretaker_update_quantum_ticks(struct caretaker_sched_config *cfg)
+{
+	u32 ms = cfg->quantum_ms;
+	u32 cntfrq = arch_timer_get_cntfrq();
+
+	if (cntfrq > 0)
+		cfg->quantum_ticks = ((u64)ms * cntfrq) / 1000ULL;
+	else
+		cfg->quantum_ticks = (u64)ms * 25000000ULL / 1000ULL;
+}
+EXPORT_SYMBOL_GPL(arch_caretaker_update_quantum_ticks);
 

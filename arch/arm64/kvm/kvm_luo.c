@@ -10,6 +10,7 @@
 #include <linux/kho/abi/kvm.h>
 #include <linux/sched.h>
 #include <asm/kvm_emulate.h>
+#include "caretaker.h"
 #include "sys_regs.h"
 
 int kvm_arch_vm_luo_preserve(struct kvm *kvm, struct kvm_luo_ser *ser)
@@ -66,6 +67,11 @@ int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *s
 	struct kvm_vcpu_arch_luo_state *state;
 	int num_sysregs;
 	size_t size;
+
+#ifdef CONFIG_KVM_CARETAKER
+	if (ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER)
+		return arm64_kvm_caretaker_preserve(vcpu, ser);
+#endif
 
 	u64 *indices;
 	int i;
@@ -126,6 +132,11 @@ int kvm_arch_vcpu_luo_retrieve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *s
 	struct kvm_vcpu_arch_luo_state *state;
 	int i;
 
+#ifdef CONFIG_KVM_CARETAKER
+	if (ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER)
+		return 0;
+#endif
+
 	if (!ser || !ser->arch_state.phys || !vcpu)
 		return 0;
 
@@ -163,6 +174,15 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_retrieve);
 
 void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_luo_ser *ser)
 {
+#ifdef CONFIG_KVM_CARETAKER
+	if (ser && ser->cb.phys) {
+		struct caretaker_cb *cb = phys_to_virt(ser->cb.phys);
+
+		if (cb && cb->runtime_pa)
+			kho_unpreserve_free(phys_to_virt(cb->runtime_pa));
+		ser->cb.phys = 0;
+	}
+#endif
 	if (ser && ser->arch_state.phys) {
 		kho_unpreserve_free(phys_to_virt(ser->arch_state.phys));
 		ser->arch_state.phys = 0;
@@ -172,6 +192,15 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_unpreserve);
 
 void kvm_arch_vcpu_luo_finish(struct kvm_vcpu_luo_ser *ser)
 {
+#ifdef CONFIG_KVM_CARETAKER
+	if (ser && ser->cb.phys) {
+		struct caretaker_cb *cb = phys_to_virt(ser->cb.phys);
+
+		if (cb && cb->runtime_pa)
+			kho_restore_free(phys_to_virt(cb->runtime_pa));
+		ser->cb.phys = 0;
+	}
+#endif
 	if (ser && ser->arch_state.phys) {
 		kho_restore_free(phys_to_virt(ser->arch_state.phys));
 		ser->arch_state.phys = 0;
