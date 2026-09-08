@@ -15,5 +15,6 @@ static inline u64 __cpu_preserved_text arch_oncore_read_counter(void)
 {
 	return read_sysreg(cntpct_el0);
 }
+#define arch_oncore_read_counter arch_oncore_read_counter
 
 #endif /* _ASM_ARM64_ONCORE_H */

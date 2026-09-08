@@ -15,6 +15,7 @@
 #include <kvm/arm_arch_timer.h>
 #include <kvm/arm_vgic.h>
 
+#include "caretaker.h"
 #include "sys_regs.h"
 #include "vgic/vgic.h"
 
@@ -76,6 +77,9 @@ int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *s
 	size_t size;
 	int i;
 
+	if (ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER)
+		return arm64_kvm_caretaker_preserve(vcpu, ser);
+
 	num_sysregs = kvm_arm_get_sys_reg_indices(vcpu, NULL);
 	indices = kmalloc_array(num_sysregs, sizeof(u64), GFP_KERNEL);
 	if (!indices)
@@ -128,6 +132,9 @@ int kvm_arch_vcpu_luo_retrieve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *s
 {
 	struct kvm_vcpu_arch_luo_state *state;
 	int i;
+
+	if (ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER)
+		return 0;
 
 	if (!ser->arch_state.phys)
 		return 0;
@@ -189,6 +196,7 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_retrieve);
 
 void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_luo_ser *ser)
 {
+	arm64_kvm_caretaker_unpreserve(ser);
 	if (ser->arch_state.phys) {
 		kho_unpreserve_free(phys_to_virt(ser->arch_state.phys));
 		ser->arch_state.phys = 0;
@@ -198,6 +206,7 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_unpreserve);
 
 void kvm_arch_vcpu_luo_finish(struct kvm_vcpu_luo_ser *ser)
 {
+	arm64_kvm_caretaker_finish(ser);
 	if (ser->arch_state.phys) {
 		kho_restore_free(phys_to_virt(ser->arch_state.phys));
 		ser->arch_state.phys = 0;
