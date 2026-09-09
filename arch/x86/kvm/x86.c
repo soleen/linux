@@ -6648,6 +6648,25 @@ int kvm_fast_pio(struct kvm_vcpu *vcpu, int size, unsigned short port, int in)
 {
 	int ret;
 
+	if (unlikely(!caretaker_kvm_is_attached(&vcpu->cb))) {
+		if (in) {
+			unsigned long val = 0;
+
+			if (port == 0x3fd)
+				val = 0x60; /* UART_LSR_TEMT | UART_LSR_THRE */
+			else if (port == 0x3fe)
+				val = 0xb0; /* UART_MSR_DEFAULT */
+			else if (port == 0x3fa)
+				val = 0x01; /* UART_IIR_NO_INT */
+
+			if (size < 4)
+				val = (kvm_rax_read_raw(vcpu) & ~((1UL << (size * 8)) - 1)) |
+				      (val & ((1UL << (size * 8)) - 1));
+			kvm_rax_write_raw(vcpu, val);
+		}
+		return kvm_skip_emulated_instruction(vcpu);
+	}
+
 	if (in)
 		ret = kvm_fast_pio_in(vcpu, size, port);
 	else
@@ -8059,6 +8078,11 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 
 	bool req_immediate_exit = false;
 
+	if (kvm_vcpu_should_exit_immediate(vcpu)) {
+		r = -EINTR;
+		goto out;
+	}
+
 	if (kvm_request_pending(vcpu)) {
 		if (kvm_check_request(KVM_REQ_VM_DEAD, vcpu)) {
 			r = -EIO;
@@ -8300,6 +8324,16 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 		preempt_enable();
 		kvm_vcpu_srcu_read_lock(vcpu);
 		r = 1;
+		goto cancel_injection;
+	}
+
+	if (kvm_vcpu_should_exit_immediate(vcpu)) {
+		vcpu->mode = OUTSIDE_GUEST_MODE;
+		smp_wmb();
+		local_irq_enable();
+		preempt_enable();
+		kvm_vcpu_srcu_read_lock(vcpu);
+		r = -EINTR;
 		goto cancel_injection;
 	}
 
@@ -8577,10 +8611,14 @@ static inline int vcpu_block(struct kvm_vcpu *vcpu)
 			kvm_lapic_switch_to_sw_timer(vcpu);
 
 		kvm_vcpu_srcu_read_unlock(vcpu);
-		if (vcpu->arch.mp_state == KVM_MP_STATE_HALTED)
+		if (unlikely(!caretaker_kvm_is_attached(&vcpu->cb))) {
+			while (!kvm_arch_vcpu_runnable(vcpu) && !caretaker_kvm_is_attached(&vcpu->cb))
+				schedule_timeout_interruptible(HZ / 10);
+		} else if (vcpu->arch.mp_state == KVM_MP_STATE_HALTED) {
 			kvm_vcpu_halt(vcpu);
-		else
+		} else {
 			kvm_vcpu_block(vcpu);
+		}
 		kvm_vcpu_srcu_read_lock(vcpu);
 
 		if (hv_timer)
@@ -8635,6 +8673,10 @@ static int vcpu_run(struct kvm_vcpu *vcpu)
 	vcpu->run->exit_reason = KVM_EXIT_UNKNOWN;
 
 	for (;;) {
+		if (kvm_vcpu_should_exit_immediate(vcpu)) {
+			r = -EINTR;
+			break;
+		}
 		/*
 		 * If another guest vCPU requests a PV TLB flush in the middle
 		 * of instruction emulation, the rest of the emulation could
@@ -8648,8 +8690,18 @@ static int vcpu_run(struct kvm_vcpu *vcpu)
 			r = vcpu_block(vcpu);
 		}
 
-		if (r <= 0)
+		if (r <= 0) {
+			if (!caretaker_kvm_is_attached(&vcpu->cb)) {
+				while (!caretaker_kvm_is_attached(&vcpu->cb)) {
+					kvm_vcpu_srcu_read_unlock(vcpu);
+					schedule_timeout_interruptible(HZ / 10);
+					kvm_vcpu_srcu_read_lock(vcpu);
+				}
+				r = 1;
+				continue;
+			}
 			break;
+		}
 
 		kvm_clear_request(KVM_REQ_UNBLOCK, vcpu);
 		if (kvm_xen_has_pending_events(vcpu))
@@ -8666,12 +8718,22 @@ static int vcpu_run(struct kvm_vcpu *vcpu)
 			break;
 		}
 
-		if (__xfer_to_guest_mode_work_pending()) {
-			kvm_vcpu_srcu_read_unlock(vcpu);
-			r = kvm_xfer_to_guest_mode_handle_work(vcpu);
-			kvm_vcpu_srcu_read_lock(vcpu);
-			if (r)
-				return r;
+		if (unlikely(!caretaker_kvm_is_attached(&vcpu->cb))) {
+			/* In detached Caretaker mode, stay on-core and ignore host signals */
+			if (vcpu->run)
+				WRITE_ONCE(vcpu->run->immediate_exit__unsafe, 0);
+		} else {
+			if (vcpu->run && READ_ONCE(vcpu->run->immediate_exit__unsafe)) {
+				r = -EINTR;
+				break;
+			}
+			if (__xfer_to_guest_mode_work_pending()) {
+				kvm_vcpu_srcu_read_unlock(vcpu);
+				r = kvm_xfer_to_guest_mode_handle_work(vcpu);
+				kvm_vcpu_srcu_read_lock(vcpu);
+				if (r)
+					return r;
+			}
 		}
 	}
 
