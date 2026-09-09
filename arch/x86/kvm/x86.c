@@ -2959,8 +2959,8 @@ void kvm_handle_exception_payload_quirk(struct kvm_vcpu *vcpu)
 		kvm_deliver_exception_payload(vcpu, ex);
 }
 
-static void kvm_vcpu_ioctl_x86_get_vcpu_events(struct kvm_vcpu *vcpu,
-					       struct kvm_vcpu_events *events)
+void kvm_vcpu_ioctl_x86_get_vcpu_events(struct kvm_vcpu *vcpu,
+					struct kvm_vcpu_events *events)
 {
 	struct kvm_queued_exception *ex = kvm_get_exception_to_save(vcpu);
 
@@ -3028,8 +3028,8 @@ static void kvm_vcpu_ioctl_x86_get_vcpu_events(struct kvm_vcpu *vcpu,
 	}
 }
 
-static int kvm_vcpu_ioctl_x86_set_vcpu_events(struct kvm_vcpu *vcpu,
-					      struct kvm_vcpu_events *events)
+int kvm_vcpu_ioctl_x86_set_vcpu_events(struct kvm_vcpu *vcpu,
+				       struct kvm_vcpu_events *events)
 {
 	if (events->flags & ~(KVM_VCPUEVENT_VALID_NMI_PENDING
 			      | KVM_VCPUEVENT_VALID_SIPI_VECTOR
@@ -8997,12 +8997,11 @@ out:
 	return r;
 }
 
-int kvm_arch_vcpu_ioctl_get_mpstate(struct kvm_vcpu *vcpu,
-				    struct kvm_mp_state *mp_state)
+int __get_mpstate(struct kvm_vcpu *vcpu,
+		   struct kvm_mp_state *mp_state)
 {
 	int r;
 
-	vcpu_load(vcpu);
 	kvm_vcpu_srcu_read_lock(vcpu);
 
 	r = kvm_apic_accept_events(vcpu);
@@ -9019,17 +9018,23 @@ int kvm_arch_vcpu_ioctl_get_mpstate(struct kvm_vcpu *vcpu,
 
 out:
 	kvm_vcpu_srcu_read_unlock(vcpu);
+	return r;
+}
+
+int kvm_arch_vcpu_ioctl_get_mpstate(struct kvm_vcpu *vcpu,
+				    struct kvm_mp_state *mp_state)
+{
+	int r;
+
+	vcpu_load(vcpu);
+	r = __get_mpstate(vcpu, mp_state);
 	vcpu_put(vcpu);
 	return r;
 }
 
-int kvm_arch_vcpu_ioctl_set_mpstate(struct kvm_vcpu *vcpu,
-				    struct kvm_mp_state *mp_state)
+int __set_mpstate(struct kvm_vcpu *vcpu,
+		   struct kvm_mp_state *mp_state)
 {
-	int ret = -EINVAL;
-
-	vcpu_load(vcpu);
-
 	switch (mp_state->mp_state) {
 	case KVM_MP_STATE_UNINITIALIZED:
 	case KVM_MP_STATE_HALTED:
@@ -9037,14 +9042,14 @@ int kvm_arch_vcpu_ioctl_set_mpstate(struct kvm_vcpu *vcpu,
 	case KVM_MP_STATE_INIT_RECEIVED:
 	case KVM_MP_STATE_SIPI_RECEIVED:
 		if (!lapic_in_kernel(vcpu))
-			goto out;
+			return -EINVAL;
 		break;
 
 	case KVM_MP_STATE_RUNNABLE:
 		break;
 
 	default:
-		goto out;
+		return -EINVAL;
 	}
 
 	/*
@@ -9060,8 +9065,16 @@ int kvm_arch_vcpu_ioctl_set_mpstate(struct kvm_vcpu *vcpu,
 	kvm_set_mp_state(vcpu, mp_state->mp_state);
 	kvm_make_request(KVM_REQ_EVENT, vcpu);
 
-	ret = 0;
-out:
+	return 0;
+}
+
+int kvm_arch_vcpu_ioctl_set_mpstate(struct kvm_vcpu *vcpu,
+				    struct kvm_mp_state *mp_state)
+{
+	int ret;
+
+	vcpu_load(vcpu);
+	ret = __set_mpstate(vcpu, mp_state);
 	vcpu_put(vcpu);
 	return ret;
 }
@@ -9222,14 +9235,12 @@ int kvm_arch_vcpu_ioctl_translate(struct kvm_vcpu *vcpu,
 	return 0;
 }
 
-int kvm_arch_vcpu_ioctl_get_fpu(struct kvm_vcpu *vcpu, struct kvm_fpu *fpu)
+int __get_fpu(struct kvm_vcpu *vcpu, struct kvm_fpu *fpu)
 {
 	struct fxregs_state *fxsave;
 
 	if (fpstate_is_confidential(&vcpu->arch.guest_fpu))
 		return vcpu->kvm->arch.has_protected_state ? -EINVAL : 0;
-
-	vcpu_load(vcpu);
 
 	fxsave = &vcpu->arch.guest_fpu.fpstate->regs.fxsave;
 	memcpy(fpu->fpr, fxsave->st_space, 128);
@@ -9241,18 +9252,25 @@ int kvm_arch_vcpu_ioctl_get_fpu(struct kvm_vcpu *vcpu, struct kvm_fpu *fpu)
 	fpu->last_dp = fxsave->rdp;
 	memcpy(fpu->xmm, fxsave->xmm_space, sizeof(fxsave->xmm_space));
 
-	vcpu_put(vcpu);
 	return 0;
 }
 
-int kvm_arch_vcpu_ioctl_set_fpu(struct kvm_vcpu *vcpu, struct kvm_fpu *fpu)
+int kvm_arch_vcpu_ioctl_get_fpu(struct kvm_vcpu *vcpu, struct kvm_fpu *fpu)
+{
+	int r;
+
+	vcpu_load(vcpu);
+	r = __get_fpu(vcpu, fpu);
+	vcpu_put(vcpu);
+	return r;
+}
+
+int __set_fpu(struct kvm_vcpu *vcpu, struct kvm_fpu *fpu)
 {
 	struct fxregs_state *fxsave;
 
 	if (fpstate_is_confidential(&vcpu->arch.guest_fpu))
 		return vcpu->kvm->arch.has_protected_state ? -EINVAL : 0;
-
-	vcpu_load(vcpu);
 
 	fxsave = &vcpu->arch.guest_fpu.fpstate->regs.fxsave;
 
@@ -9265,8 +9283,17 @@ int kvm_arch_vcpu_ioctl_set_fpu(struct kvm_vcpu *vcpu, struct kvm_fpu *fpu)
 	fxsave->rdp = fpu->last_dp;
 	memcpy(fxsave->xmm_space, fpu->xmm, sizeof(fxsave->xmm_space));
 
-	vcpu_put(vcpu);
 	return 0;
+}
+
+int kvm_arch_vcpu_ioctl_set_fpu(struct kvm_vcpu *vcpu, struct kvm_fpu *fpu)
+{
+	int ret;
+
+	vcpu_load(vcpu);
+	ret = __set_fpu(vcpu, fpu);
+	vcpu_put(vcpu);
+	return ret;
 }
 
 static void store_regs(struct kvm_vcpu *vcpu)
@@ -10042,6 +10069,7 @@ void kvm_arch_destroy_vm(struct kvm *kvm)
 	kvm_xen_destroy_vm(kvm);
 	kvm_hv_destroy_vm(kvm);
 	kvm_x86_call(vm_destroy)(kvm);
+	kvm_arch_vm_luo_destroy(kvm);
 }
 
 static void memslot_rmap_free(struct kvm_memory_slot *slot)
