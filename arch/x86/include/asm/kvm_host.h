@@ -1158,6 +1158,8 @@ enum kvm_mmu_type {
 	KVM_NR_MMU_TYPES,
 };
 
+struct kvm_vm_arch_luo_state;
+
 struct kvm_arch {
 	unsigned long n_requested_mmu_pages;
 	unsigned long n_max_mmu_pages;
@@ -1413,6 +1415,10 @@ struct kvm_arch {
 	 * current VM.
 	 */
 	int cpu_dirty_log_size;
+
+#ifdef CONFIG_HAVE_KVM_ARCH_VCPU_PRESERVE
+	struct kvm_vm_arch_luo_state *luo_cpuid;
+#endif
 };
 
 struct kvm_vm_stat {
@@ -1905,5 +1911,10 @@ static inline bool kvm_arch_has_irq_bypass(void)
 {
 	return enable_device_posted_irqs;
 }
+
+struct kvm_cpuid_entry2;
+int kvm_set_cpuid(struct kvm_vcpu *vcpu, struct kvm_cpuid_entry2 *e2,
+		  int nent);
+void kvm_arch_vm_luo_destroy(struct kvm *kvm);
 
 #endif /* _ASM_X86_KVM_HOST_H */
