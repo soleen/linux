@@ -9,6 +9,7 @@
 #include <asm/perf_event.h>
 #include <asm/processor.h>
 #include <asm/virt.h>
+#include <asm/cpu_preserve.h>
 #include <asm/vmx.h>
 
 struct x86_virt_ops {
@@ -96,7 +97,7 @@ static int x86_vmx_enable_virtualization_cpu(void)
 	int r;
 
 	if (cr4_read_shadow() & X86_CR4_VMXE)
-		return -EBUSY;
+		cr4_clear_bits_irqsoff(X86_CR4_VMXE);
 
 	intel_pt_handle_vmx(1);
 
@@ -327,6 +328,14 @@ void x86_virt_put_ref(int feat)
 	BUG_ON(virt_ops.disable_virtualization_cpu() && !virt_rebooting);
 }
 EXPORT_SYMBOL_FOR_KVM(x86_virt_put_ref);
+
+void x86_virt_reset_cpu(int cpu)
+{
+	per_cpu(virtualization_nr_users, cpu) = 0;
+	if (cpu == raw_smp_processor_id() && (cr4_read_shadow() & X86_CR4_VMXE))
+		cr4_clear_bits_irqsoff(X86_CR4_VMXE);
+}
+EXPORT_SYMBOL_FOR_KVM(x86_virt_reset_cpu);
 
 /*
  * Disable virtualization, i.e. VMX or SVM, to ensure INIT is recognized during
