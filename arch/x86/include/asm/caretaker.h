@@ -1,0 +1,14 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef __ASM_X86_CARETAKER_H
+#define __ASM_X86_CARETAKER_H
+
+#include <linux/types.h>
+#include <asm/msr.h>
+#include <asm/tsc.h>
+
+static inline u64 __cpu_preserved_text arch_caretaker_read_counter(void)
+{
+	return rdtsc();
+}
+
+#endif /* __ASM_X86_CARETAKER_H */
