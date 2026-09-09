@@ -170,6 +170,14 @@ int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *s
 
 	vcpu_put(vcpu);
 
+	if (ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER) {
+		kvm_arch_vcpu_caretaker_init(vcpu, &ser->cb.phys);
+		if (!ser->cb.phys) {
+			kho_unpreserve_free(state);
+			return -ENOMEM;
+		}
+	}
+
 	KHOSER_STORE_PTR(ser->arch_state, state);
 	return 0;
 }
@@ -266,12 +274,26 @@ int kvm_arch_vcpu_luo_retrieve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *s
 	if (state->nested.size >= sizeof(state->nested) && kvm_nested_ops.enabled)
 		kvm_leave_nested(vcpu);
 
-	ret = kvm_vcpu_ioctl_x86_set_vcpu_events(vcpu, &state->events);
-	if (ret)
-		goto out;
+	if (!(ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER)) {
+		ret = kvm_vcpu_ioctl_x86_set_vcpu_events(vcpu, &state->events);
+		if (ret)
+			goto out;
+	}
 
 	if (lapic_in_kernel(vcpu)) {
-		ret = kvm_apic_set_state(vcpu, &state->lapic);
+		if (ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER) {
+			struct kvm_lapic_state lapic;
+			int k;
+
+			memcpy(&lapic, &state->lapic, sizeof(lapic));
+			for (k = 0; k < 8; k++) {
+				*(u32 *)(lapic.regs + APIC_ISR + 0x10 * k) = 0;
+				*(u32 *)(lapic.regs + APIC_IRR + 0x10 * k) = 0;
+			}
+			ret = kvm_apic_set_state(vcpu, &lapic);
+		} else {
+			ret = kvm_apic_set_state(vcpu, &state->lapic);
+		}
 		if (ret)
 			goto out;
 	}
@@ -281,10 +303,23 @@ int kvm_arch_vcpu_luo_retrieve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *s
 		fpu_loaded = true;
 	}
 
-	for (i = 0; i < state->num_msrs; i++)
+	for (i = 0; i < state->num_msrs; i++) {
+		if ((ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER) &&
+		    (state->msrs[i].index == MSR_IA32_TSC ||
+		     state->msrs[i].index == MSR_IA32_TSC_ADJUST ||
+		     state->msrs[i].index == MSR_IA32_TSC_DEADLINE ||
+		     state->msrs[i].index == MSR_KERNEL_GS_BASE ||
+		     state->msrs[i].index == MSR_LSTAR ||
+		     state->msrs[i].index == MSR_STAR ||
+		     state->msrs[i].index == MSR_CSTAR ||
+		     state->msrs[i].index == MSR_SYSCALL_MASK)) {
+			continue;
+		}
 		kvm_msr_write(vcpu, state->msrs[i].index, state->msrs[i].data);
+	}
 
-	__set_regs(vcpu, &state->regs);
+	if (!(ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER))
+		__set_regs(vcpu, &state->regs);
 
 	ret = 0;
 out:
@@ -297,6 +332,7 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_retrieve);
 
 void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_luo_ser *ser)
 {
+	kvm_arch_vcpu_caretaker_unpreserve(ser);
 	if (ser && ser->arch_state.phys) {
 		struct kvm_vcpu_arch_luo_state *state =
 			phys_to_virt(__sme_clr(ser->arch_state.phys));
@@ -309,6 +345,7 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_unpreserve);
 
 void kvm_arch_vcpu_luo_finish(struct kvm_vcpu_luo_ser *ser)
 {
+	kvm_arch_vcpu_caretaker_finish(ser);
 	if (ser && ser->arch_state.phys) {
 		struct kvm_vcpu_arch_luo_state *state =
 			phys_to_virt(__sme_clr(ser->arch_state.phys));

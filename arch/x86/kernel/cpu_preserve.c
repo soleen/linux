@@ -53,7 +53,11 @@ void __cpu_preserved_text arch_cpu_preserved_park_wait(void)
 
 static gate_desc x86_preserved_idt[256] __cpu_preserved_data __aligned(PAGE_SIZE);
 static bool x86_preserved_idt_initialized __cpu_preserved_data;
+static struct desc_ptr x86_preserved_idt_desc __cpu_preserved_data;
 
+static struct desc_struct x86_preserved_gdt[GDT_ENTRIES] __cpu_preserved_data __aligned(PAGE_SIZE);
+static bool x86_preserved_gdt_initialized __cpu_preserved_data;
+static struct desc_ptr x86_preserved_gdt_desc __cpu_preserved_data;
 static bool x86_preserved_has_svm __cpu_preserved_data;
 
 static void init_preserved_idt(void)
@@ -75,26 +79,55 @@ static void init_preserved_idt(void)
 		pack_gate(&x86_preserved_idt[v], GATE_INTERRUPT, handler, 0,
 			  0, __KERNEL_CS);
 	}
+	x86_preserved_idt_desc.size = sizeof(x86_preserved_idt) - 1;
+	x86_preserved_idt_desc.address = (unsigned long)&x86_preserved_idt[0];
 	x86_preserved_idt_initialized = true;
 	arch_cpu_preserved_dcache_clean((unsigned long)&x86_preserved_idt,
 					(unsigned long)&x86_preserved_idt +
 					sizeof(x86_preserved_idt));
+	arch_cpu_preserved_dcache_clean((unsigned long)&x86_preserved_idt_desc,
+					(unsigned long)&x86_preserved_idt_desc +
+					sizeof(x86_preserved_idt_desc));
 }
 
+static void init_preserved_gdt(void)
+{
+	struct desc_struct *gdt;
+	int i;
+
+	if (x86_preserved_gdt_initialized)
+		return;
+
+	gdt = get_current_gdt_rw();
+	for (i = 0; i < GDT_ENTRIES; i++)
+		x86_preserved_gdt[i] = gdt[i];
+	x86_preserved_gdt_desc.size = GDT_SIZE - 1;
+	x86_preserved_gdt_desc.address = (unsigned long)&x86_preserved_gdt[0];
+	x86_preserved_gdt_initialized = true;
+	arch_cpu_preserved_dcache_clean((unsigned long)&x86_preserved_gdt,
+					(unsigned long)&x86_preserved_gdt +
+					sizeof(x86_preserved_gdt));
+	arch_cpu_preserved_dcache_clean((unsigned long)&x86_preserved_gdt_desc,
+					(unsigned long)&x86_preserved_gdt_desc +
+					sizeof(x86_preserved_gdt_desc));
+}
+
+void __cpu_preserved_text arch_cpu_preserved_load_desc(void)
+{
+	native_load_gdt(&x86_preserved_gdt_desc);
+	native_load_idt(&x86_preserved_idt_desc);
+}
+EXPORT_SYMBOL_GPL(arch_cpu_preserved_load_desc);
 
 /*
  * Disables local interrupts on the physical core and loads preserved IDT and GDT.
  */
 void __cpu_preserved_text arch_cpu_preserved_park_init(int cpu __maybe_unused)
 {
-	struct desc_ptr idt_desc = {
-		.size = sizeof(x86_preserved_idt) - 1,
-		.address = (unsigned long)&x86_preserved_idt[0],
-	};
 	u32 spiv;
 
 	local_irq_disable();
-	native_load_idt(&idt_desc);
+	arch_cpu_preserved_load_desc();
 
 	spiv = (u32)native_rdmsrq(APIC_BASE_MSR + (APIC_SPIV >> 4));
 	if (!(spiv & APIC_SPIV_APIC_ENABLED)) {
@@ -114,6 +147,9 @@ void arch_cpu_preserved_early_init(void)
 	arch_cpu_preserved_dcache_clean((unsigned long)&x86_preserved_apicid,
 					(unsigned long)&x86_preserved_apicid +
 					sizeof(x86_preserved_apicid));
+
+	init_preserved_idt();
+	init_preserved_gdt();
 }
 EXPORT_SYMBOL_GPL(arch_cpu_preserved_early_init);
 
@@ -154,11 +190,7 @@ static void __cpu_preserved_text arch_cpu_preserved_virt_teardown(void)
  */
 void __cpu_preserved_text arch_cpu_preserved_park_finish(int cpu __maybe_unused)
 {
-	struct desc_ptr idt_desc = {
-		.size = sizeof(x86_preserved_idt) - 1,
-		.address = (unsigned long)&x86_preserved_idt[0],
-	};
-	native_load_idt(&idt_desc);
+	arch_cpu_preserved_load_desc();
 	arch_cpu_preserved_virt_teardown();
 }
 
@@ -315,9 +347,9 @@ int arch_cpu_preserved_map_range(phys_addr_t pa, unsigned long va,
 	struct trans_pgd_info info = {
 		.trans_alloc_page = x86_caretaker_alloc_page,
 	};
+	unsigned long offset = va & ~PAGE_MASK;
 	size_t page_size = PAGE_ALIGN(offset + size);
 	unsigned long page_va = va & PAGE_MASK;
-	unsigned long offset = va & ~PAGE_MASK;
 	phys_addr_t page_pa = (pa & PAGE_MASK);
 	struct page *page;
 	int ret;
@@ -402,6 +434,7 @@ int arch_cpu_preserved_setup_buffer(struct page *text_page,
 	/* Ensure preserved GDT, IDT, and arch flags are initialized */
 	arch_cpu_preserved_early_init();
 	init_preserved_idt();
+	init_preserved_gdt();
 	arch_cpu_preserved_dcache_clean((unsigned long)&x86_preserved_has_svm,
 					(unsigned long)&x86_preserved_has_svm +
 					sizeof(bool));
@@ -449,6 +482,7 @@ void arch_cpu_preserved_unpreserve_pagetables(void)
 
 void arch_cpu_preserved_wait_dead(int cpu)
 {
+	x86_virt_reset_cpu(cpu);
 }
 
 void *arch_cpu_preserved_get_pgd(void)
@@ -470,3 +504,31 @@ void arch_caretaker_flush_tlb(struct caretaker_session *sess)
 EXPORT_SYMBOL_GPL(arch_caretaker_flush_tlb);
 
 
+u64 __cpu_preserved_text arch_caretaker_ticks_to_ns(u64 ticks)
+{
+	u64 khz = global_sched_config.tsc_khz;
+
+	if (khz > 0) {
+		u64 mul = 1000000ULL;
+		u64 low, high;
+
+		asm("mulq %3" : "=a"(low), "=d"(high) : "a"(ticks), "r"(mul) : "cc");
+		asm("divq %2" : "=a"(low), "=d"(high) : "r"(khz), "a"(low), "d"(high) : "cc");
+		return low;
+	}
+	return ticks;
+}
+EXPORT_SYMBOL_GPL(arch_caretaker_ticks_to_ns);
+
+void arch_caretaker_update_quantum_ticks(struct caretaker_sched_config *cfg)
+{
+	u32 ms = cfg->quantum_ms;
+
+	if (tsc_khz > 0) {
+		cfg->tsc_khz = tsc_khz;
+		cfg->quantum_ticks = (u64)ms * tsc_khz;
+	} else {
+		cfg->quantum_ticks = (u64)ms * 2000000ULL;
+	}
+}
+EXPORT_SYMBOL_GPL(arch_caretaker_update_quantum_ticks);
