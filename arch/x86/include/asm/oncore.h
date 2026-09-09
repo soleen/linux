@@ -15,5 +15,6 @@ static inline u64 __cpu_preserved_text arch_oncore_read_counter(void)
 {
 	return rdtsc();
 }
+#define arch_oncore_read_counter arch_oncore_read_counter
 
 #endif /* _ASM_X86_ONCORE_H */

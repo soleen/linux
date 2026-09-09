@@ -6,7 +6,9 @@ ccflags-$(CONFIG_KVM_WERROR) += -Werror
 include $(srctree)/virt/kvm/Makefile.kvm
 
 kvm-y			+= x86.o emulate.o irq.o lapic.o cpuid.o msrs.o pmu.o regs.o \
-			   mtrr.o debugfs.o mmu/mmu.o mmu/page_track.o mmu/spte.o
+			   mtrr.o debugfs.o mmu/mmu.o mmu/page_track.o mmu/spte.o \
+			   kvm_luo.o
+kvm-$(CONFIG_KVM_CARETAKER) += caretaker.o
 
 kvm-$(CONFIG_X86_64) += mmu/tdp_iter.o mmu/tdp_mmu.o
 kvm-$(CONFIG_KVM_IOAPIC) += i8259.o i8254.o ioapic.o
@@ -97,4 +99,3 @@ undefine get_kvm_exports
 undefine exports_grep_trailer
 endif # CONFIG_KVM_X86
 
-kvm-y += kvm_luo.o
