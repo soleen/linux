@@ -28,8 +28,14 @@
  * GUEST_MEMFD_LUO_FH_COMPATIBLE compatibility strings.
  */
 
+#if defined(CONFIG_X86_64)
+#include <linux/kho/abi/kvm_x86.h>
+#elif defined(CONFIG_ARM64)
+#include <linux/kho/abi/kvm_arm64.h>
+#else
 struct kvm_vm_arch_luo_state;
 struct kvm_vcpu_arch_luo_state;
+#endif
 
 /**
  * struct kvm_luo_ser - Main serialization structure for a KVM VM.

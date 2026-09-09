@@ -492,6 +492,10 @@ int kvm_task_switch(struct kvm_vcpu *vcpu, u16 tss_selector, int idt_index,
 		    int reason, bool has_error_code, u32 error_code);
 
 int __kvm_set_xcr(struct kvm_vcpu *vcpu, u32 index, u64 xcr);
+void kvm_vcpu_ioctl_x86_get_vcpu_events(struct kvm_vcpu *vcpu,
+					struct kvm_vcpu_events *events);
+int kvm_vcpu_ioctl_x86_set_vcpu_events(struct kvm_vcpu *vcpu,
+				       struct kvm_vcpu_events *events);
 int kvm_emulate_xsetbv(struct kvm_vcpu *vcpu);
 int kvm_emulate_rdpmc(struct kvm_vcpu *vcpu);
 
@@ -899,5 +903,10 @@ int ____kvm_emulate_hypercall(struct kvm_vcpu *vcpu, int cpl,
 })
 
 int kvm_emulate_hypercall(struct kvm_vcpu *vcpu);
+
+int __get_mpstate(struct kvm_vcpu *vcpu, struct kvm_mp_state *mp_state);
+int __set_mpstate(struct kvm_vcpu *vcpu, struct kvm_mp_state *mp_state);
+int __get_fpu(struct kvm_vcpu *vcpu, struct kvm_fpu *fpu);
+int __set_fpu(struct kvm_vcpu *vcpu, struct kvm_fpu *fpu);
 
 #endif
