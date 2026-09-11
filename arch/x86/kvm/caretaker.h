@@ -85,11 +85,9 @@
 #include <linux/kvm_caretaker.h>
 
 /* Architecture-specific VM exit types for x86 */
-enum {
-	KVM_CARETAKER_EXIT_CPUID = KVM_CARETAKER_EXIT_ARCH + 1,
-	KVM_CARETAKER_EXIT_MSR,
-	KVM_CARETAKER_EXIT_RDTSC,
-};
+#define KVM_CARETAKER_EXIT_CPUID	((enum kvm_caretaker_exit_type)(KVM_CARETAKER_EXIT_ARCH + 1))
+#define KVM_CARETAKER_EXIT_MSR		((enum kvm_caretaker_exit_type)(KVM_CARETAKER_EXIT_ARCH + 2))
+#define KVM_CARETAKER_EXIT_RDTSC	((enum kvm_caretaker_exit_type)(KVM_CARETAKER_EXIT_ARCH + 3))
 
 /* 8250 UART register state for guest early printk emulation */
 struct caretaker_uart {
