@@ -1707,18 +1707,23 @@ static DEVICE_ATTR_RO(preserve);
 static int __init cpu_preserve_sysfs_init(void)
 {
 	struct device *dev_root = bus_get_dev_root(&cpu_subsys);
-	int cpu;
+	int cpu, ret;
 
 	if (dev_root) {
-		sysfs_create_file(&dev_root->kobj, &dev_attr_preserved.attr);
+		ret = sysfs_create_file(&dev_root->kobj, &dev_attr_preserved.attr);
 		put_device(dev_root);
+		if (ret)
+			pr_warn("Failed to create cpu preserved sysfs attribute: %d\n", ret);
 	}
 
 	for_each_possible_cpu(cpu) {
 		struct device *dev = get_cpu_device(cpu);
 
-		if (dev)
-			sysfs_create_file(&dev->kobj, &dev_attr_preserve.attr);
+		if (dev) {
+			ret = sysfs_create_file(&dev->kobj, &dev_attr_preserve.attr);
+			if (ret)
+				pr_warn("Failed to create cpu%d preserve sysfs attribute: %d\n", cpu, ret);
+		}
 	}
 	return 0;
 }
