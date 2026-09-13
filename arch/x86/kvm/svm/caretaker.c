@@ -49,7 +49,9 @@ static void svm_caretaker_init_page(struct caretaker_svm_page *csp, struct kvm_v
 
 	/* Enable HLT/CPUID intercepts handled natively by standalone loop */
 	vmcb_set_intercept(&csp->vmcb.control, INTERCEPT_HLT);
-	vmcb_clr_intercept(&csp->vmcb.control, INTERCEPT_PAUSE);
+	vmcb_set_intercept(&csp->vmcb.control, INTERCEPT_PAUSE);
+	csp->vmcb.control.pause_filter_count = 4096;
+	csp->vmcb.control.pause_filter_thresh = 128;
 	vmcb_clr_intercept(&csp->vmcb.control, INTERCEPT_RDTSC);
 	vmcb_clr_intercept(&csp->vmcb.control, INTERCEPT_VMMCALL);
 	vmcb_set_intercept(&csp->vmcb.control, INTERCEPT_CPUID);
@@ -188,7 +190,7 @@ svm_caretaker_decode_exit(struct caretaker_svm_page *csp,
 		break;
 	case SVM_EXIT_PAUSE:
 		csp->common.exits_pause++;
-		exit->type = KVM_CARETAKER_EXIT_INSN_STEP;
+		exit->type = KVM_CARETAKER_EXIT_IDLE;
 		if (!exit->insn_len)
 			exit->insn_len = 2;
 		break;
