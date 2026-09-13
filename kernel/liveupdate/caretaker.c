@@ -998,11 +998,24 @@ static int caretaker_sched_jobs_show(struct seq_file *m, void *v)
 			int c;
 
 			for_each_cpu(c, &sess->cpus) {
+#if defined(CONFIG_X86)
 				seq_printf(m, "  cpu %d: iters: %llu pick_jobs: %llu pick_nulls: %llu apicid: 0x%x\n",
 					   c, sess->cpu_stats[c].loop_iters,
 					   sess->cpu_stats[c].pick_jobs,
 					   sess->cpu_stats[c].pick_nulls,
 					   arch_cpu_preserved_get_apicid(c));
+#elif defined(CONFIG_ARM64)
+				seq_printf(m, "  cpu %d: iters: %llu pick_jobs: %llu pick_nulls: %llu mpidr: 0x%llx\n",
+					   c, sess->cpu_stats[c].loop_iters,
+					   sess->cpu_stats[c].pick_jobs,
+					   sess->cpu_stats[c].pick_nulls,
+					   arch_cpu_preserved_get_mpidr(c));
+#else
+				seq_printf(m, "  cpu %d: iters: %llu pick_jobs: %llu pick_nulls: %llu\n",
+					   c, sess->cpu_stats[c].loop_iters,
+					   sess->cpu_stats[c].pick_jobs,
+					   sess->cpu_stats[c].pick_nulls);
+#endif
 			}
 
 			list_for_each_entry(job, &sess->all_jobs, all_node) {
