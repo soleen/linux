@@ -158,14 +158,14 @@ kvm_caretaker_should_exit(struct kvm_caretaker_vcpu *cvcpu)
 		return true;
 
 	sctx = cpu_preserved_get_stack_context();
-	if (sctx && sctx->cpu >= 0 && sctx->cpu < CONFIG_NR_CPUS &&
-	    cpu_preserved_should_exit(sctx->cpu)) {
-		return true;
+	if (sctx && sctx->cpu >= 0 && sctx->cpu < CONFIG_NR_CPUS) {
+		if (cpu_preserved_should_exit(sctx->cpu))
+			return true;
+	} else {
+		pcpu = cvcpu->cb.pcpu_id;
+		if (pcpu >= 0 && pcpu < CONFIG_NR_CPUS && cpu_preserved_should_exit(pcpu))
+			return true;
 	}
-
-	pcpu = cvcpu->cb.pcpu_id;
-	if (pcpu >= 0 && pcpu < CONFIG_NR_CPUS && cpu_preserved_should_exit(pcpu))
-		return true;
 
 	return false;
 }
@@ -226,6 +226,7 @@ STACK_FRAME_NON_STANDARD(kvm_caretaker_vcpu_run);
 enum caretaker_exit_reason __cpu_preserved_text
 kvm_caretaker_vcpu_run(struct kvm_caretaker_vcpu *cvcpu, u64 deadline_ticks)
 {
+	struct cpu_preserved_stack_context *sctx;
 	const struct kvm_caretaker_ops *ops;
 	int enter_res = 0;
 	void *arch_data;
@@ -233,9 +234,13 @@ kvm_caretaker_vcpu_run(struct kvm_caretaker_vcpu *cvcpu, u64 deadline_ticks)
 	if (!cvcpu || !cvcpu->ops)
 		return CARETAKER_EXIT_ERROR;
 
+	sctx = cpu_preserved_get_stack_context();
 	cvcpu->deadline_ticks = deadline_ticks;
 	ops = cvcpu->ops;
 	arch_data = cvcpu->arch_data ? cvcpu->arch_data : cvcpu;
+
+	if (sctx && sctx->cpu >= 0 && sctx->cpu < CONFIG_NR_CPUS)
+		cvcpu->cb.pcpu_id = sctx->cpu;
 
 	if (kvm_caretaker_should_exit(cvcpu))
 		return CARETAKER_EXIT_ATTACH_SIGNALED;
@@ -450,17 +455,14 @@ int kvm_caretaker_vcpu_preserve(struct kvm_vcpu *vcpu,
 		if (task->nr_cpus_allowed == 1) {
 			int cpu = cpumask_first(task->cpus_ptr);
 
-			if (cpu > 0)
+			if (cpu >= 0 && cpu < nr_cpu_ids)
 				target_cpu = cpu;
 		}
 		put_task_struct(task);
 	}
 
-	if (target_cpu < 0 && vcpu->cb.pcpu_id > 0 && vcpu->cb.pcpu_id < nr_cpu_ids)
+	if (target_cpu < 0 && vcpu->cb.pcpu_id < nr_cpu_ids)
 		target_cpu = vcpu->cb.pcpu_id;
-
-	if (target_cpu < 0 && vcpu->cpu > 0)
-		target_cpu = vcpu->cpu;
 
 	snprintf(name, sizeof(name), "vcpu%d", vcpu->vcpu_id);
 
@@ -495,6 +497,7 @@ int kvm_caretaker_vcpu_preserve(struct kvm_vcpu *vcpu,
 			struct caretaker_cb *cb = job->data;
 			struct caretaker_session *sess = caretaker_get_session(session);
 
+			cb->pcpu_id = target_cpu;
 			caretaker_kvm_detach(cb);
 			if (cb->runtime_size && cb->runtime_pa) {
 				if (sess) {
@@ -546,6 +549,7 @@ void kvm_caretaker_vcpu_unpreserve(struct kvm_vcpu *vcpu,
 		caretaker_session_cancel_job(session, vcpu->caretaker_job);
 		vcpu->caretaker_job = NULL;
 	}
+	vcpu->cb.pcpu_id = CARETAKER_INVALID_PCPU;
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_caretaker_vcpu_unpreserve);
 
@@ -556,5 +560,7 @@ void kvm_caretaker_vcpu_finish(struct kvm_vcpu *vcpu,
 		caretaker_session_cancel_job(session, vcpu->caretaker_job);
 		vcpu->caretaker_job = NULL;
 	}
+	if (vcpu)
+		vcpu->cb.pcpu_id = CARETAKER_INVALID_PCPU;
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_caretaker_vcpu_finish);

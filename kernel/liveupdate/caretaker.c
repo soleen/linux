@@ -115,6 +115,9 @@
 
 struct caretaker_sched_config global_sched_config __cpu_preserved_data;
 
+void (*arch_caretaker_show_job_hook)(struct seq_file *m, void *data);
+EXPORT_SYMBOL_GPL(arch_caretaker_show_job_hook);
+
 static int __init parse_caretaker_quantum(char *arg)
 {
 	u32 val;
@@ -159,6 +162,8 @@ static void caretaker_runqueue_init(struct caretaker_runqueue *rq)
 static int caretaker_sched_enqueue(struct caretaker_runqueue *rq,
 				   struct caretaker_job *job)
 {
+	int cpu;
+
 	caretaker_rq_lock(rq);
 	job->state = CARETAKER_JOB_RUNNABLE;
 	list_add_tail(&job->node, &rq->runnable);
@@ -166,8 +171,14 @@ static int caretaker_sched_enqueue(struct caretaker_runqueue *rq,
 	rq->nr_total++;
 	caretaker_rq_unlock(rq);
 
-	if (job->preferred_cpu >= 0 && cpu_is_preserved(job->preferred_cpu))
+	if (job->session) {
+		for_each_cpu(cpu, &job->session->cpus) {
+			if (cpu_is_preserved(cpu))
+				arch_cpu_preserved_kick(cpu);
+		}
+	} else if (job->preferred_cpu >= 0 && cpu_is_preserved(job->preferred_cpu)) {
 		arch_cpu_preserved_kick(job->preferred_cpu);
+	}
 
 	return 0;
 }
@@ -199,16 +210,38 @@ caretaker_sched_pick_next(struct caretaker_runqueue *rq, int cpu)
 
 	caretaker_rq_lock(rq);
 
-	/* Search for first eligible runnable job in FIFO order */
-	list_for_each_entry(iter, &rq->runnable, node) {
-		if (iter->preferred_cpu == cpu ||
-		    iter->preferred_cpu < 0 ||
-		    !cpu_is_preserved(iter->preferred_cpu)) {
+	/* 1. Starvation avoidance: if head job has NEVER run, take it immediately */
+	if (!list_empty(&rq->runnable)) {
+		iter = list_first_entry(&rq->runnable, struct caretaker_job, node);
+		if (iter->total_runs == 0) {
 			job = iter;
-			break;
+			goto found;
 		}
 	}
 
+	/* 2. Prefer job affine to this core */
+	list_for_each_entry(iter, &rq->runnable, node) {
+		if (iter->preferred_cpu == cpu) {
+			job = iter;
+			goto found;
+		}
+	}
+
+	/* 3. Prefer unpinned job (or job for non-preserved CPU) */
+	list_for_each_entry(iter, &rq->runnable, node) {
+		if (iter->preferred_cpu < 0 ||
+		    !cpu_is_preserved(iter->preferred_cpu)) {
+			job = iter;
+			goto found;
+		}
+	}
+
+	/* 4. Work-stealing fallback: take oldest job from head of queue */
+	if (!list_empty(&rq->runnable)) {
+		job = list_first_entry(&rq->runnable, struct caretaker_job, node);
+	}
+
+found:
 	if (job) {
 		list_del_init(&job->node);
 		rq->nr_runnable--;
@@ -230,7 +263,8 @@ caretaker_sched_put_prev(struct caretaker_runqueue *rq,
 }
 
 static void __cpu_preserved_text
-caretaker_cpu_schedule_loop(int cpu, struct caretaker_runqueue *rq,
+caretaker_cpu_schedule_loop(struct caretaker_session *sess, int cpu,
+			    struct caretaker_runqueue *rq,
 			    struct caretaker_sched_config *cfg)
 {
 	u64 deadline, start_ticks, end_ticks;
@@ -241,14 +275,21 @@ caretaker_cpu_schedule_loop(int cpu, struct caretaker_runqueue *rq,
 		return;
 
 	while (!cpu_preserved_should_exit(cpu)) {
+		if (sess && cpu >= 0 && cpu < NR_CPUS)
+			sess->cpu_stats[cpu].loop_iters++;
+
 		/* 1. Pick the next runnable job from the FIFO queue */
 		if (!curr) {
 			curr = caretaker_sched_pick_next(rq, cpu);
 			if (!curr) {
+				if (sess && cpu >= 0 && cpu < NR_CPUS)
+					sess->cpu_stats[cpu].pick_nulls++;
 				/* No runnable jobs; execute low-power park wait */
 				arch_cpu_preserved_park_wait();
 				continue;
 			}
+			if (sess && cpu >= 0 && cpu < NR_CPUS)
+				sess->cpu_stats[cpu].pick_jobs++;
 		}
 
 		/* 2. Compute quantum deadline */
@@ -262,6 +303,7 @@ caretaker_cpu_schedule_loop(int cpu, struct caretaker_runqueue *rq,
 		curr->last_cpu = cpu;
 		curr->state = CARETAKER_JOB_RUNNING;
 		reason = curr->run_fn(curr->data, deadline);
+		curr->last_exit_reason = reason;
 
 		/* 4. Update telemetry and accounting */
 		end_ticks = arch_caretaker_read_counter();
@@ -315,7 +357,7 @@ static void __caretaker_text caretaker_sched_cpu_worker(void *data)
 	if (sctx && sctx->session_pgd_pa)
 		arch_cpu_preserved_switch_pgd(sctx->session_pgd_pa);
 
-	caretaker_cpu_schedule_loop(cpu, &sess->rq, &sess->sched_config);
+	caretaker_cpu_schedule_loop(sess, cpu, &sess->rq, &sess->sched_config);
 }
 
 static DEFINE_MUTEX(caretaker_map_lock);
@@ -506,6 +548,7 @@ static struct caretaker_session *caretaker_get_or_create_session(struct liveupda
 	memset(sess, 0, sizeof(*sess));
 	strscpy(sess->name, sname, sizeof(sess->name));
 	mutex_init(&sess->lock);
+	INIT_LIST_HEAD(&sess->all_jobs);
 	caretaker_runqueue_init(&sess->rq);
 	caretaker_sched_update_ticks();
 	sess->sched_config = global_sched_config;
@@ -763,6 +806,7 @@ caretaker_session_submit_job(struct liveupdate_session *s,
 			cpu_preserved_map_buffer(data, PAGE_SIZE);
 	}
 	INIT_LIST_HEAD(&job->node);
+	INIT_LIST_HEAD(&job->all_node);
 	job->session = sess;
 	if (name)
 		strscpy(job->name, name, sizeof(job->name));
@@ -770,8 +814,10 @@ caretaker_session_submit_job(struct liveupdate_session *s,
 	job->run_fn = run_fn;
 	job->data = data;
 	job->last_cpu = -1;
+	list_add_tail(&job->all_node, &sess->all_jobs);
 
-	if (preferred_cpu >= 0 && cpumask_test_cpu(preferred_cpu, &sess->cpus)) {
+	if (preferred_cpu >= 0 && cpumask_test_cpu(preferred_cpu, &sess->cpus) &&
+	    sess->cpu_jobs[preferred_cpu] == 0) {
 		job->preferred_cpu = preferred_cpu;
 		job->assigned_cpu = preferred_cpu;
 		sess->cpu_jobs[preferred_cpu]++;
@@ -785,10 +831,17 @@ caretaker_session_submit_job(struct liveupdate_session *s,
 				assigned = cpu;
 			}
 		}
-		job->preferred_cpu = assigned;
-		job->assigned_cpu = assigned;
-		if (assigned >= 0)
-			sess->cpu_jobs[assigned]++;
+		if (min_count > 0 && preferred_cpu >= 0 &&
+		    cpumask_test_cpu(preferred_cpu, &sess->cpus)) {
+			job->preferred_cpu = preferred_cpu;
+			job->assigned_cpu = preferred_cpu;
+			sess->cpu_jobs[preferred_cpu]++;
+		} else {
+			job->preferred_cpu = assigned;
+			job->assigned_cpu = assigned;
+			if (assigned >= 0)
+				sess->cpu_jobs[assigned]++;
+		}
 	} else {
 		job->preferred_cpu = -1;
 		job->assigned_cpu = -1;
@@ -853,6 +906,7 @@ int caretaker_session_cancel_job(struct liveupdate_session *s,
 		job->assigned_cpu = -1;
 	}
 	caretaker_sched_dequeue(&sess->rq, job);
+	list_del_init(&job->all_node);
 
 	if (READ_ONCE(job->state) == CARETAKER_JOB_CANCELING) {
 		int cpu = READ_ONCE(job->last_cpu);
@@ -892,6 +946,80 @@ static int caretaker_sched_quantum_set(void *data, u64 val)
 DEFINE_DEBUGFS_ATTRIBUTE(fops_quantum, caretaker_sched_quantum_get,
 			 caretaker_sched_quantum_set, "%llu\n");
 
+static const char *caretaker_job_state_str(enum caretaker_job_state state)
+{
+	switch (state) {
+	case CARETAKER_JOB_NEW:
+		return "NEW";
+	case CARETAKER_JOB_RUNNABLE:
+		return "RUNNABLE";
+	case CARETAKER_JOB_RUNNING:
+		return "RUNNING";
+	case CARETAKER_JOB_CANCELING:
+		return "CANCELING";
+	case CARETAKER_JOB_DEAD:
+		return "DEAD";
+	default:
+		return "UNKNOWN";
+	}
+}
+
+static const char *caretaker_exit_reason_str(enum caretaker_exit_reason reason)
+{
+	switch (reason) {
+	case CARETAKER_EXIT_QUANTUM_EXPIRED:
+		return "QUANTUM_EXPIRED";
+	case CARETAKER_EXIT_ATTACH_SIGNALED:
+		return "ATTACH_SIGNALED";
+	case CARETAKER_EXIT_YIELD_IDLE:
+		return "YIELD_IDLE";
+	case CARETAKER_EXIT_ERROR:
+		return "ERROR";
+	default:
+		return "UNKNOWN";
+	}
+}
+
+static int caretaker_sched_jobs_show(struct seq_file *m, void *v)
+{
+	struct caretaker_session *sess;
+	struct caretaker_job *job;
+
+	guard(mutex)(&caretaker_sessions_lock);
+
+	list_for_each_entry(sess, &caretaker_sessions, node) {
+		seq_printf(m, "session: %s cpus: %*pbl nr_runnable: %u nr_total: %u\n",
+			   sess->name, cpumask_pr_args(&sess->cpus),
+			   sess->rq.nr_runnable, sess->rq.nr_total);
+
+		scoped_guard(mutex, &sess->lock) {
+			int c;
+
+			for_each_cpu(c, &sess->cpus) {
+				seq_printf(m, "  cpu %d: iters: %llu pick_jobs: %llu pick_nulls: %llu apicid: 0x%x\n",
+					   c, sess->cpu_stats[c].loop_iters,
+					   sess->cpu_stats[c].pick_jobs,
+					   sess->cpu_stats[c].pick_nulls,
+					   arch_cpu_preserved_get_apicid(c));
+			}
+
+			list_for_each_entry(job, &sess->all_jobs, all_node) {
+				seq_printf(m, "  job: %s state: %s pref_cpu: %d assigned_cpu: %d last_cpu: %d\n",
+					   job->name, caretaker_job_state_str(job->state),
+					   job->preferred_cpu, job->assigned_cpu, job->last_cpu);
+				seq_printf(m, "    runs: %llu runtime_ns: %llu preemptions: %llu last_exit_reason: %s\n",
+					   job->total_runs, job->total_runtime_ns,
+					   job->preemptions,
+					   caretaker_exit_reason_str(job->last_exit_reason));
+				if (arch_caretaker_show_job_hook && job->data)
+					arch_caretaker_show_job_hook(m, job->data);
+			}
+		}
+	}
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(caretaker_sched_jobs);
+
 static int __init caretaker_sched_debugfs_init(void)
 {
 	if (!IS_ENABLED(CONFIG_DEBUG_FS))
@@ -904,6 +1032,8 @@ static int __init caretaker_sched_debugfs_init(void)
 
 	debugfs_create_file("quantum_ms", 0644, caretaker_sched_debugfs_dir,
 			    NULL, &fops_quantum);
+	debugfs_create_file("jobs", 0444, caretaker_sched_debugfs_dir,
+			    NULL, &caretaker_sched_jobs_fops);
 	return 0;
 }
 late_initcall(caretaker_sched_debugfs_init);

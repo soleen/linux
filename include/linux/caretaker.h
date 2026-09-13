@@ -75,6 +75,7 @@ typedef enum caretaker_exit_reason (*caretaker_job_fn)(void *data,
  */
 struct caretaker_job {
 	struct list_head		node;
+	struct list_head		all_node;
 	struct caretaker_session	*session;
 	char				name[64];
 	enum caretaker_job_state	state;
@@ -88,6 +89,7 @@ struct caretaker_job {
 	u64				total_runs;
 	u64				total_runtime_ns;
 	u64				preemptions;
+	enum caretaker_exit_reason	last_exit_reason;
 };
 
 /**
@@ -144,6 +146,7 @@ struct caretaker_cpu_worker_arg {
  */
 struct caretaker_session {
 	struct list_head		node;
+	struct list_head		all_jobs;
 	char				name[LIVEUPDATE_SESSION_NAME_LENGTH];
 	cpumask_t			cpus;
 	unsigned int			cpu_jobs[NR_CPUS];
@@ -157,7 +160,15 @@ struct caretaker_session {
 	unsigned int			nr_pgd_pages;
 	struct caretaker_session_ser	*ser;
 	bool				is_incoming;
+	struct {
+		u64			loop_iters;
+		u64			pick_jobs;
+		u64			pick_nulls;
+	} cpu_stats[NR_CPUS];
 };
+
+struct seq_file;
+extern void (*arch_caretaker_show_job_hook)(struct seq_file *m, void *data);
 
 #ifdef CONFIG_CARETAKER
 
