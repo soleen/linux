@@ -45,7 +45,7 @@ static void vmx_caretaker_init_page(struct caretaker_vmx_page *cvp,
 				    struct kvm_vcpu *vcpu)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
-	u64 basic_msr;
+	u64 basic_msr, misc_msr;
 
 	if (!vmx->vmcs01.vmcs)
 		return;
@@ -57,6 +57,11 @@ static void vmx_caretaker_init_page(struct caretaker_vmx_page *cvp,
 	memset(cvp->vmxon_area, 0, PAGE_SIZE);
 	rdmsrq(MSR_IA32_VMX_BASIC, basic_msr);
 	*(u32 *)cvp->vmxon_area = vmx_basic_vmcs_revision_id(basic_msr);
+
+	if (!rdmsrq_safe(MSR_IA32_VMX_MISC, &misc_msr))
+		cvp->timer_shift = vmx_misc_preemption_timer_rate(misc_msr);
+	else
+		cvp->timer_shift = VMX_PREEMPTION_TIMER_SHIFT;
 
 	vcpu_load(vcpu);
 
@@ -183,37 +188,46 @@ vmx_caretaker_decode_exit(struct caretaker_vmx_page *cvp,
 		break;
 	}
 	case EXIT_REASON_HLT:
+		cvp->common.exits_hlt++;
 		exit->type = KVM_CARETAKER_EXIT_IDLE;
 		break;
 	case EXIT_REASON_PAUSE_INSTRUCTION:
+		cvp->common.exits_pause++;
 		exit->type = KVM_CARETAKER_EXIT_INSN_STEP;
 		exit->insn_len = PAUSE_INSN_LEN;
 		break;
 	case EXIT_REASON_CPUID:
+		cvp->common.exits_other++;
 		exit->type = KVM_CARETAKER_EXIT_CPUID;
 		break;
 	case EXIT_REASON_VMCALL:
+		cvp->common.exits_vmcall++;
 		exit->type = KVM_CARETAKER_EXIT_CROSS_VCPU;
 		exit->insn_len = insn_len ? insn_len : VMCALL_INSN_LEN;
 		cvp->common.rax = 0;
 		break;
 	case EXIT_REASON_MSR_READ:
+		cvp->common.exits_other++;
 		exit->type = KVM_CARETAKER_EXIT_MSR;
 		exit->msr.msr = (u32)cvp->common.rcx;
 		exit->msr.is_write = false;
 		break;
 	case EXIT_REASON_MSR_WRITE:
+		cvp->common.exits_other++;
 		exit->type = KVM_CARETAKER_EXIT_MSR;
 		exit->msr.msr = (u32)cvp->common.rcx;
 		exit->msr.is_write = true;
 		break;
 	case EXIT_REASON_RDTSC:
+		cvp->common.exits_other++;
 		exit->type = KVM_CARETAKER_EXIT_RDTSC;
 		break;
 	case EXIT_REASON_EPT_VIOLATION:
+		cvp->common.exits_other++;
 		exit->type = KVM_CARETAKER_EXIT_UNHANDLED;
 		break;
 	case EXIT_REASON_PREEMPTION_TIMER:
+		cvp->common.exits_preempt_timer++;
 		exit->type = KVM_CARETAKER_EXIT_PREEMPT_TIMER;
 		exit->insn_len = 0;
 		vmx_caretaker_disarm_timer(cvp);
@@ -222,6 +236,7 @@ vmx_caretaker_decode_exit(struct caretaker_vmx_page *cvp,
 	case EXIT_REASON_APIC_WRITE:
 	case EXIT_REASON_APIC_ACCESS:
 	case EXIT_REASON_INTERRUPT_WINDOW:
+		cvp->common.exits_apic++;
 		exit->type = KVM_CARETAKER_EXIT_CROSS_VCPU;
 		exit->insn_len = 0;
 		break;
@@ -229,10 +244,12 @@ vmx_caretaker_decode_exit(struct caretaker_vmx_page *cvp,
 	case EXIT_REASON_EXCEPTION_NMI:
 	case EXIT_REASON_INIT_SIGNAL:
 	case EXIT_REASON_SIPI_SIGNAL:
+		cvp->common.exits_ext_intr++;
 		exit->type = KVM_CARETAKER_EXIT_PREEMPT_TIMER;
 		exit->insn_len = 0;
 		break;
 	default:
+		cvp->common.exits_other++;
 		break;
 	}
 }
@@ -310,8 +327,144 @@ vmx_caretaker_sync_vcpu(void *page, struct kvm_vcpu *vcpu)
 {
 	struct caretaker_vmx_page *cvp = page;
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
+	phys_addr_t cur_vmcs_pa = vmx->loaded_vmcs ? virt_to_phys(vmx->loaded_vmcs->vmcs) : 0;
+
+	if (cvp->common.vmcs_pa && cur_vmcs_pa && cvp->common.vmcs_pa != cur_vmcs_pa) {
+		u16 cs_sel, ss_sel, ds_sel, es_sel, fs_sel, gs_sel, tr_sel, ldtr_sel;
+		u32 cs_limit, ss_limit, ds_limit, es_limit, fs_limit, gs_limit, tr_limit, ldtr_limit;
+		u32 cs_ar, ss_ar, ds_ar, es_ar, fs_ar, gs_ar, tr_ar, ldtr_ar;
+		unsigned long cs_base, ss_base, ds_base, es_base, fs_base, gs_base, tr_base, ldtr_base;
+		u32 gdtr_limit, idtr_limit;
+		unsigned long gdtr_base, idtr_base;
+		u32 intr_info, act_state;
+		unsigned long dbg_ctl, sysenter_cs, sysenter_esp, sysenter_eip;
+		unsigned long guest_efer;
+
+		asm volatile("vmptrld %0" : : "m" (cvp->common.vmcs_pa) : "memory", "cc");
+
+		cs_sel = vmx_vmread(GUEST_CS_SELECTOR);
+		cs_limit = vmx_vmread(GUEST_CS_LIMIT);
+		cs_ar = vmx_vmread(GUEST_CS_AR_BYTES);
+		cs_base = vmx_vmread(GUEST_CS_BASE);
+
+		ss_sel = vmx_vmread(GUEST_SS_SELECTOR);
+		ss_limit = vmx_vmread(GUEST_SS_LIMIT);
+		ss_ar = vmx_vmread(GUEST_SS_AR_BYTES);
+		ss_base = vmx_vmread(GUEST_SS_BASE);
+
+		ds_sel = vmx_vmread(GUEST_DS_SELECTOR);
+		ds_limit = vmx_vmread(GUEST_DS_LIMIT);
+		ds_ar = vmx_vmread(GUEST_DS_AR_BYTES);
+		ds_base = vmx_vmread(GUEST_DS_BASE);
+
+		es_sel = vmx_vmread(GUEST_ES_SELECTOR);
+		es_limit = vmx_vmread(GUEST_ES_LIMIT);
+		es_ar = vmx_vmread(GUEST_ES_AR_BYTES);
+		es_base = vmx_vmread(GUEST_ES_BASE);
+
+		fs_sel = vmx_vmread(GUEST_FS_SELECTOR);
+		fs_limit = vmx_vmread(GUEST_FS_LIMIT);
+		fs_ar = vmx_vmread(GUEST_FS_AR_BYTES);
+		fs_base = vmx_vmread(GUEST_FS_BASE);
+
+		gs_sel = vmx_vmread(GUEST_GS_SELECTOR);
+		gs_limit = vmx_vmread(GUEST_GS_LIMIT);
+		gs_ar = vmx_vmread(GUEST_GS_AR_BYTES);
+		gs_base = vmx_vmread(GUEST_GS_BASE);
+
+		tr_sel = vmx_vmread(GUEST_TR_SELECTOR);
+		tr_limit = vmx_vmread(GUEST_TR_LIMIT);
+		tr_ar = vmx_vmread(GUEST_TR_AR_BYTES);
+		tr_base = vmx_vmread(GUEST_TR_BASE);
+
+		ldtr_sel = vmx_vmread(GUEST_LDTR_SELECTOR);
+		ldtr_limit = vmx_vmread(GUEST_LDTR_LIMIT);
+		ldtr_ar = vmx_vmread(GUEST_LDTR_AR_BYTES);
+		ldtr_base = vmx_vmread(GUEST_LDTR_BASE);
+
+		gdtr_limit = vmx_vmread(GUEST_GDTR_LIMIT);
+		gdtr_base = vmx_vmread(GUEST_GDTR_BASE);
+
+		idtr_limit = vmx_vmread(GUEST_IDTR_LIMIT);
+		idtr_base = vmx_vmread(GUEST_IDTR_BASE);
+
+		intr_info = vmx_vmread(GUEST_INTERRUPTIBILITY_INFO);
+		act_state = vmx_vmread(GUEST_ACTIVITY_STATE);
+		dbg_ctl = vmx_vmread(GUEST_IA32_DEBUGCTL);
+		sysenter_cs = vmx_vmread(GUEST_SYSENTER_CS);
+		sysenter_esp = vmx_vmread(GUEST_SYSENTER_ESP);
+		sysenter_eip = vmx_vmread(GUEST_SYSENTER_EIP);
+		guest_efer = vmx_vmread(GUEST_IA32_EFER);
+
+		asm volatile("vmclear %0" : : "m" (cvp->common.vmcs_pa) : "memory", "cc");
+		asm volatile("vmptrld %0" : : "m" (cur_vmcs_pa) : "memory", "cc");
+
+		vmx_vmwrite(GUEST_CS_SELECTOR, cs_sel);
+		vmx_vmwrite(GUEST_CS_LIMIT, cs_limit);
+		vmx_vmwrite(GUEST_CS_AR_BYTES, cs_ar);
+		vmx_vmwrite(GUEST_CS_BASE, cs_base);
+
+		vmx_vmwrite(GUEST_SS_SELECTOR, ss_sel);
+		vmx_vmwrite(GUEST_SS_LIMIT, ss_limit);
+		vmx_vmwrite(GUEST_SS_AR_BYTES, ss_ar);
+		vmx_vmwrite(GUEST_SS_BASE, ss_base);
+
+		vmx_vmwrite(GUEST_DS_SELECTOR, ds_sel);
+		vmx_vmwrite(GUEST_DS_LIMIT, ds_limit);
+		vmx_vmwrite(GUEST_DS_AR_BYTES, ds_ar);
+		vmx_vmwrite(GUEST_DS_BASE, ds_base);
+
+		vmx_vmwrite(GUEST_ES_SELECTOR, es_sel);
+		vmx_vmwrite(GUEST_ES_LIMIT, es_limit);
+		vmx_vmwrite(GUEST_ES_AR_BYTES, es_ar);
+		vmx_vmwrite(GUEST_ES_BASE, es_base);
+
+		vmx_vmwrite(GUEST_FS_SELECTOR, fs_sel);
+		vmx_vmwrite(GUEST_FS_LIMIT, fs_limit);
+		vmx_vmwrite(GUEST_FS_AR_BYTES, fs_ar);
+		vmx_vmwrite(GUEST_FS_BASE, fs_base);
+
+		vmx_vmwrite(GUEST_GS_SELECTOR, gs_sel);
+		vmx_vmwrite(GUEST_GS_LIMIT, gs_limit);
+		vmx_vmwrite(GUEST_GS_AR_BYTES, gs_ar);
+		vmx_vmwrite(GUEST_GS_BASE, gs_base);
+
+		vmx_vmwrite(GUEST_TR_SELECTOR, tr_sel);
+		vmx_vmwrite(GUEST_TR_LIMIT, tr_limit);
+		vmx_vmwrite(GUEST_TR_AR_BYTES, tr_ar);
+		vmx_vmwrite(GUEST_TR_BASE, tr_base);
+
+		vmx_vmwrite(GUEST_LDTR_SELECTOR, ldtr_sel);
+		vmx_vmwrite(GUEST_LDTR_LIMIT, ldtr_limit);
+		vmx_vmwrite(GUEST_LDTR_AR_BYTES, ldtr_ar);
+		vmx_vmwrite(GUEST_LDTR_BASE, ldtr_base);
+
+		vmx_vmwrite(GUEST_GDTR_LIMIT, gdtr_limit);
+		vmx_vmwrite(GUEST_GDTR_BASE, gdtr_base);
+
+		vmx_vmwrite(GUEST_IDTR_LIMIT, idtr_limit);
+		vmx_vmwrite(GUEST_IDTR_BASE, idtr_base);
+
+		vmx_vmwrite(GUEST_INTERRUPTIBILITY_INFO, intr_info);
+		vmx_vmwrite(GUEST_ACTIVITY_STATE, act_state);
+		vmx_vmwrite(GUEST_IA32_DEBUGCTL, dbg_ctl);
+		vmx_vmwrite(GUEST_SYSENTER_CS, sysenter_cs);
+		vmx_vmwrite(GUEST_SYSENTER_ESP, sysenter_esp);
+		vmx_vmwrite(GUEST_SYSENTER_EIP, sysenter_eip);
+		if (guest_efer)
+			vmx_vmwrite(GUEST_IA32_EFER, guest_efer);
+
+		cvp->common.vmcs_pa = cur_vmcs_pa;
+	}
 
 	kvm_x86_caretaker_sync_vcpu_common(vcpu, &cvp->common);
+
+	if (cvp->star)
+		kvm_msr_write(vcpu, MSR_STAR, cvp->star);
+	if (cvp->lstar)
+		kvm_msr_write(vcpu, MSR_LSTAR, cvp->lstar);
+	if (cvp->fmask)
+		kvm_msr_write(vcpu, MSR_SYSCALL_MASK, cvp->fmask);
 
 	if (vmx->loaded_vmcs) {
 		pin_controls_clearbit(vmx, PIN_BASED_VMX_PREEMPTION_TIMER);
@@ -330,10 +483,25 @@ vmx_caretaker_sync_vcpu(void *page, struct kvm_vcpu *vcpu)
 	vmcs_write32(GUEST_INTERRUPTIBILITY_INFO, 0);
 	vmcs_write32(GUEST_ACTIVITY_STATE, GUEST_ACTIVITY_ACTIVE);
 	vmcs_writel(GUEST_PENDING_DBG_EXCEPTIONS, 0);
+
+	if (cvp->common.last_exit_rip)
+		vmcs_writel(GUEST_RIP, cvp->common.last_exit_rip);
+	if (cvp->common.last_exit_rsp)
+		vmcs_writel(GUEST_RSP, cvp->common.last_exit_rsp);
+	if (cvp->common.last_exit_rflags)
+		vmcs_writel(GUEST_RFLAGS, cvp->common.last_exit_rflags);
+	if (cvp->common.cr0)
+		vmcs_writel(GUEST_CR0, cvp->common.cr0);
+	if (cvp->common.cr3)
+		vmcs_writel(GUEST_CR3, cvp->common.cr3);
+	if (cvp->common.cr4)
+		vmcs_writel(GUEST_CR4, cvp->common.cr4);
 }
 
 static __cpu_preserved_text void vmx_caretaker_arm_timer(void *page, u64 deadline_ticks)
 {
+	struct caretaker_vmx_page *cvp = page;
+	u32 shift = (cvp && cvp->timer_shift) ? cvp->timer_shift : VMX_PREEMPTION_TIMER_SHIFT;
 	u32 timer_value = 0;
 	u32 pin;
 
@@ -343,7 +511,7 @@ static __cpu_preserved_text void vmx_caretaker_arm_timer(void *page, u64 deadlin
 		if (deadline_ticks > now) {
 			u64 remaining = deadline_ticks - now;
 
-			timer_value = (u32)(remaining >> VMX_PREEMPTION_TIMER_SHIFT);
+			timer_value = (u32)(remaining >> shift);
 			if (timer_value == 0)
 				timer_value = 1;
 		} else {
