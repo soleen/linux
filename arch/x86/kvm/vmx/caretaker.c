@@ -63,6 +63,8 @@ static void vmx_caretaker_init_page(struct caretaker_vmx_page *cvp,
 	else
 		cvp->timer_shift = VMX_PREEMPTION_TIMER_SHIFT;
 
+	cvp->ple_supported = cpu_has_vmx_ple();
+
 	vcpu_load(vcpu);
 
 	cvp->common.kernel_gs_base = vmx->msr_guest_kernel_gs_base;
@@ -193,8 +195,8 @@ vmx_caretaker_decode_exit(struct caretaker_vmx_page *cvp,
 		break;
 	case EXIT_REASON_PAUSE_INSTRUCTION:
 		cvp->common.exits_pause++;
-		exit->type = KVM_CARETAKER_EXIT_INSN_STEP;
-		exit->insn_len = PAUSE_INSN_LEN;
+		exit->type = KVM_CARETAKER_EXIT_IDLE;
+		exit->insn_len = insn_len ? insn_len : PAUSE_INSN_LEN;
 		break;
 	case EXIT_REASON_CPUID:
 		cvp->common.exits_other++;
@@ -305,20 +307,23 @@ vmx_caretaker_init_host_vmcs(struct caretaker_vmx_page *cvp)
 
 	cpu_ctl = vmx_vmread(CPU_BASED_VM_EXEC_CONTROL);
 	cpu_ctl &= ~(CPU_BASED_INTR_WINDOW_EXITING |
-		     CPU_BASED_NMI_WINDOW_EXITING |
-		     CPU_BASED_PAUSE_EXITING);
+		     CPU_BASED_NMI_WINDOW_EXITING);
 	cpu_ctl |= (CPU_BASED_HLT_EXITING |
+		    CPU_BASED_PAUSE_EXITING |
 		    CPU_BASED_MWAIT_EXITING |
 		    CPU_BASED_MONITOR_EXITING |
 		    CPU_BASED_UNCOND_IO_EXITING);
-	vmx_vmwrite(CPU_BASED_VM_EXEC_CONTROL, cpu_ctl);
 
-	if (cpu_ctl & CPU_BASED_ACTIVATE_SECONDARY_CONTROLS) {
+	if (cvp && cvp->ple_supported &&
+	    (cpu_ctl & CPU_BASED_ACTIVATE_SECONDARY_CONTROLS)) {
 		unsigned long sec_ctl = vmx_vmread(SECONDARY_VM_EXEC_CONTROL);
 
-		sec_ctl &= ~SECONDARY_EXEC_PAUSE_LOOP_EXITING;
+		sec_ctl |= SECONDARY_EXEC_PAUSE_LOOP_EXITING;
 		vmx_vmwrite(SECONDARY_VM_EXEC_CONTROL, sec_ctl);
+		vmx_vmwrite(PLE_GAP, 4096);
+		vmx_vmwrite(PLE_WINDOW, 4096);
 	}
+	vmx_vmwrite(CPU_BASED_VM_EXEC_CONTROL, cpu_ctl);
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(vmx_caretaker_init_host_vmcs);
 

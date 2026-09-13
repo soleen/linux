@@ -36,6 +36,7 @@ struct caretaker_vmx_page {
 	u64 lstar;
 	u64 fmask;
 	u32 timer_shift;
+	u32 ple_supported;
 	u8 vmxon_area[PAGE_SIZE] __aligned(PAGE_SIZE);
 } __aligned(PAGE_SIZE);
 
