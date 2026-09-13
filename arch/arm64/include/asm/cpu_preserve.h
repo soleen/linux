@@ -14,6 +14,7 @@ bool arch_cpu_preserved_is_active(void);
 asmlinkage void __arch_cpu_preserved_dcache_clean(unsigned long start, unsigned long end);
 asmlinkage void arch_cpu_preserved_dcache_clean(unsigned long start, unsigned long end);
 asmlinkage void arch_cpu_preserved_dcache_inval(unsigned long start, unsigned long end);
+u64 arch_cpu_preserved_get_mpidr(int cpu);
 
 static inline void arm64_flush_host_tlb_local(void)
 {
