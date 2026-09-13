@@ -311,6 +311,8 @@ caretaker_cpu_schedule_loop(struct caretaker_session *sess, int cpu,
 		curr->total_runtime_ns += ticks_to_ns(end_ticks - start_ticks);
 		if (reason == CARETAKER_EXIT_QUANTUM_EXPIRED)
 			curr->preemptions++;
+		else if (reason == CARETAKER_EXIT_YIELD_IDLE)
+			curr->yields++;
 
 		/* Fast-path: single runnable job continues uninterrupted */
 		if (READ_ONCE(rq->nr_runnable) == 0 &&
@@ -1007,9 +1009,9 @@ static int caretaker_sched_jobs_show(struct seq_file *m, void *v)
 				seq_printf(m, "  job: %s state: %s pref_cpu: %d assigned_cpu: %d last_cpu: %d\n",
 					   job->name, caretaker_job_state_str(job->state),
 					   job->preferred_cpu, job->assigned_cpu, job->last_cpu);
-				seq_printf(m, "    runs: %llu runtime_ns: %llu preemptions: %llu last_exit_reason: %s\n",
+				seq_printf(m, "    runs: %llu runtime_ns: %llu preemptions: %llu yields: %llu last_exit_reason: %s\n",
 					   job->total_runs, job->total_runtime_ns,
-					   job->preemptions,
+					   job->preemptions, job->yields,
 					   caretaker_exit_reason_str(job->last_exit_reason));
 				if (arch_caretaker_show_job_hook && job->data)
 					arch_caretaker_show_job_hook(m, job->data);

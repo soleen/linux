@@ -89,6 +89,7 @@ struct caretaker_job {
 	u64				total_runs;
 	u64				total_runtime_ns;
 	u64				preemptions;
+	u64				yields;
 	enum caretaker_exit_reason	last_exit_reason;
 };
 

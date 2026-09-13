@@ -228,6 +228,7 @@ kvm_caretaker_vcpu_run(struct kvm_caretaker_vcpu *cvcpu, u64 deadline_ticks)
 {
 	struct cpu_preserved_stack_context *sctx;
 	const struct kvm_caretaker_ops *ops;
+	enum caretaker_exit_reason reason = CARETAKER_EXIT_QUANTUM_EXPIRED;
 	int enter_res = 0;
 	void *arch_data;
 
@@ -290,8 +291,11 @@ kvm_caretaker_vcpu_run(struct kvm_caretaker_vcpu *cvcpu, u64 deadline_ticks)
 		else
 			cvcpu->last_exit_rip = exit.rip;
 
-		if (!handled)
+		if (!handled) {
+			if (exit.type == KVM_CARETAKER_EXIT_IDLE)
+				reason = CARETAKER_EXIT_YIELD_IDLE;
 			break;
+		}
 
 		if (deadline_ticks && arch_caretaker_read_counter() >= deadline_ticks)
 			break;
@@ -321,7 +325,7 @@ kvm_caretaker_vcpu_run(struct kvm_caretaker_vcpu *cvcpu, u64 deadline_ticks)
 	if (enter_res != 0)
 		return CARETAKER_EXIT_ERROR;
 
-	return CARETAKER_EXIT_QUANTUM_EXPIRED;
+	return reason;
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_caretaker_vcpu_run);
 
