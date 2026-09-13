@@ -24,6 +24,7 @@
 static u32 x86_preserved_apicid[NR_CPUS] __cpu_preserved_data = {
 	[0 ... NR_CPUS - 1] = BAD_APICID,
 };
+static bool x86_preserved_x2apic __cpu_preserved_data;
 
 /*
  * Signal or wake up a preserved physical CPU via APIC ICR NMI.
@@ -37,12 +38,27 @@ void __cpu_preserved_text arch_cpu_preserved_kick(int cpu)
 		return;
 
 	apicid = x86_preserved_apicid[cpu];
+	if (apicid == BAD_APICID) {
+		if (!arch_cpu_preserved_is_active()) {
+			apicid = cpu_physical_id(cpu);
+			if (apicid == BAD_APICID)
+				apicid = cpuid_to_apicid[cpu];
+		}
+	}
 	if (apicid == BAD_APICID)
-		apicid = cpu;
+		return;
 
 	val = ((u64)apicid << 32) | APIC_DM_NMI;
 	native_wrmsrq(APIC_BASE_MSR + (APIC_ICR >> 4), val);
 }
+
+u32 arch_cpu_preserved_get_apicid(int cpu)
+{
+	if ((unsigned int)cpu < nr_cpu_ids)
+		return x86_preserved_apicid[cpu];
+	return BAD_APICID;
+}
+EXPORT_SYMBOL_GPL(arch_cpu_preserved_get_apicid);
 
 /*
  * Low-power wait in parking loop.
@@ -123,12 +139,18 @@ EXPORT_SYMBOL_GPL(arch_cpu_preserved_load_desc);
 /*
  * Disables local interrupts on the physical core and loads preserved IDT and GDT.
  */
-void __cpu_preserved_text arch_cpu_preserved_park_init(int cpu __maybe_unused)
+void __cpu_preserved_text arch_cpu_preserved_park_init(int cpu)
 {
 	u32 spiv;
 
 	local_irq_disable();
 	arch_cpu_preserved_load_desc();
+
+	if (x86_preserved_x2apic && cpu >= 0 && cpu < NR_CPUS) {
+		x86_preserved_apicid[cpu] = (u32)native_rdmsrq(APIC_BASE_MSR + (APIC_ID >> 4));
+		arch_cpu_preserved_dcache_clean((unsigned long)&x86_preserved_apicid[cpu],
+						(unsigned long)&x86_preserved_apicid[cpu] + sizeof(u32));
+	}
 
 	spiv = (u32)native_rdmsrq(APIC_BASE_MSR + (APIC_SPIV >> 4));
 	if (!(spiv & APIC_SPIV_APIC_ENABLED)) {
@@ -142,9 +164,18 @@ void arch_cpu_preserved_early_init(void)
 	int i;
 
 	x86_preserved_has_svm = boot_cpu_has(X86_FEATURE_SVM);
+	x86_preserved_x2apic = x2apic_mode != 0;
+	arch_cpu_preserved_dcache_clean((unsigned long)&x86_preserved_x2apic,
+					(unsigned long)&x86_preserved_x2apic +
+					sizeof(bool));
 
-	for (i = 0; i < nr_cpu_ids; i++)
-		x86_preserved_apicid[i] = cpuid_to_apicid[i];
+	for (i = 0; i < nr_cpu_ids; i++) {
+		u32 apicid = cpu_physical_id(i);
+
+		if (apicid == BAD_APICID)
+			apicid = cpuid_to_apicid[i];
+		x86_preserved_apicid[i] = apicid;
+	}
 	arch_cpu_preserved_dcache_clean((unsigned long)&x86_preserved_apicid,
 					(unsigned long)&x86_preserved_apicid +
 					sizeof(x86_preserved_apicid));
@@ -295,6 +326,14 @@ static void arch_cpu_preserved_set_max_perf(void)
  */
 void arch_cpu_preserved_park_on_stack(int cpu, unsigned long stack_top)
 {
+	if (cpu >= 0 && cpu < NR_CPUS) {
+		if (x86_preserved_x2apic)
+			x86_preserved_apicid[cpu] = (u32)native_rdmsrq(APIC_BASE_MSR + (APIC_ID >> 4));
+		else
+			x86_preserved_apicid[cpu] = cpu_physical_id(cpu);
+		arch_cpu_preserved_dcache_clean((unsigned long)&x86_preserved_apicid[cpu],
+						(unsigned long)&x86_preserved_apicid[cpu] + sizeof(u32));
+	}
 	arch_cpu_preserved_set_max_perf();
 	arch_cpu_preserved_call_on_stack(cpu, stack_top, arch_cpu_preserved_park_worker);
 }

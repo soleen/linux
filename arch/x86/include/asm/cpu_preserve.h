@@ -16,10 +16,12 @@ bool arch_cpu_preserved_is_active(void);
 void x86_preserved_iret_stub(void);
 void x86_preserved_iret_err_stub(void);
 void x86_preserved_apic_eoi_stub(void);
+u32 arch_cpu_preserved_get_apicid(int cpu);
 #else
 static inline void x86_virt_reset_cpu(int cpu) {}
 static inline void arch_cpu_preserved_load_desc(void) {}
 static inline bool arch_cpu_preserved_is_active(void) { return false; }
+static inline u32 arch_cpu_preserved_get_apicid(int cpu) { return (u32)-1; }
 #endif
 
 #endif /* __ASM_X86_CPU_PRESERVE_H */

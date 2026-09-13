@@ -199,8 +199,17 @@ struct caretaker_x86_page {
 	caretaker_decode_exit_fn decode_exit_fn;
 	caretaker_advance_rip_fn advance_rip_fn;
 
+	/* Caretaker exit telemetry counters */
+	u64 exits_hlt;
+	u64 exits_pause;
+	u64 exits_preempt_timer;
+	u64 exits_apic;
+	u64 exits_vmcall;
+	u64 exits_ext_intr;
+	u64 exits_other;
+
 	/* Padded to offset 0x300 */
-	u8 _pad[0x300 - 0x138 - sizeof(struct caretaker_uart) - 2 - 3 * sizeof(void *)];
+	u8 _pad[0x300 - 0x138 - sizeof(struct caretaker_uart) - 2 - 3 * sizeof(void *) - 7 * sizeof(u64)];
 
 	/* KHO-preserved Host GDT and TSS */
 	struct desc_struct gdt[GDT_ENTRIES] __aligned(16);

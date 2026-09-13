@@ -10,11 +10,13 @@
 #include <linux/kexec_handover.h>
 #include <linux/kho/abi/kvm.h>
 #include <linux/kvm_host.h>
+#include <linux/seq_file.h>
 #include <linux/smp.h>
 #include <uapi/linux/serial_reg.h>
 
 #include <asm/apic.h>
 #include <asm/cpu_entry_area.h>
+#include <asm/cpu_preserve.h>
 #include <asm/desc.h>
 #include <asm/fixmap.h>
 #include <asm/irq_vectors.h>
@@ -143,7 +145,9 @@ void kvm_x86_caretaker_signal_attach_common(struct kvm_vcpu *vcpu,
 
 	apic_id = apic->cpu_present_to_apicid(target_pcpu);
 	if (apic_id == BAD_APICID) {
-		apic_id = cpuid_to_apicid[target_pcpu];
+		apic_id = arch_cpu_preserved_get_apicid(target_pcpu);
+		if (apic_id == BAD_APICID)
+			apic_id = cpuid_to_apicid[target_pcpu];
 		if (apic_id == BAD_APICID)
 			apic_id = fallback_apic_id ? fallback_apic_id : target_pcpu;
 	}
@@ -1019,3 +1023,45 @@ void kvm_arch_vcpu_caretaker_finish(struct kvm_vcpu_luo_ser *ser)
 	}
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_caretaker_finish);
+
+static void x86_caretaker_debugfs_show_job(struct seq_file *m, void *data)
+{
+	struct caretaker_x86_page *cxp = NULL;
+	struct caretaker_cb *cb = data;
+
+	if (!data)
+		return;
+
+	if (cb->runtime_size >= sizeof(struct caretaker_x86_page) &&
+	    cb->attachment_state <= CARETAKER_KVM_ATTACHING) {
+		cxp = container_of(cb, struct caretaker_x86_page, cb);
+	} else {
+		struct kvm_vcpu *vcpu = data;
+
+		if (vcpu->arch.cb_pa) {
+			cb = phys_to_virt(__sme_clr(vcpu->arch.cb_pa));
+			cxp = container_of(cb, struct caretaker_x86_page, cb);
+		}
+	}
+
+	if (!cxp)
+		return;
+
+	seq_printf(m, "    vmentry_entries: %llu total_exits: %llu\n",
+		   cxp->vmentry_entries, cxp->total_exits);
+	seq_printf(m, "    last_exit_code: 0x%llx qual: 0x%llx rip: 0x%llx\n",
+		   cxp->last_exit_code, cxp->last_exit_qual, cxp->last_exit_rip);
+	seq_printf(m, "    exits: hlt=%llu pause=%llu preempt=%llu apic=%llu vmcall=%llu ext_intr=%llu other=%llu\n",
+		   cxp->exits_hlt, cxp->exits_pause, cxp->exits_preempt_timer,
+		   cxp->exits_apic, cxp->exits_vmcall, cxp->exits_ext_intr,
+		   cxp->exits_other);
+}
+
+static int __init x86_caretaker_debugfs_init(void)
+{
+	arch_caretaker_show_job_hook = x86_caretaker_debugfs_show_job;
+	return 0;
+}
+late_initcall(x86_caretaker_debugfs_init);
+
+static_assert(offsetof(struct caretaker_x86_page, gdt) == CXP_GDT_BASE);
