@@ -181,21 +181,25 @@ svm_caretaker_decode_exit(struct caretaker_svm_page *csp,
 		break;
 	}
 	case SVM_EXIT_HLT:
+		csp->common.exits_hlt++;
 		exit->type = KVM_CARETAKER_EXIT_IDLE;
 		if (!exit->insn_len)
 			exit->insn_len = 1;
 		break;
 	case SVM_EXIT_PAUSE:
+		csp->common.exits_pause++;
 		exit->type = KVM_CARETAKER_EXIT_INSN_STEP;
 		if (!exit->insn_len)
 			exit->insn_len = 2;
 		break;
 	case SVM_EXIT_CPUID:
+		csp->common.exits_other++;
 		exit->type = KVM_CARETAKER_EXIT_CPUID;
 		if (!exit->insn_len)
 			exit->insn_len = 2;
 		break;
 	case SVM_EXIT_MSR:
+		csp->common.exits_other++;
 		exit->type = KVM_CARETAKER_EXIT_MSR;
 		exit->msr.msr = (u32)csp->common.rcx;
 		exit->msr.is_write = (info1 != 0);
@@ -204,20 +208,29 @@ svm_caretaker_decode_exit(struct caretaker_svm_page *csp,
 		break;
 	case SVM_EXIT_INVD:
 	case SVM_EXIT_WBINVD:
+		csp->common.exits_other++;
 		exit->type = KVM_CARETAKER_EXIT_INSN_STEP;
 		if (!exit->insn_len)
 			exit->insn_len = 2;
 		break;
 	case SVM_EXIT_XSETBV:
+		csp->common.exits_other++;
+		exit->type = KVM_CARETAKER_EXIT_INSN_STEP;
+		if (!exit->insn_len)
+			exit->insn_len = 3;
+		break;
 	case SVM_EXIT_VMMCALL:
+		csp->common.exits_vmcall++;
 		exit->type = KVM_CARETAKER_EXIT_INSN_STEP;
 		if (!exit->insn_len)
 			exit->insn_len = 3;
 		break;
 	case SVM_EXIT_NPF:
+		csp->common.exits_other++;
 		exit->type = KVM_CARETAKER_EXIT_UNHANDLED;
 		break;
 	case SVM_EXIT_INTR:
+		csp->common.exits_ext_intr++;
 		kvm_x86_caretaker_disarm_timer();
 		asm volatile("sti\n\tnop\n\tcli" : : : "memory");
 		exit->type = KVM_CARETAKER_EXIT_PREEMPT_TIMER;
@@ -225,20 +238,24 @@ svm_caretaker_decode_exit(struct caretaker_svm_page *csp,
 		break;
 	case SVM_EXIT_NMI:
 	case SVM_EXIT_INIT:
+		csp->common.exits_ext_intr++;
 		exit->type = KVM_CARETAKER_EXIT_PREEMPT_TIMER;
 		exit->insn_len = 0;
 		break;
 	case SVM_EXIT_RDTSC:
+		csp->common.exits_other++;
 		exit->type = KVM_CARETAKER_EXIT_RDTSC;
 		if (!exit->insn_len)
 			exit->insn_len = 2;
 		break;
 	case SVM_EXIT_RDTSCP:
+		csp->common.exits_other++;
 		exit->type = KVM_CARETAKER_EXIT_RDTSC;
 		if (!exit->insn_len)
 			exit->insn_len = 3;
 		break;
 	default:
+		csp->common.exits_other++;
 		break;
 	}
 }
