@@ -8,6 +8,7 @@
 #include <linux/kexec_handover.h>
 #include <linux/kho/abi/cpu.h>
 #include <linux/mm.h>
+#include <linux/oncore.h>
 #include <linux/psci.h>
 #include <linux/sched/mm.h>
 #include <uapi/linux/psci.h>
