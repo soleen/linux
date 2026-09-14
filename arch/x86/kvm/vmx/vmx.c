@@ -839,13 +839,24 @@ static void __loaded_vmcs_clear(void *arg)
 	loaded_vmcs->launched = 0;
 }
 
-static void loaded_vmcs_clear(struct loaded_vmcs *loaded_vmcs)
+void loaded_vmcs_clear(struct loaded_vmcs *loaded_vmcs)
 {
 	int cpu = loaded_vmcs->cpu;
 
-	if (cpu != -1)
-		smp_call_function_single(cpu,
-			 __loaded_vmcs_clear, loaded_vmcs, 1);
+	if (cpu != -1) {
+		if (cpu_online(cpu)) {
+			smp_call_function_single(cpu,
+				 __loaded_vmcs_clear, loaded_vmcs, 1);
+		} else {
+			if (per_cpu(current_vmcs, cpu) == loaded_vmcs->vmcs)
+				per_cpu(current_vmcs, cpu) = NULL;
+			list_del_init(&loaded_vmcs->loaded_vmcss_on_cpu_link);
+			/* Pairs with smp_rmb() in vmx_vcpu_load_vmcs() */
+			smp_wmb();
+			loaded_vmcs->cpu = -1;
+			loaded_vmcs->launched = 0;
+		}
+	}
 }
 
 static bool vmx_segment_cache_test_set(struct vcpu_vmx *vmx, unsigned seg,
@@ -3090,6 +3101,7 @@ int alloc_loaded_vmcs(struct loaded_vmcs *loaded_vmcs)
 
 	vmcs_clear(loaded_vmcs->vmcs);
 
+	INIT_LIST_HEAD(&loaded_vmcs->loaded_vmcss_on_cpu_link);
 	loaded_vmcs->shadow_vmcs = NULL;
 	loaded_vmcs->hv_timer_soft_disabled = false;
 	loaded_vmcs->cpu = -1;
