@@ -6,6 +6,7 @@
 #include <linux/kexec_handover.h>
 #include <linux/mm.h>
 #include <linux/objtool.h>
+#include <linux/oncore.h>
 #include <linux/sched/mm.h>
 
 #include <asm/apic.h>
