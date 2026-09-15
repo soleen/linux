@@ -40,6 +40,31 @@ struct kvm_luo_ser {
 #define KVM_LUO_FH_COMPATIBLE	"kvm_vm_luo_v1"
 
 /**
+ * enum kvm_vcpu_luo_flags - Flags for KVM vCPU LUO preservation
+ * @KVM_VCPU_LUO_FLAG_CARETAKER: vCPU is preserved with on-core Caretaker execution.
+ */
+enum kvm_vcpu_luo_flags {
+	KVM_VCPU_LUO_FLAG_CARETAKER = BIT(0),
+};
+
+/**
+ * struct kvm_vcpu_ser - Main serialization structure for a KVM vCPU.
+ * @vcpu_id:    The ID of the virtual CPU.
+ * @flags:      Flags for vCPU preservation.
+ * @vm_token:   Token of the associated KVM VM instance.
+ * @arch_state: Preservation pointer to vCPU architectural state.
+ */
+struct kvm_vcpu_ser {
+	u32 vcpu_id;
+	u32 flags;
+	u64 vm_token;
+	DECLARE_KHOSER_PTR(arch_state, struct kvm_vcpu_arch_ser *);
+} __packed;
+
+/* The compatibility string for KVM vCPU file handler */
+#define KVM_VCPU_LUO_FH_COMPATIBLE	"kvm_vcpu_luo_v1"
+
+/**
  * struct guest_memfd_luo_folio_ser - Serialization layout for a single folio in guest_memfd.
  * @pfn:   Page Frame Number of the folio.
  * @index: Page offset of the folio within the file.
