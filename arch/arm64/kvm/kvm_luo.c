@@ -6,6 +6,7 @@
  * ARM64 KVM LUO preservation and retrieval handlers.
  */
 
+#include <linux/cpu_preserve.h>
 #include <linux/kexec_handover.h>
 #include <linux/kho/abi/kvm_arm64.h>
 #include <linux/kvm_host.h>
@@ -17,15 +18,100 @@
 #include <kvm/arm_arch_timer.h>
 #include <kvm/arm_vgic.h>
 
+#include "caretaker.h"
 #include "sys_regs.h"
 #include "vgic/vgic.h"
 
+#ifdef CONFIG_KVM_CARETAKER
+struct arm64_stage2_kho_walk {
+	struct kvm_kho_folios_ser *kp;
+	unsigned int count;
+};
+
+static int stage2_kho_visitor(const struct kvm_pgtable_visit_ctx *ctx,
+			      enum kvm_pgtable_walk_flags visit)
+{
+	struct arm64_stage2_kho_walk *w = ctx->arg;
+
+	if (kvm_pte_valid(ctx->old) && ctx->level != KVM_PGTABLE_LAST_LEVEL &&
+	    FIELD_GET(KVM_PTE_TYPE, ctx->old) == KVM_PTE_TYPE_TABLE) {
+		u64 phys = kvm_pte_to_phys(ctx->old);
+		struct page *p = phys_to_page(phys);
+
+		if (!p)
+			return 0;
+
+		if (!w->kp) {
+			w->count++;
+			return 0;
+		}
+
+		if (w->kp->nr_folios >= w->count)
+			return -ENOSPC;
+
+		if (kho_preserve_folio(page_folio(p)))
+			return -ENOMEM;
+
+		w->kp->folios_pa[w->kp->nr_folios++] = phys;
+	}
+	return 0;
+}
+#endif
+
 int kvm_arch_vm_luo_preserve(struct kvm *kvm, struct kvm_luo_ser *ser)
 {
+#ifdef CONFIG_KVM_CARETAKER
+	struct kvm_s2_mmu *mmu = &kvm->arch.mmu;
+	struct arm64_stage2_kho_walk walk = {};
+	struct kvm_pgtable_walker walker = {
+		.cb = stage2_kho_visitor,
+		.flags = KVM_PGTABLE_WALK_TABLE_PRE,
+		.arg = &walk,
+	};
+	struct kvm_kho_folios_ser *kp;
+	int ret;
+#endif
+
 	ser->type = kvm_phys_shift(&kvm->arch.mmu);
 	if (kvm_vm_is_protected(kvm))
 		ser->type |= KVM_VM_TYPE_ARM_PROTECTED;
 
+#ifdef CONFIG_KVM_CARETAKER
+	kvm->caretaker_vm = NULL;
+
+	if (mmu->pgd_phys)
+		walk.count++;
+	if (mmu->pgt) {
+		ret = kvm_pgtable_walk(mmu->pgt, 0, BIT(mmu->pgt->ia_bits), &walker);
+		if (ret)
+			return ret;
+	}
+
+	kp = kvm_kho_folios_alloc(walk.count);
+	if (IS_ERR(kp))
+		return PTR_ERR(kp);
+	walk.kp = kp;
+
+	if (mmu->pgd_phys) {
+		ret = kho_preserve_folio(page_folio(phys_to_page(mmu->pgd_phys)));
+		if (ret) {
+			kvm_kho_folios_unpreserve(kp);
+			return ret;
+		}
+		kp->folios_pa[kp->nr_folios++] = mmu->pgd_phys;
+	}
+
+	if (mmu->pgt) {
+		ret = kvm_pgtable_walk(mmu->pgt, 0, BIT(mmu->pgt->ia_bits), &walker);
+		if (ret) {
+			kvm_kho_folios_unpreserve(kp);
+			return ret;
+		}
+	}
+
+	kvm->kho_folios = kp;
+	KHOSER_STORE_PTR(ser->kho_folios, kp);
+#endif
 	return 0;
 }
 
@@ -36,6 +122,10 @@ int kvm_arch_vm_luo_retrieve(struct kvm *kvm, struct kvm_luo_ser *ser)
 
 void kvm_arch_vm_luo_unpreserve(struct kvm *kvm, struct kvm_luo_ser *ser)
 {
+#ifdef CONFIG_KVM_CARETAKER
+	if (kvm)
+		kvm->caretaker_vm = NULL;
+#endif
 }
 
 void kvm_arch_vm_luo_finish(struct kvm_luo_ser *ser)
@@ -119,6 +209,17 @@ int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_ser *ser)
 	kfree(indices);
 
 	KHOSER_STORE_PTR(ser->arch_state, state);
+
+	if (ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER) {
+		int ret = arm64_kvm_caretaker_preserve(vcpu, ser);
+
+		if (ret) {
+			kho_unpreserve_free(state);
+			ser->arch_state.phys = 0;
+			return ret;
+		}
+	}
+
 	return 0;
 }
 
@@ -186,6 +287,7 @@ int kvm_arch_vcpu_luo_retrieve(struct kvm_vcpu *vcpu, struct kvm_vcpu_ser *ser)
 
 void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_ser *ser)
 {
+	arm64_kvm_caretaker_unpreserve(ser);
 	if (ser->arch_state.phys) {
 		kho_unpreserve_free(phys_to_virt(ser->arch_state.phys));
 		ser->arch_state.phys = 0;
@@ -194,6 +296,7 @@ void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_ser *ser)
 
 void kvm_arch_vcpu_luo_finish(struct kvm_vcpu_ser *ser)
 {
+	arm64_kvm_caretaker_finish(ser);
 	if (ser->arch_state.phys) {
 		kho_restore_free(phys_to_virt(ser->arch_state.phys));
 		ser->arch_state.phys = 0;
