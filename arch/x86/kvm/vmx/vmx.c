@@ -839,7 +839,7 @@ static void __loaded_vmcs_clear(void *arg)
 	loaded_vmcs->launched = 0;
 }
 
-static void loaded_vmcs_clear(struct loaded_vmcs *loaded_vmcs)
+void loaded_vmcs_clear(struct loaded_vmcs *loaded_vmcs)
 {
 	int cpu = loaded_vmcs->cpu;
 
@@ -4867,13 +4867,21 @@ static int vmx_alloc_ipiv_pid_table(struct kvm *kvm)
 	if (kvm_vmx->pid_table)
 		return 0;
 
-	pages = alloc_pages(GFP_KERNEL_ACCOUNT | __GFP_ZERO,
+	pages = alloc_pages(GFP_KERNEL_ACCOUNT | __GFP_ZERO | __GFP_COMP,
 			    vmx_get_pid_table_order(kvm));
 	if (!pages)
 		return -ENOMEM;
 
 	kvm_vmx->pid_table = (void *)page_address(pages);
 	return 0;
+}
+
+void vmx_vm_collect_kho(struct kvm *kvm, struct kvm_mmu_kho_pages *acc)
+{
+	struct kvm_vmx *kvm_vmx = to_kvm_vmx(kvm);
+
+	if (kvm_vmx->pid_table)
+		kvm_mmu_kho_add(acc, virt_to_page(kvm_vmx->pid_table));
 }
 
 int vmx_vcpu_precreate(struct kvm *kvm)
