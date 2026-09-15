@@ -4,16 +4,22 @@
  */
 #include <linux/arm-smccc.h>
 #include <linux/cpu_preserve.h>
+#include <linux/io.h>
+#include <linux/ioport.h>
 #include <linux/irqchip/arm-gic-v3.h>
 #include <linux/kexec_handover.h>
 #include <linux/kho/abi/cpu.h>
+#include <linux/kvm_host.h>
 #include <linux/mm.h>
+#include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/psci.h>
 #include <linux/sched/mm.h>
 #include <uapi/linux/psci.h>
 
 #include <asm/barrier.h>
 #include <asm/cacheflush.h>
+#include <asm/caretaker.h>
 #include <asm/cpu_ops.h>
 #include <asm/daifflags.h>
 #include <asm/kernel-pgtable.h>
@@ -24,6 +30,41 @@
 #include <asm/trans_pgd.h>
 #include <asm/virt.h>
 
+#define CARETAKER_RWP_TIMEOUT_COUNT	1000000
+#define CARETAKER_SGI_MASK		GENMASK(15, 0)
+#define CARETAKER_HYP_TIMER_PPI		26
+#define CARETAKER_HYP_VIRT_TIMER_PPI	30
+#define GICR_INT_PRIORITY(intid)	(GICR_IPRIORITYR0 + (intid))
+#define CARETAKER_MAX_RDIST_REGIONS	8
+
+#define MPIDR_TO_SGI_AFFINITY(cluster_id, level) \
+	(MPIDR_AFFINITY_LEVEL(cluster_id, level) \
+		<< ICC_SGI1R_AFFINITY_## level ##_SHIFT)
+#define MPIDR_TO_SGI_CLUSTER_ID(mpidr)	((mpidr) & ~0xFUL)
+#define MPIDR_RS(mpidr)			(((mpidr) & 0xf0ULL) >> 4)
+#define MPIDR_TO_SGI_RS(mpidr)		(MPIDR_RS(mpidr) << ICC_SGI1R_RS_SHIFT)
+
+struct caretaker_rdist_region {
+	phys_addr_t	pa;
+	void __iomem	*va;
+	size_t		size;
+};
+
+struct caretaker_gic_state {
+	void __iomem			*cpu_rdist[NR_CPUS];
+	struct caretaker_rdist_region	regions[CARETAKER_MAX_RDIST_REGIONS];
+	int				nr_regions;
+};
+
+static enum arm_smccc_conduit arm64_psci_conduit __cpu_preserved_data;
+phys_addr_t arm64_caretaker_pgd_pa __cpu_preserved_data;
+static u64 arm64_cpu_mpidr[NR_CPUS] __cpu_preserved_data;
+static struct caretaker_gic_state caretaker_gic __cpu_preserved_data;
+__cpu_preserved_data bool arm64_caretaker_has_ptrauth;
+EXPORT_SYMBOL_GPL(arm64_caretaker_has_ptrauth);
+
+static void arm64_caretaker_gic_init(void);
+
 /*
  * Signal or wake up a preserved physical CPU via SEV.
  */
@@ -31,6 +72,7 @@ void __cpu_preserved_text arch_cpu_preserved_kick(int cpu)
 {
 	dsb(ishst);
 	sev();
+	gicv3_caretaker_kick_cpu(cpu);
 	isb();
 }
 
@@ -41,10 +83,6 @@ void __cpu_preserved_text arch_cpu_preserved_park_wait(void)
 {
 	wfe();
 }
-
-static enum arm_smccc_conduit arm64_psci_conduit __cpu_preserved_data;
-phys_addr_t arm64_caretaker_pgd_pa __cpu_preserved_data;
-static u64 arm64_cpu_mpidr[NR_CPUS] __cpu_preserved_data;
 
 int __cpu_preserved_text arch_cpu_preserved_mpidr_to_cpu(u64 mpidr)
 {
@@ -57,6 +95,265 @@ int __cpu_preserved_text arch_cpu_preserved_mpidr_to_cpu(u64 mpidr)
 	return -EINVAL;
 }
 EXPORT_SYMBOL_GPL(arch_cpu_preserved_mpidr_to_cpu);
+
+__cpu_preserved_text static void __iomem *gicv3_get_rdist_for_cpu(int cpu)
+{
+	if (cpu < 0) {
+		u64 mpidr = read_sysreg(mpidr_el1) & MPIDR_HWID_BITMASK;
+
+		cpu = arch_cpu_preserved_mpidr_to_cpu(mpidr);
+	}
+	if (cpu >= 0 && cpu < ARRAY_SIZE(caretaker_gic.cpu_rdist))
+		return caretaker_gic.cpu_rdist[cpu];
+	return NULL;
+}
+
+__cpu_preserved_text static inline void
+gicv3_caretaker_wait_for_rwp(void __iomem *base, u32 bit)
+{
+	int count = CARETAKER_RWP_TIMEOUT_COUNT;
+
+	while (count-- > 0) {
+		if (!(readl_relaxed(base + GICR_CTLR) & bit))
+			return;
+		cpu_relax();
+	}
+}
+
+__cpu_preserved_text void gicv3_caretaker_clear_active_priorities(void)
+{
+	u32 ctlr = read_sysreg_s(SYS_ICC_CTLR_EL1);
+	u32 pribits = ((ctlr & ICC_CTLR_EL1_PRI_BITS_MASK) >>
+		       ICC_CTLR_EL1_PRI_BITS_SHIFT) + 1;
+
+	switch (pribits) {
+	case 8:
+	case 7:
+		write_sysreg_s(0, SYS_ICC_AP1R3_EL1);
+		write_sysreg_s(0, SYS_ICC_AP1R2_EL1);
+		fallthrough;
+	case 6:
+		write_sysreg_s(0, SYS_ICC_AP1R1_EL1);
+		fallthrough;
+	case 5:
+	case 4:
+	default:
+		write_sysreg_s(0, SYS_ICC_AP1R0_EL1);
+		break;
+	}
+	isb();
+}
+EXPORT_SYMBOL_GPL(gicv3_caretaker_clear_active_priorities);
+
+__cpu_preserved_text void gicv3_caretaker_enable_sgi(void)
+{
+	void __iomem *ptr = gicv3_get_rdist_for_cpu(-1);
+
+	if (ptr) {
+		void __iomem *rbase = ptr + SZ_64K;
+
+		writel_relaxed(~0U, rbase + GICR_IGROUPR0);
+		writel_relaxed(0, rbase + GICR_IGRPMODR0);
+		writeb_relaxed(0x00, rbase + GICR_INT_PRIORITY(0));
+		writeb_relaxed(0x00, rbase + GICR_INT_PRIORITY(CARETAKER_HYP_TIMER_PPI));
+		writeb_relaxed(0x00, rbase + GICR_INT_PRIORITY(CARETAKER_HYP_VIRT_TIMER_PPI));
+		writel_relaxed(CARETAKER_SGI_MASK |
+			       BIT(CARETAKER_HYP_TIMER_PPI) |
+			       BIT(CARETAKER_HYP_VIRT_TIMER_PPI),
+			       rbase + GICR_ISENABLER0);
+		writel_relaxed(~0U, rbase + GICR_ICACTIVER0);
+		gicv3_caretaker_wait_for_rwp(ptr, GICR_CTLR_RWP);
+	}
+
+	write_sysreg_s(0, SYS_ICC_BPR1_EL1);
+	gicv3_caretaker_clear_active_priorities();
+}
+EXPORT_SYMBOL_GPL(gicv3_caretaker_enable_sgi);
+
+__cpu_preserved_text void gicv3_caretaker_clear_sgi(void)
+{
+	void __iomem *ptr = gicv3_get_rdist_for_cpu(-1);
+
+	if (ptr) {
+		void __iomem *rbase = ptr + SZ_64K;
+
+		writel_relaxed(~0U, rbase + GICR_ICPENDR0);
+		writel_relaxed(~0U, rbase + GICR_ICACTIVER0);
+		gicv3_caretaker_wait_for_rwp(ptr, GICR_CTLR_RWP);
+	}
+}
+EXPORT_SYMBOL_GPL(gicv3_caretaker_clear_sgi);
+
+__cpu_preserved_text void gicv3_caretaker_kick_cpu(int cpu)
+{
+	void __iomem *ptr;
+	u64 mpidr, cluster_id;
+	u16 tlist;
+
+	if (cpu < 0 || cpu >= ARRAY_SIZE(arm64_cpu_mpidr))
+		return;
+	if (!arch_cpu_preserved_is_active() && !caretaker_gic.nr_regions)
+		arm64_caretaker_gic_init();
+
+	mpidr = arm64_cpu_mpidr[cpu];
+	if ((mpidr & MPIDR_HWID_BITMASK) == (read_sysreg(mpidr_el1) & MPIDR_HWID_BITMASK))
+		return;
+
+	ptr = gicv3_get_rdist_for_cpu(cpu);
+	if (ptr) {
+		void __iomem *sgi_base = ptr + SZ_64K;
+		u32 val = readl_relaxed(ptr + GICR_WAKER);
+
+		if (val & GICR_WAKER_ProcessorSleep) {
+			int count = CARETAKER_RWP_TIMEOUT_COUNT;
+
+			val &= ~GICR_WAKER_ProcessorSleep;
+			writel_relaxed(val, ptr + GICR_WAKER);
+			while (count-- > 0) {
+				val = readl_relaxed(ptr + GICR_WAKER);
+				if (!(val & GICR_WAKER_ChildrenAsleep))
+					break;
+				cpu_relax();
+			}
+		}
+
+		writel_relaxed(~0U, sgi_base + GICR_IGROUPR0);
+		writel_relaxed(0, sgi_base + GICR_IGRPMODR0);
+		writel_relaxed(0, sgi_base + GICR_INT_PRIORITY(0));
+		writel_relaxed(0, sgi_base + GICR_INT_PRIORITY(4));
+		writel_relaxed(0, sgi_base + GICR_INT_PRIORITY(8));
+		writel_relaxed(0, sgi_base + GICR_INT_PRIORITY(12));
+		writel_relaxed(CARETAKER_SGI_MASK | BIT(CARETAKER_HYP_TIMER_PPI),
+			       sgi_base + GICR_ISENABLER0);
+		gicv3_caretaker_wait_for_rwp(ptr, GICR_CTLR_RWP);
+	}
+
+	cluster_id = MPIDR_TO_SGI_CLUSTER_ID(mpidr);
+	tlist = 1 << (mpidr & 0xf);
+
+	dsb(ishst);
+	{
+		u64 val = (MPIDR_TO_SGI_AFFINITY(cluster_id, 3) |
+			   MPIDR_TO_SGI_AFFINITY(cluster_id, 2) |
+			   (0ULL << ICC_SGI1R_SGI_ID_SHIFT) |
+			   MPIDR_TO_SGI_AFFINITY(cluster_id, 1) |
+			   MPIDR_TO_SGI_RS(cluster_id) |
+			   ((u64)tlist << ICC_SGI1R_TARGET_LIST_SHIFT));
+
+		write_sysreg_s(val, SYS_ICC_SGI1R_EL1);
+	}
+	isb();
+}
+EXPORT_SYMBOL_GPL(gicv3_caretaker_kick_cpu);
+
+static void arm64_add_gicr_region(phys_addr_t pa, size_t size, u64 stride)
+{
+	void __iomem *va, *ptr;
+	size_t map_size;
+	int i;
+
+	for (i = 0; i < caretaker_gic.nr_regions; i++)
+		if (caretaker_gic.regions[i].pa == pa)
+			return;
+
+	if (caretaker_gic.nr_regions >= ARRAY_SIZE(caretaker_gic.regions))
+		return;
+
+	map_size = max_t(size_t, size, nr_cpu_ids * (stride ? : SZ_128K));
+	va = ioremap(pa, map_size);
+	if (!va)
+		return;
+
+	i = caretaker_gic.nr_regions++;
+	caretaker_gic.regions[i].pa = pa;
+	caretaker_gic.regions[i].va = va;
+	caretaker_gic.regions[i].size = map_size;
+
+	ptr = va;
+	do {
+		u64 typer = readq_relaxed(ptr + GICR_TYPER);
+		u32 aff = typer >> 32;
+		int cpu;
+		bool last = !!(typer & GICR_TYPER_LAST);
+
+		for_each_possible_cpu(cpu) {
+			u64 mpidr = cpu_logical_map(cpu);
+			u32 cpu_aff = (MPIDR_AFFINITY_LEVEL(mpidr, 3) << 24) |
+				      (MPIDR_AFFINITY_LEVEL(mpidr, 2) << 16) |
+				      (MPIDR_AFFINITY_LEVEL(mpidr, 1) << 8) |
+				      MPIDR_AFFINITY_LEVEL(mpidr, 0);
+			if (aff == cpu_aff)
+				caretaker_gic.cpu_rdist[cpu] = ptr;
+		}
+
+		if (stride) {
+			ptr += stride;
+		} else {
+			ptr += SZ_64K * 2;
+			if (typer & GICR_TYPER_VLPIS)
+				ptr += SZ_64K * 2;
+		}
+		if (last)
+			break;
+	} while ((ptr - va) < map_size);
+
+	cpu_preserved_clean(&caretaker_gic);
+}
+
+static void arm64_discover_gicr_res(struct resource *res)
+{
+	for (; res; res = res->sibling) {
+		if (res->name && !strcmp(res->name, "GICR"))
+			arm64_add_gicr_region(res->start, resource_size(res), 0);
+		if (res->child)
+			arm64_discover_gicr_res(res->child);
+	}
+}
+
+static void arm64_caretaker_gic_init(void)
+{
+	struct device_node *node;
+
+	if (caretaker_gic.nr_regions > 0 || arch_cpu_preserved_is_active())
+		return;
+
+	node = of_find_compatible_node(NULL, NULL, "arm,gic-v3");
+	if (node) {
+		u32 nr_redist_regions = 1;
+		u64 stride = 0;
+		int i;
+
+		of_property_read_u32(node, "#redistributor-regions",
+				     &nr_redist_regions);
+		of_property_read_u64(node, "redistributor-stride", &stride);
+		for (i = 0; i < nr_redist_regions; i++) {
+			struct resource res;
+
+			if (of_address_to_resource(node, 1 + i, &res) == 0)
+				arm64_add_gicr_region(res.start,
+						      resource_size(&res),
+						      stride);
+		}
+		of_node_put(node);
+	}
+
+	if (caretaker_gic.nr_regions == 0)
+		arm64_discover_gicr_res(&iomem_resource);
+}
+
+int gicv3_caretaker_get_redist_region(int idx, phys_addr_t *pa,
+				      unsigned long *va, size_t *size)
+{
+	arm64_caretaker_gic_init();
+	if (idx < 0 || idx >= caretaker_gic.nr_regions)
+		return -ENOENT;
+
+	*pa = caretaker_gic.regions[idx].pa;
+	*va = (unsigned long)caretaker_gic.regions[idx].va;
+	*size = caretaker_gic.regions[idx].size;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(gicv3_caretaker_get_redist_region);
 
 bool __cpu_preserved_text arch_cpu_preserved_is_active(void)
 {
@@ -237,10 +534,10 @@ int arch_cpu_preserved_setup_buffer(struct page *text_page,
 	for (i = 0; i < nr_cpu_ids; i++)
 		arm64_cpu_mpidr[i] = cpu_logical_map(i);
 	cpu_preserved_clean(&arm64_cpu_mpidr);
+	arm64_caretaker_gic_init();
 
 	return 0;
 }
-
 
 /*
  * Masks DAIF interrupts and enables GIC CPU interface for WFx wakeups.
@@ -258,10 +555,17 @@ void __cpu_preserved_text arch_cpu_preserved_park_init(int cpu)
 	local_daif_mask();
 	cpu_preserved_inval(&arm64_psci_conduit);
 	cpu_preserved_inval(&arm64_cpu_mpidr);
+	cpu_preserved_inval(&caretaker_gic);
 	if (!pgd_pa) {
 		cpu_preserved_inval(&arm64_caretaker_pgd_pa);
 		pgd_pa = READ_ONCE(arm64_caretaker_pgd_pa);
 	}
+
+#if IS_ENABLED(CONFIG_KVM_CARETAKER)
+	write_sysreg((unsigned long)caretaker_hyp_vector, vbar_el1);
+	write_sysreg_s((unsigned long)caretaker_hyp_vector, SYS_VBAR_EL2);
+	isb();
+#endif
 
 	write_sysreg(0, ttbr0_el1);
 	if (pgd_pa)
@@ -270,6 +574,8 @@ void __cpu_preserved_text arch_cpu_preserved_park_init(int cpu)
 	arm64_flush_host_tlb_local();
 
 	write_sysreg_s(0xff, SYS_ICC_PMR_EL1);
+	isb();
+
 	write_sysreg_s(1, SYS_ICC_IGRPEN1_EL1);
 	isb();
 }
@@ -281,12 +587,17 @@ void arch_cpu_preserved_early_init(void)
 	for (c = 0; c < ARRAY_SIZE(arm64_cpu_mpidr); c++)
 		arm64_cpu_mpidr[c] = cpu_logical_map(c);
 	cpu_preserved_clean(&arm64_cpu_mpidr);
+	arm64_caretaker_gic_init();
 
 	cpu_preserved_inval(&arm64_psci_conduit);
 	if (arm64_psci_conduit == SMCCC_CONDUIT_NONE) {
 		arm64_psci_conduit = arm_smccc_1_1_get_conduit();
 		cpu_preserved_clean(&arm64_psci_conduit);
 	}
+
+	arm64_caretaker_has_ptrauth = IS_ENABLED(CONFIG_ARM64_PTR_AUTH) &&
+				      system_has_full_ptr_auth();
+	cpu_preserved_clean(&arm64_caretaker_has_ptrauth);
 }
 EXPORT_SYMBOL_GPL(arch_cpu_preserved_early_init);
 
