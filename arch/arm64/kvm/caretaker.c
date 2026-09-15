@@ -778,3 +778,357 @@ arm64_caretaker_detach_serialize(struct caretaker_arm64_page *cap)
 		state->regs.sp_el1 = ctxt_sys_reg(&cap->ctx.ctxt, SP_EL1);
 		state->regs.elr_el1 = ctxt_sys_reg(&cap->ctx.ctxt, ELR_EL1);
 		state->regs.spsr[KVM_SPSR_EL1] = ctxt_sys_reg(&cap->ctx.ctxt, SPSR_EL1);
+		state->regs.spsr[KVM_SPSR_ABT] = cap->ctx.ctxt.spsr_abt;
+		state->regs.spsr[KVM_SPSR_UND] = cap->ctx.ctxt.spsr_und;
+		state->regs.spsr[KVM_SPSR_IRQ] = cap->ctx.ctxt.spsr_irq;
+		state->regs.spsr[KVM_SPSR_FIQ] = cap->ctx.ctxt.spsr_fiq;
+		oncore_memcpy(&state->regs.fp_regs, &cap->ctx.ctxt.fp_regs,
+			      sizeof(state->regs.fp_regs));
+
+		arm64_caretaker_update_sysreg(state, SYS_SCTLR_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, SCTLR_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_CPACR_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, CPACR_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_TTBR0_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, TTBR0_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_TTBR1_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, TTBR1_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_TCR_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, TCR_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_ESR_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, ESR_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_AFSR0_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, AFSR0_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_AFSR1_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, AFSR1_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_FAR_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, FAR_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_MAIR_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, MAIR_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_VBAR_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, VBAR_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_CONTEXTIDR_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, CONTEXTIDR_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_AMAIR_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, AMAIR_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_CNTKCTL_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, CNTKCTL_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_PAR_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, PAR_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_TPIDR_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, TPIDR_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_TPIDR_EL0,
+					      ctxt_sys_reg(&cap->ctx.ctxt, TPIDR_EL0));
+		arm64_caretaker_update_sysreg(state, SYS_TPIDRRO_EL0,
+					      ctxt_sys_reg(&cap->ctx.ctxt, TPIDRRO_EL0));
+		arm64_caretaker_update_sysreg(state, SYS_SP_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, SP_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_ELR_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, ELR_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_SPSR_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, SPSR_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_MDSCR_EL1,
+					      ctxt_sys_reg(&cap->ctx.ctxt, MDSCR_EL1));
+		arm64_caretaker_update_sysreg(state, SYS_CNTV_CVAL_EL0,
+					      cap->ctx.cntv_cval_el0);
+		arm64_caretaker_update_sysreg(state, SYS_CNTV_CTL_EL0,
+					      cap->ctx.cntv_ctl_el0);
+		cpu_preserved_clean_sz(state, cap->abi.arch_state_size);
+	}
+
+	cpu_preserved_clean(&cap->abi);
+}
+
+static void arm64_caretaker_sync_vcpu(struct kvm_vcpu *vcpu,
+				      void *data)
+{
+	struct kvm_arm64_caretaker_abi *abi = data;
+	int t;
+
+	/* Sync handover ABI prefix back into incoming vcpu */
+	vcpu->arch.hcr_el2 = abi->hcr_el2;
+	vcpu->arch.mdcr_el2 = abi->mdcr_el2;
+	vcpu->arch.cflags = abi->cflags;
+
+	if (abi->vgic_initialized) {
+		int i;
+
+		vcpu->arch.vgic_cpu.vgic_v3.used_lrs = abi->used_lrs;
+		vcpu->arch.vgic_cpu.vgic_v3.vgic_hcr = abi->vgic_hcr;
+		vcpu->arch.vgic_cpu.vgic_v3.vgic_vmcr = abi->vgic_vmcr;
+		for (i = 0; i < 4; i++) {
+			vcpu->arch.vgic_cpu.vgic_v3.vgic_ap0r[i] = abi->vgic_ap0r[i];
+			vcpu->arch.vgic_cpu.vgic_v3.vgic_ap1r[i] = abi->vgic_ap1r[i];
+		}
+		for (i = 0; i < 16; i++)
+			vcpu->arch.vgic_cpu.vgic_v3.vgic_lr[i] = abi->vgic_lr[i];
+	}
+
+	{
+		struct arch_timer_context *vtimer = vcpu_vtimer(vcpu);
+		u64 cval = __vcpu_sys_reg(vcpu, CNTV_CVAL_EL0);
+		u64 ctl = __vcpu_sys_reg(vcpu, CNTV_CTL_EL0);
+
+		timer_set_offset(vtimer, abi->cntvoff_el2);
+		write_sysreg(abi->cntvoff_el2, cntvoff_el2);
+		write_sysreg_el0(cval, SYS_CNTV_CVAL);
+		write_sysreg_el0(ctl, SYS_CNTV_CTL);
+		isb();
+	}
+
+	vcpu_set_flag(vcpu, VCPU_INITIALIZED);
+
+	for (t = 0; t < NR_KVM_TIMERS; t++)
+		vcpu->arch.timer_cpu.timers[t].loaded = false;
+
+	kvm_make_request(KVM_REQ_IRQ_PENDING, vcpu);
+}
+
+static __caretaker_text void
+arm64_caretaker_op_pre_run(void *data)
+{
+	struct caretaker_arm64_page *cap = data;
+
+	local_daif_mask();
+	arm64_caretaker_save_ptrauth(&cap->ptrauth_keys);
+
+	/* Pre-job: load guest context */
+	cpu_preserved_inval(cap);
+
+	arm64_caretaker_load_sysregs(&cap->ctx.ctxt);
+
+	if (cap->ctx.vgic_initialized)
+		caretaker_vgic_v3_restore(cap);
+
+	write_sysreg(cap->ctx.cntvoff_el2, cntvoff_el2);
+	write_sysreg_el0(cap->ctx.cntv_cval_el0, SYS_CNTV_CVAL);
+	write_sysreg_el0(cap->ctx.cntv_ctl_el0, SYS_CNTV_CTL);
+	isb();
+
+	if (cap->ctx.vtcr_el2 && cap->ctx.vttbr_el2) {
+		write_sysreg(cap->ctx.vtcr_el2, vtcr_el2);
+		write_sysreg(cap->ctx.vttbr_el2, vttbr_el2);
+		asm(ALTERNATIVE("nop", "isb", ARM64_WORKAROUND_SPECULATIVE_AT));
+		__tlbi(vmalle1);
+		asm volatile("ic iallu");
+		dsb(nsh);
+		isb();
+	}
+
+	write_sysreg(CPACR_EL1_FPEN_EL0EN | CPACR_EL1_FPEN_EL1EN |
+		     CPACR_EL1_ZEN_EL0EN | CPACR_EL1_ZEN_EL1EN,
+		     cpacr_el1);
+	isb();
+
+	fpsimd_load_state(&cap->ctx.ctxt.fp_regs);
+
+	gicv3_caretaker_enable_sgi();
+	write_sysreg_s(ICC_CTLR_EL1_EOImode_drop, SYS_ICC_CTLR_EL1);
+	write_sysreg_s(ICC_SRE_EL1_SRE, SYS_ICC_SRE_EL1);
+	write_sysreg_s(0, SYS_ICC_BPR1_EL1);
+	gicv3_caretaker_clear_active_priorities();
+	write_sysreg_s(ICC_PMR_EL1_MASK, SYS_ICC_PMR_EL1);
+	write_sysreg_s(ICC_IGRPEN1_EL1_MASK, SYS_ICC_IGRPEN1_EL1);
+	caretaker_gic_drain_iar();
+	dsb(sy);
+	isb();
+}
+
+static __caretaker_text void
+arm64_caretaker_op_post_run(void *data)
+{
+	struct caretaker_arm64_page *cap = data;
+	phys_addr_t pgd_pa;
+	int cpu = cap->cb.pcpu_id;
+
+	/* Post-run: restore host hypervisor mode then save guest context */
+	write_sysreg_s(0, SYS_CNTHP_CTL_EL2);
+	caretaker_restore_host_el2();
+
+	fpsimd_save_state(&cap->ctx.ctxt.fp_regs);
+
+	cap->ctx.cntv_cval_el0 = read_sysreg_el0(SYS_CNTV_CVAL);
+	cap->ctx.cntv_ctl_el0 = read_sysreg_el0(SYS_CNTV_CTL);
+
+	if (cap->ctx.vgic_initialized)
+		caretaker_vgic_v3_save(&cap->ctx.vgic_v3);
+
+	arm64_caretaker_save_sysregs(&cap->ctx.ctxt);
+
+	{
+		struct cpu_preserved_stack_context *sctx =
+			cpu_preserved_get_stack_context();
+
+		if (sctx && sctx->session_pgd_pa)
+			pgd_pa = sctx->session_pgd_pa;
+		else
+			pgd_pa = cpu_preserved_get_pgd(cpu);
+
+		if (!pgd_pa)
+			pgd_pa = READ_ONCE(arm64_caretaker_pgd_pa);
+
+		write_sysreg(0, ttbr0_el1);
+		if (pgd_pa && read_sysreg(ttbr1_el1) != pgd_pa) {
+			write_sysreg(pgd_pa, ttbr1_el1);
+			isb();
+			arm64_flush_host_tlb_local();
+		}
+	}
+
+	cpu_preserved_clean(cap);
+
+	if (READ_ONCE(cap->cb.attachment_state) >= KVM_CARETAKER_ATTACHING ||
+	    kvm_caretaker_should_exit(&cap->vcpu)) {
+		local_daif_mask();
+		isb();
+
+		caretaker_gic_drain_iar();
+		gicv3_caretaker_clear_active_priorities();
+		write_sysreg_s(0, SYS_ICC_IGRPEN1_EL1);
+		write_sysreg_s(0, SYS_ICC_PMR_EL1);
+		write_sysreg_s(0, SYS_ICC_BPR1_EL1);
+		gicv3_caretaker_clear_sgi();
+		dsb(sy);
+		isb();
+	}
+
+	arm64_caretaker_detach_serialize(cap);
+
+	arm64_caretaker_restore_ptrauth(&cap->ptrauth_keys);
+	caretaker_restore_host_el2();
+}
+
+static struct kvm_caretaker_ops arm64_caretaker_ops __cpu_preserved_data = {
+	.enter_guest = arm64_caretaker_op_enter,
+	.decode_exit = arm64_caretaker_op_decode_exit,
+	.handle_arch_exit = arm64_caretaker_op_handle_exit,
+	.advance_rip = arm64_caretaker_op_advance_rip,
+	.arm_timer = arm64_caretaker_op_arm_timer,
+	.disarm_timer = arm64_caretaker_op_disarm_timer,
+	.pre_run = arm64_caretaker_op_pre_run,
+	.post_run = arm64_caretaker_op_post_run,
+	.sync_vcpu = arm64_caretaker_sync_vcpu,
+};
+
+static __caretaker_text enum oncore_exit_reason
+caretaker_arch_run_page(struct caretaker_arm64_page *cap, u64 deadline_ticks)
+{
+	enum oncore_exit_reason reason;
+	int cpu;
+
+	if (!cap)
+		return ONCORE_EXIT_ERROR;
+
+	cpu_preserved_inval(&cap->cb);
+	cpu = cap->cb.pcpu_id;
+	if (cpu < 0 || cpu >= ARRAY_SIZE(arm64_caretaker_faults))
+		cpu = arm64_caretaker_get_pcpu();
+
+	if (READ_ONCE(cap->cb.attachment_state) == KVM_CARETAKER_ATTACHING ||
+	    cpu_preserved_should_exit(cpu)) {
+		arm64_caretaker_detach_serialize(cap);
+		WRITE_ONCE(cap->cb.attachment_state, KVM_CARETAKER_ATTACHED);
+		cpu_preserved_clean(&cap->cb);
+		return ONCORE_EXIT_ATTACH_SIGNALED;
+	}
+
+	cap->cb.pcpu_id = cpu;
+	cap->cb.attachment_state = KVM_CARETAKER_DETACHED;
+	cpu_preserved_clean(&cap->cb);
+
+	cap->vcpu.ops = &arm64_caretaker_ops;
+	cap->vcpu.arch_data = cap;
+
+	reason = kvm_caretaker_vcpu_run(&cap->vcpu, deadline_ticks);
+
+	WRITE_ONCE(cap->vcpu.running, 0);
+	cpu_preserved_clean(&cap->vcpu.running);
+
+	if (reason == ONCORE_EXIT_ATTACH_SIGNALED ||
+	    reason == ONCORE_EXIT_ERROR ||
+	    READ_ONCE(cap->cb.attachment_state) == KVM_CARETAKER_ATTACHING) {
+		arm64_caretaker_detach_serialize(cap);
+		WRITE_ONCE(cap->cb.attachment_state, KVM_CARETAKER_ATTACHED);
+		cpu_preserved_clean(&cap->cb);
+	}
+
+	return reason;
+}
+
+__caretaker_text enum oncore_exit_reason
+kvm_arch_vcpu_caretaker_run(void *data, u64 deadline_ticks)
+{
+	struct kvm_caretaker_cb *cb = data;
+
+	/*
+	 * @data is always a struct kvm_caretaker_cb: kvm_caretaker_vcpu_preserve()
+	 * installs it with oncore_job_set_data() before activating the job.
+	 */
+	if (!cb)
+		return ONCORE_EXIT_ERROR;
+
+	return caretaker_arch_run_page(container_of(cb,
+						    struct caretaker_arm64_page,
+						    cb),
+				       deadline_ticks);
+}
+
+void *kvm_arch_vcpu_caretaker_data(struct kvm_vcpu *vcpu)
+{
+	if (!vcpu || !vcpu->caretaker.cb.runtime_pa)
+		return NULL;
+	return phys_to_virt(vcpu->caretaker.cb.runtime_pa);
+}
+
+void kvm_arch_vcpu_luo_pre_retrieve_caretaker(struct kvm_vcpu *vcpu,
+					      struct kvm_vcpu_luo_ser *ser)
+{
+	if ((ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER) && ser->cb.phys) {
+		struct kvm_arm64_caretaker_abi *abi = phys_to_virt(ser->cb.phys);
+		int pcpu = abi->cb.pcpu_id;
+
+		if (pcpu >= 0) {
+			kvm_caretaker_wait_for_attach(&abi->cb, pcpu, NULL);
+			cpu_preserved_inval(abi);
+			if (abi->arch_state_pa && abi->arch_state_size)
+				cpu_preserved_inval_sz(phys_to_virt(abi->arch_state_pa),
+						       abi->arch_state_size);
+		}
+	}
+}
+
+void kvm_arch_vcpu_luo_attach_caretaker(struct kvm_vcpu *vcpu,
+					struct kvm_vcpu_luo_ser *ser)
+{
+	if ((ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER) && ser->cb.phys) {
+		struct kvm_arm64_caretaker_abi *abi = phys_to_virt(ser->cb.phys);
+
+		arm64_caretaker_sync_vcpu(vcpu, abi);
+		kvm_caretaker_post_attach_vcpu(vcpu, NULL);
+		return;
+	}
+
+	kvm_caretaker_post_attach_vcpu(vcpu, NULL);
+}
+
+void arm64_kvm_caretaker_unpreserve(struct kvm_vcpu_luo_ser *ser)
+{
+	if (ser->cb.phys) {
+		struct kvm_caretaker_cb *cb = phys_to_virt(ser->cb.phys);
+
+		if (cb->runtime_pa)
+			kho_unpreserve_free(phys_to_virt(cb->runtime_pa));
+		ser->cb.phys = 0;
+	}
+}
+
+void arm64_kvm_caretaker_finish(struct kvm_vcpu_luo_ser *ser)
+{
+	if (ser->cb.phys) {
+		struct kvm_caretaker_cb *cb = phys_to_virt(ser->cb.phys);
+
+		if (cb->runtime_pa)
+			kho_restore_free(phys_to_virt(cb->runtime_pa));
+		ser->cb.phys = 0;
+	}
+}

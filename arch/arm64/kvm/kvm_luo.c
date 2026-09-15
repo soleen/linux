@@ -5,6 +5,7 @@
  * ARM64 KVM LUO preservation and retrieval handlers.
  */
 
+#include <linux/cpu_preserve.h>
 #include <linux/kexec_handover.h>
 #include <linux/kho/abi/kvm.h>
 #include <linux/kvm_host.h>
@@ -16,17 +17,37 @@
 #include <kvm/arm_arch_timer.h>
 #include <kvm/arm_vgic.h>
 
+#include "caretaker.h"
 #include "sys_regs.h"
 #include "vgic/vgic.h"
 
 
 int kvm_arch_vm_luo_preserve(struct kvm *kvm, struct kvm_luo_ser *ser)
 {
+#ifdef CONFIG_KVM_CARETAKER
+	unsigned int nr_vcpus = kvm->created_vcpus ? kvm->created_vcpus : 1;
+	struct caretaker_arm64_vm *vm;
+	size_t sz;
+#endif
+
 	ser->type = kvm_phys_shift(&kvm->arch.mmu);
 	if (kvm_vm_is_protected(kvm))
 		ser->type |= KVM_VM_TYPE_ARM_PROTECTED;
 
+#ifdef CONFIG_KVM_CARETAKER
+	sz = struct_size(vm, vcpus, nr_vcpus);
+	vm = kho_alloc_preserve(sz);
+	if (IS_ERR(vm))
+		return PTR_ERR(vm);
+
+	memset(vm, 0, sz);
+	vm->nr_vcpus = nr_vcpus;
+	vm->max_vcpus = nr_vcpus;
+	kvm->arch.caretaker_vm = vm;
+	ser->arch_state.phys = virt_to_phys(vm);
+#else
 	ser->arch_state.phys = 0;
+#endif
 	return 0;
 }
 
@@ -37,10 +58,32 @@ int kvm_arch_vm_luo_retrieve(struct kvm *kvm, struct kvm_luo_ser *ser)
 
 void kvm_arch_vm_luo_unpreserve(struct kvm *kvm, struct kvm_luo_ser *ser)
 {
+#ifdef CONFIG_KVM_CARETAKER
+	/*
+	 * Clear the back-pointer before freeing: the VM stays alive after a
+	 * cancelled live update, and every caretaker path checks
+	 * kvm->arch.caretaker_vm for NULL rather than for validity.
+	 */
+	kvm->arch.caretaker_vm = NULL;
+	if (ser->arch_state.phys) {
+		kho_unpreserve_free(phys_to_virt(ser->arch_state.phys));
+		ser->arch_state.phys = 0;
+	}
+#endif
 }
 
 void kvm_arch_vm_luo_finish(struct kvm_luo_ser *ser)
 {
+#ifdef CONFIG_KVM_CARETAKER
+	/*
+	 * No struct kvm here: finish() runs in the new kernel for a VM that was
+	 * never reclaimed, so there is no back-pointer to clear.
+	 */
+	if (ser->arch_state.phys) {
+		kho_restore_free(phys_to_virt(ser->arch_state.phys));
+		ser->arch_state.phys = 0;
+	}
+#endif
 }
 
 static void kvm_arm_luo_get_regs(struct kvm_vcpu *vcpu, struct kvm_regs *regs)
@@ -119,8 +162,18 @@ int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *s
 	}
 	kfree(indices);
 
-
 	KHOSER_STORE_PTR(ser->arch_state, state);
+
+	if (ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER) {
+		int ret = arm64_kvm_caretaker_preserve(vcpu, ser);
+
+		if (ret) {
+			kho_unpreserve_free(state);
+			ser->arch_state.phys = 0;
+			return ret;
+		}
+	}
+
 	return 0;
 }
 
@@ -188,6 +241,7 @@ int kvm_arch_vcpu_luo_retrieve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *s
 
 void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_luo_ser *ser)
 {
+	arm64_kvm_caretaker_unpreserve(ser);
 	if (ser->arch_state.phys) {
 		kho_unpreserve_free(phys_to_virt(ser->arch_state.phys));
 		ser->arch_state.phys = 0;
@@ -196,6 +250,7 @@ void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_luo_ser *ser)
 
 void kvm_arch_vcpu_luo_finish(struct kvm_vcpu_luo_ser *ser)
 {
+	arm64_kvm_caretaker_finish(ser);
 	if (ser->arch_state.phys) {
 		kho_restore_free(phys_to_virt(ser->arch_state.phys));
 		ser->arch_state.phys = 0;
