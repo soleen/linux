@@ -196,7 +196,7 @@ kvm_caretaker_should_exit(struct kvm_caretaker_vcpu *cvcpu)
 
 	cpu_preserved_inval(cvcpu->cb);
 
-	st = READ_ONCE(cvcpu->cb->state);
+	st = smp_load_acquire(&cvcpu->cb->state);
 	if (st != KVM_CARETAKER_PAUSED && st != KVM_CARETAKER_RUNNING)
 		return true;
 
@@ -365,7 +365,7 @@ static bool kvm_caretaker_try_stop(struct kvm_caretaker_cb_ser *cb)
 {
 	cpu_preserved_inval(cb);
 
-	if (READ_ONCE(cb->state) == KVM_CARETAKER_STOPPED)
+	if (smp_load_acquire(&cb->state) == KVM_CARETAKER_STOPPED)
 		return true;
 
 	if (cmpxchg(&cb->state, KVM_CARETAKER_PAUSED,
@@ -397,10 +397,8 @@ int kvm_caretaker_wait_for_attach(struct kvm_caretaker_cb_ser *cb, int pcpu)
 		return 0;
 
 	if (!cpu_is_preserved(pcpu)) {
-		WRITE_ONCE(cb->state, KVM_CARETAKER_STOPPED);
+		smp_store_release(&cb->state, KVM_CARETAKER_STOPPED);
 		cpu_preserved_clean(cb);
-		/* Ensure state update is visible before returning to caller */
-		smp_wmb();
 		return 0;
 	}
 
@@ -448,5 +446,194 @@ void kvm_caretaker_post_attach_vcpu(struct kvm_vcpu *vcpu)
 		kvm_caretaker_stop(vcpu->caretaker.cb);
 		vcpu->caretaker.cb = NULL;
 	}
+}
+
+/**
+ * kvm_caretaker_vcpu_pre_preserve - Submit an On-Core job for a vCPU prior to arch preserve
+ * @vcpu:    KVM vCPU being preserved.
+ * @session: Active Live Update session.
+ * @ser:     Serialized KHO vCPU descriptor to populate.
+ *
+ * Submits a Caretaker job to @session before kvm_arch_vcpu_luo_preserve() runs.
+ * If @session has preserved physical CPUs, assigns the job to the least-loaded
+ * preserved CPU and sets %KVM_VCPU_LUO_FLAG_CARETAKER in @ser->flags so the
+ * architecture hook allocates and populates a Caretaker runtime page.  If
+ * @session has no preserved physical CPUs, returns 0 without setting the flag
+ * so the vCPU is preserved in RAM only.
+ *
+ * Return: 0 on success, or a negative errno on job allocation failure.
+ */
+int kvm_caretaker_vcpu_pre_preserve(struct kvm_vcpu *vcpu,
+				    struct liveupdate_session *session,
+				    struct kvm_vcpu_ser *ser)
+{
+	struct oncore_job *job;
+
+	/*
+	 * Submit with no data: the run callback's argument is the caretaker
+	 * control block, which does not exist until the architecture's
+	 * kvm_arch_vcpu_luo_preserve() has allocated it.  It is installed with
+	 * oncore_job_set_data() from _post_preserve(), before activation.
+	 */
+	job = oncore_session_submit_job(session, kvm_arch_vcpu_caretaker_run,
+					NULL);
+	if (IS_ERR(job))
+		return PTR_ERR(job);
+	if (!job)
+		return 0;
+
+	vcpu->caretaker.job = job;
+	ser->flags |= KVM_VCPU_LUO_FLAG_CARETAKER;
+
+	return 0;
+}
+
+/**
+ * kvm_caretaker_vcpu_post_preserve - Activate the Caretaker On-Core job after arch preserve
+ * @vcpu:     KVM vCPU being preserved.
+ * @session:  Active Live Update session.
+ * @ser:      Serialized KHO vCPU descriptor.
+ * @arch_err: Result of kvm_arch_vcpu_luo_preserve() (non-zero on failure).
+ *
+ * If @arch_err is non-zero, cancels and frees any job created in
+ * kvm_caretaker_vcpu_pre_preserve().  Otherwise, installs @vcpu->caretaker.cb
+ * as the job's run argument, flushes the control block to PoC, and activates
+ * the job on the session's runqueue so the preserved physical CPU begins
+ * executing the vCPU.
+ *
+ * Return: 0 on success, or @arch_err / negative errno on failure.
+ */
+int kvm_caretaker_vcpu_post_preserve(struct kvm_vcpu *vcpu,
+				     struct liveupdate_session *session,
+				     struct kvm_vcpu_ser *ser,
+				     int arch_err)
+{
+	struct kvm_caretaker_cb_ser *cb = vcpu->caretaker.cb;
+	struct oncore_job *job = vcpu->caretaker.job;
+	int err;
+
+	if (arch_err) {
+		if (job)
+			oncore_session_cancel_job(session, job);
+		vcpu->caretaker.job = NULL;
+		vcpu->caretaker.cb = NULL;
+		return arch_err;
+	}
+
+	if (!(ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER) || !cb)
+		return 0;
+
+	oncore_job_set_data(job, cb);
+
+	kvm_caretaker_pause(cb);
+	cpu_preserved_clean(cb);
+
+	err = oncore_session_activate_job(session, job);
+	if (err) {
+		oncore_session_cancel_job(session, job);
+		vcpu->caretaker.job = NULL;
+		kvm_caretaker_stop(cb);
+		vcpu->caretaker.cb = NULL;
+		return err;
+	}
+
+	return 0;
+}
+
+/**
+ * kvm_caretaker_vm_pre_retrieve - Stop Caretaker execution before retrieving VM state
+ *
+ * Detaches preserved physical CPU workloads before the incoming kernel creates
+ * the restored KVM VM instance so Caretaker execution stops immediately when
+ * userspace begins reclaiming the VM session.
+ */
+void kvm_caretaker_vm_pre_retrieve(void)
+{
+	int cpu;
+
+	for_each_cpu(cpu, cpu_get_preserved_mask())
+		cpu_preserved_detach_workload(cpu);
+}
+
+/**
+ * kvm_caretaker_vcpu_pre_retrieve - Stop Caretaker execution before retrieving vCPU state
+ * @vcpu: Incoming KVM vCPU being restored.
+ * @ser:  Serialized KHO vCPU descriptor.
+ *
+ * Resolves @ser->cb and invokes kvm_arch_vcpu_luo_pre_retrieve_caretaker() so
+ * the preserved physical CPU stops guest execution and serializes its latest
+ * state into @ser->arch_state before kvm_arch_vcpu_luo_retrieve() reads it.
+ */
+void kvm_caretaker_vcpu_pre_retrieve(struct kvm_vcpu *vcpu,
+				     struct kvm_vcpu_ser *ser)
+{
+	if (ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER)
+		vcpu->caretaker.cb = KHOSER_LOAD_PTR(ser->cb);
+
+	kvm_arch_vcpu_luo_pre_retrieve_caretaker(vcpu, ser);
+}
+
+/**
+ * kvm_caretaker_vcpu_retrieve - Complete Caretaker hardware attachment during vCPU retrieve
+ * @vcpu: Incoming KVM vCPU being restored.
+ * @ser:  Serialized KHO vCPU descriptor.
+ *
+ * Invokes kvm_arch_vcpu_luo_attach_caretaker() after architectural register
+ * state has been restored into @vcpu.
+ */
+void kvm_caretaker_vcpu_retrieve(struct kvm_vcpu *vcpu,
+				 struct kvm_vcpu_ser *ser)
+{
+	kvm_arch_vcpu_luo_attach_caretaker(vcpu, ser);
+}
+
+/**
+ * kvm_caretaker_vcpu_unpreserve - Roll back Caretaker execution on live update cancellation
+ * @vcpu:    Outgoing KVM vCPU being unpreserved.
+ * @session: Live Update session being cancelled.
+ * @ser:     Serialized KHO vCPU descriptor.
+ *
+ * Stops the vCPU on the preserved physical CPU, synchronizes any guest state
+ * updates back into the outgoing @vcpu, frees KHO telemetry buffers, and
+ * cancels the On-Core job.
+ */
+void kvm_caretaker_vcpu_unpreserve(struct kvm_vcpu *vcpu,
+				   struct liveupdate_session *session,
+				   struct kvm_vcpu_ser *ser)
+{
+	if (ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER) {
+		kvm_arch_vcpu_luo_pre_retrieve_caretaker(vcpu, ser);
+		kvm_arch_vcpu_luo_retrieve(vcpu, ser);
+		kvm_arch_vcpu_luo_attach_caretaker(vcpu, ser);
+		kvm_caretaker_telemetry_free(ser, false);
+	}
+
+	if (vcpu->caretaker.job) {
+		oncore_session_cancel_job(session, vcpu->caretaker.job);
+		vcpu->caretaker.job = NULL;
+	}
+	vcpu->caretaker.cb = NULL;
+}
+
+/**
+ * kvm_caretaker_vcpu_finish - Release Caretaker KHO resources after live update completion
+ * @vcpu:    Incoming KVM vCPU (or %NULL on retrieve failure cleanup).
+ * @session: Completed Live Update session.
+ * @ser:     Serialized KHO vCPU descriptor.
+ *
+ * Ensures the Caretaker vCPU has detached and frees KHO-preserved telemetry
+ * buffers in the incoming kernel.
+ */
+void kvm_caretaker_vcpu_finish(struct kvm_vcpu *vcpu,
+			       struct liveupdate_session *session,
+			       struct kvm_vcpu_ser *ser)
+{
+	if (ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER) {
+		kvm_arch_vcpu_luo_pre_retrieve_caretaker(vcpu, ser);
+		kvm_caretaker_telemetry_free(ser, true);
+	}
+
+	if (vcpu)
+		vcpu->caretaker.cb = NULL;
 }
 
