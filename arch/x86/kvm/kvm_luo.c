@@ -20,9 +20,11 @@
 #include <linux/mem_encrypt.h>
 #include <asm/virt.h>
 
+#include "caretaker.h"
 #include "cpuid.h"
 #include "fpu.h"
 #include "lapic.h"
+#include "mmu.h"
 #include "msrs.h"
 #include "pmu.h"
 #include "regs.h"
@@ -191,6 +193,16 @@ int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_ser *ser)
 	vcpu_put(vcpu);
 
 	KHOSER_STORE_PTR(ser->arch_state, state);
+
+	if (IS_ENABLED(CONFIG_KVM_CARETAKER)) {
+		int err = kvm_arch_vcpu_caretaker_preserve(vcpu, ser, state, size);
+
+		if (err) {
+			kho_unpreserve_free(state);
+			return err;
+		}
+	}
+
 	return 0;
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_preserve);
@@ -330,6 +342,7 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_retrieve);
 
 void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_ser *ser)
 {
+	kvm_arch_vcpu_caretaker_unpreserve(ser);
 	if (ser->arch_state.phys) {
 		struct kvm_vcpu_arch_ser *state =
 			phys_to_virt(__sme_clr(ser->arch_state.phys));
@@ -342,6 +355,7 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_unpreserve);
 
 void kvm_arch_vcpu_luo_finish(struct kvm_vcpu_ser *ser)
 {
+	kvm_arch_vcpu_caretaker_finish(ser);
 	if (ser->arch_state.phys) {
 		struct kvm_vcpu_arch_ser *state =
 			phys_to_virt(__sme_clr(ser->arch_state.phys));

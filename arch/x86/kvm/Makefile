@@ -7,7 +7,12 @@ include $(srctree)/virt/kvm/Makefile.kvm
 
 kvm-y			+= x86.o emulate.o irq.o lapic.o cpuid.o msrs.o pmu.o regs.o \
 			   mtrr.o debugfs.o mmu/mmu.o mmu/page_track.o mmu/spte.o
-kvm-$(CONFIG_LIVEUPDATE) += kvm_luo.o
+kvm-$(CONFIG_LIVEUPDATE) += kvm_luo.o mmu/kho.o
+kvm-$(CONFIG_KVM_CARETAKER) += caretaker.o
+UBSAN_SANITIZE_caretaker.o := n
+GCOV_PROFILE_caretaker.o := n
+KMSAN_SANITIZE_caretaker.o := n
+CFLAGS_caretaker.o += $(DISABLE_KSTACK_ERASE) -DDISABLE_BRANCH_PROFILING $(call cc-option,-ftrivial-auto-var-init=uninitialized) $(call cc-option,-fno-jump-tables)
 
 kvm-$(CONFIG_X86_64) += mmu/tdp_iter.o mmu/tdp_mmu.o
 kvm-$(CONFIG_KVM_IOAPIC) += i8259.o i8254.o ioapic.o
