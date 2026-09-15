@@ -136,4 +136,8 @@ config LIVEUPDATE_CPU
 
 	  If unsure, say N.
 
+config LIVEUPDATE_ONCORE
+	bool
+	depends on LIVEUPDATE_CPU
+
 endmenu
