@@ -27,7 +27,7 @@ SYM_TYPED_FUNC_START(svm_caretaker_enter)
 	sti
 
 	/* 0. Save host VMCB state (FS, GS, TR, LDTR) to host save area */
-	movq CXP_HSAVE_PA(%rdi), %rax
+	movq CSP_HSAVE_PA_OFFSET(%rdi), %rax
 	testq %rax, %rax
 	jz 10f
 	vmsave %rax
@@ -69,7 +69,7 @@ SYM_TYPED_FUNC_START(svm_caretaker_enter)
 	movq %rbx, CXP_REG_RAX(%rdi)
 
 	/* 5a. Restore host VMCB state (FS, GS, TR, LDTR) from HSAVE */
-	movq CXP_HSAVE_PA(%rdi), %rax
+	movq CSP_HSAVE_PA_OFFSET(%rdi), %rax
 	testq %rax, %rax
 	jz 40f
 	vmload %rax
