@@ -106,7 +106,7 @@ static struct page *cpu_preserved_data_pages;
 static unsigned int cpu_preserved_data_order;
 static bool cpu_preserved_runtime_preserved;
 
-static __maybe_unused void cpu_preserved_sync_global_ser(void)
+static void cpu_preserved_sync_global_ser(void)
 {
 	struct cpu_preserved_global_ser *ser = cpu_preserved_global_ser;
 
@@ -467,15 +467,32 @@ int cpu_preserved_init_runtime_buffer(void)
 					      text_nr_pages,
 					      cpu_preserved_data_pages,
 					      data_nr_pages);
-	if (ret) {
-		__free_pages(cpu_preserved_data_pages, cpu_preserved_data_order);
-		__free_pages(cpu_preserved_text_pages, cpu_preserved_text_order);
-		cpu_preserved_data_pages = NULL;
-		cpu_preserved_text_pages = NULL;
-		return ret;
-	}
+	if (ret)
+		goto err_free;
 
+	/*
+	 * The address space a preserved CPU parks in when its workload has not
+	 * given it one of its own.  It has to exist before anything can be
+	 * mapped for preserved CPUs, so build it here and let the architecture
+	 * record it where preserved text can reach it after the kexec.
+	 */
+	cpu_preserved_transition_as = cpu_preserved_as_create();
+	if (IS_ERR(cpu_preserved_transition_as)) {
+		ret = PTR_ERR(cpu_preserved_transition_as);
+		cpu_preserved_transition_as = NULL;
+		goto err_free;
+	}
+	arch_cpu_preserved_set_transition_as(cpu_preserved_transition_as);
+
+	cpu_preserved_preserve_runtime_buffer();
 	return 0;
+
+err_free:
+	__free_pages(cpu_preserved_data_pages, cpu_preserved_data_order);
+	__free_pages(cpu_preserved_text_pages, cpu_preserved_text_order);
+	cpu_preserved_data_pages = NULL;
+	cpu_preserved_text_pages = NULL;
+	return ret;
 }
 
 phys_addr_t cpu_preserved_get_text_pa(void)
@@ -487,6 +504,54 @@ phys_addr_t cpu_preserved_get_data_pa(void)
 {
 	return cpu_preserved_data_pages ? page_to_phys(cpu_preserved_data_pages) : 0;
 }
+
+/**
+ * cpu_preserved_map_range - Map a physical range into every preserved address space
+ * @pa: Physical address
+ * @va: Virtual address
+ * @size: Size in bytes
+ * @prot: Page protection flags
+ *
+ * Anything a preserved CPU may touch has to be reachable from whichever
+ * address space it ends up running in, and which one that is depends on the
+ * workload, so map it into all of them.
+ *
+ * Return: 0 on success, negative errno on failure.
+ */
+int cpu_preserved_map_range(phys_addr_t pa, unsigned long va,
+			    size_t size, pgprot_t prot)
+{
+	struct cpu_preserved_as *as;
+	int ret;
+
+	guard(mutex)(&cpu_preserved_as_list_lock);
+
+	list_for_each_entry(as, &cpu_preserved_as_list, node) {
+		ret = cpu_preserved_as_map(as, pa, va, size, prot);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_map_range);
+
+/**
+ * cpu_preserved_map_buffer - Map a virtual buffer into transition page tables
+ * @va: Virtual address in kernel direct map
+ * @size: Size in bytes
+ *
+ * Return: 0 on success, negative errno on failure.
+ */
+int cpu_preserved_map_buffer(void *va, size_t size)
+{
+	if (!va || !size)
+		return 0;
+	return cpu_preserved_map_range(virt_to_phys(va),
+				       (unsigned long)va,
+				       size, PAGE_KERNEL);
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_map_buffer);
 
 /**
  * cpu_is_preserved - Check whether a CPU is currently preserved
@@ -524,6 +589,11 @@ static struct cpu_preserved_pcpu * __cpu_preserved_text cpu_preserved_get_pcpu(i
 
 	if ((unsigned int)cpu >= CONFIG_NR_CPUS)
 		return NULL;
+
+	if (cpu_preserved_is_incoming(cpu) && !arch_cpu_preserved_is_active()) {
+		if (cpu_preserved_incoming.pcpus)
+			return &cpu_preserved_incoming.pcpus[cpu];
+	}
 
 	cpu_preserved_inval(&cpu_preserved_pcpus_va);
 	pcpus = READ_ONCE(cpu_preserved_pcpus_va);
@@ -914,6 +984,8 @@ static int cpu_preserve(unsigned int cpu)
 		}
 		WRITE_ONCE(cpu_preserved_pcpus_va, outgoing->pcpus);
 		WRITE_ONCE(cpu_preserved_pcpus_pa, virt_to_phys(outgoing->pcpus));
+		cpu_preserved_map_buffer(outgoing->pcpus,
+					 sizeof(*outgoing->pcpus) * nr_cpu_ids);
 		cpu_preserved_clean(&cpu_preserved_pcpus_va);
 		cpu_preserved_clean(&cpu_preserved_pcpus_pa);
 	}
@@ -929,15 +1001,14 @@ static int cpu_preserve(unsigned int cpu)
 	pcpu->state.stack_pa = page_to_phys(stack_page);
 	pcpu->state.stack_order = CPU_PRESERVED_STACK_ORDER;
 	pcpu->stack = stack;
-	{
-		void *pgd = arch_cpu_preserved_get_pgd();
-
-		pcpu->pgd_pa = pgd ? virt_to_phys(pgd) : 0;
-	}
+	cpu_preserved_map_buffer(stack, (1UL << CPU_PRESERVED_STACK_ORDER) * PAGE_SIZE);
+	pcpu->pgd_pa = cpu_preserved_transition_as ?
+		       cpu_preserved_transition_as->pgd_pa : 0;
 
 	cpumask_clear_cpu(cpu, &cpu_preserved_incoming.mask);
 	WRITE_ONCE(pcpu->entry_fn, NULL);
 	WRITE_ONCE(pcpu->entry_data, NULL);
+	cpu_preserved_sync_global_ser();
 
 	mutex_unlock(&cpu_preserved_lock);
 
@@ -948,8 +1019,12 @@ static int cpu_preserve(unsigned int cpu)
 			goto err_rollback;
 		}
 
+		lock_device_hotplug();
+		device_lock(dev);
 		ret = cpu_device_down(dev);
 		if (ret) {
+			device_unlock(dev);
+			unlock_device_hotplug();
 			pr_err("Failed to offline preserved cpu %d: %d\n",
 			       cpu, ret);
 			goto err_rollback;
@@ -1154,90 +1229,113 @@ static int cpu_unpreserve(unsigned int cpu)
 /*
  * FLB Ops for Preserved CPUs
  */
-static int cpu_preserve_reboot_notify(struct notifier_block *nb,
-				      unsigned long action, void *data)
+static int cpu_preserved_flb_preserve(struct liveupdate_flb_op_args *argp)
 {
-	struct cpu_preserved_incoming *incoming = &cpu_preserved_incoming;
-	int cpu;
+	unsigned int nr_words = BITS_TO_U64(nr_cpu_ids);
+	struct cpu_preserved_global_ser *ser;
+	size_t ser_sz;
+
+	ser_sz = struct_size(ser, cpu_preserved_bitmap, nr_words);
 
 	mutex_lock(&cpu_preserved_lock);
-	for_each_cpu(cpu, &cpu_preserved_mask) {
-		struct page *stack_page;
-		unsigned int stack_order;
-		bool is_incoming;
-
-		/*
-		 * If this CPU is not being preserved across an outgoing live
-		 * update, signal it to exit the park loop and offline it.
-		 */
-		is_incoming = cpumask_test_cpu(cpu, &incoming->mask);
-		if (kexec_in_progress && liveupdate_enabled() && !is_incoming)
-			continue;
-
-		cpu_signal_exit(cpu);
-		arch_cpu_preserved_kick(cpu);
-		if (cpu_wait_dead(cpu))
-			continue;
-
-		stack_page = __cpu_unpreserve_locked(cpu, &stack_order);
-		cpu_preserved_free_stack(stack_page, stack_order, is_incoming);
+	ser = kho_alloc_preserve(ser_sz);
+	if (IS_ERR(ser)) {
+		mutex_unlock(&cpu_preserved_lock);
+		return PTR_ERR(ser);
 	}
+
+	memset(ser, 0, ser_sz);
+	ser->nr_cpu_words = nr_words;
+	cpu_preserved_global_ser = ser;
+	cpu_preserved_sync_global_ser();
 	mutex_unlock(&cpu_preserved_lock);
 
-	return NOTIFY_OK;
+	cpu_preserved_preserve_runtime_buffer();
+
+	argp->data = virt_to_phys(ser);
+	argp->obj = ser;
+	return 0;
 }
 
-static struct notifier_block cpu_preserve_reboot_nb = {
-	.notifier_call = cpu_preserve_reboot_notify,
-	.priority = 0,
+static void cpu_preserved_flb_unpreserve(struct liveupdate_flb_op_args *argp)
+{
+	struct cpu_preserved_global_ser *ser;
+
+	if (!argp->data)
+		return;
+
+	ser = phys_to_virt(argp->data);
+	mutex_lock(&cpu_preserved_lock);
+	cpu_preserved_global_ser = NULL;
+	mutex_unlock(&cpu_preserved_lock);
+
+	cpu_preserved_unpreserve_runtime_buffer();
+	kho_unpreserve_free(ser);
+}
+
+static int cpu_preserved_flb_retrieve(struct liveupdate_flb_op_args *argp)
+{
+	struct cpu_preserved_global_ser *ser;
+	u64 nr_bits;
+
+	if (!argp->data)
+		return -EINVAL;
+
+	ser = phys_to_virt(argp->data);
+	arch_cpu_preserved_early_init();
+
+	/*
+	 * The outgoing kernel may have been built with a larger NR_CPUS.  Any
+	 * preserved CPU we cannot represent would be silently forgotten and
+	 * left spinning in its park loop forever, so refuse the handover
+	 * instead.
+	 */
+	nr_bits = (u64)ser->nr_cpu_words * BITS_PER_TYPE(u64);
+	if (nr_bits > nr_cpu_ids &&
+	    find_next_bit((const unsigned long *)ser->cpu_preserved_bitmap,
+			  nr_bits, nr_cpu_ids) < nr_bits) {
+		pr_err("preserved CPU above nr_cpu_ids=%u in handover data\n",
+		       nr_cpu_ids);
+		return -ERANGE;
+	}
+
+	mutex_lock(&cpu_preserved_lock);
+	bitmap_from_arr64(cpumask_bits(&cpu_preserved_mask),
+			  ser->cpu_preserved_bitmap, min_t(u64, nr_bits, nr_cpu_ids));
+	cpumask_copy(&cpu_preserved_incoming.mask, &cpu_preserved_mask);
+	if (ser->pcpus_runtime_pa) {
+		cpu_preserved_incoming.pcpus = phys_to_virt(ser->pcpus_runtime_pa);
+		WRITE_ONCE(cpu_preserved_pcpus_pa, ser->pcpus_runtime_pa);
+		cpu_preserved_clean(&cpu_preserved_pcpus_pa);
+	}
+	cpu_preserved_clean(&cpu_preserved_mask);
+	mutex_unlock(&cpu_preserved_lock);
+
+	argp->obj = ser;
+	return 0;
+}
+
+static void cpu_preserved_flb_finish(struct liveupdate_flb_op_args *argp)
+{
+	struct cpu_preserved_global_ser *ser;
+
+	if (!argp->obj)
+		return;
+
+	ser = argp->obj;
+	kho_restore_free(ser);
+}
+
+static const struct liveupdate_flb_ops cpu_preserved_flb_ops = {
+	.preserve   = cpu_preserved_flb_preserve,
+	.unpreserve = cpu_preserved_flb_unpreserve,
+	.retrieve   = cpu_preserved_flb_retrieve,
+	.finish     = cpu_preserved_flb_finish,
+	.owner      = THIS_MODULE,
 };
 
-static int __init cpu_preserve_early_init(void)
-{
-	register_reboot_notifier(&cpu_preserve_reboot_nb);
+static struct liveupdate_flb cpu_preserved_flb = {
+	.ops        = &cpu_preserved_flb_ops,
+	.compatible = CPU_PRESERVED_LUO_FLB_COMPATIBLE,
+};
 
-	arch_cpu_preserved_get_pgd();
-
-	return 0;
-}
-early_initcall(cpu_preserve_early_init);
-static ssize_t preserved_show(struct device *dev,
-			      struct device_attribute *attr, char *buf)
-{
-	return sysfs_emit(buf, "%*pbl\n",
-			  cpumask_pr_args(cpu_get_preserved_mask()));
-}
-static DEVICE_ATTR_RO(preserved);
-
-static ssize_t preserve_show(struct device *dev,
-			     struct device_attribute *attr, char *buf)
-{
-	return sysfs_emit(buf, "%d\n", cpu_is_preserved(dev->id));
-}
-static DEVICE_ATTR_RO(preserve);
-
-static int __init cpu_preserve_sysfs_init(void)
-{
-	struct device *dev_root = bus_get_dev_root(&cpu_subsys);
-	int cpu, ret;
-
-	if (dev_root) {
-		ret = sysfs_create_file(&dev_root->kobj, &dev_attr_preserved.attr);
-		put_device(dev_root);
-		if (ret)
-			pr_warn("Failed to create cpu preserved sysfs attribute: %d\n", ret);
-	}
-
-	for_each_possible_cpu(cpu) {
-		struct device *dev = get_cpu_device(cpu);
-
-		if (dev) {
-			ret = sysfs_create_file(&dev->kobj, &dev_attr_preserve.attr);
-			if (ret)
-				pr_warn("Failed to create cpu%d preserve sysfs attribute: %d\n",
-					cpu, ret);
-		}
-	}
-	return 0;
-}
-late_initcall(cpu_preserve_sysfs_init);
