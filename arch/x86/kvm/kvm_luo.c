@@ -19,9 +19,11 @@
 #include <asm/mem_encrypt.h>
 #include <asm/virt.h>
 
+#include "caretaker.h"
 #include "cpuid.h"
 #include "fpu.h"
 #include "lapic.h"
+#include "mmu.h"
 #include "msrs.h"
 #include "pmu.h"
 #include "regs.h"
@@ -30,7 +32,16 @@
 int kvm_arch_vm_luo_preserve(struct kvm *kvm, struct kvm_luo_ser *ser)
 {
 	ser->type = kvm->arch.vm_type;
-	return 0;
+
+	/*
+	 * Shadow/TDP page tables are a VM-wide resource: an orphaned vCPU keeps
+	 * running the guest out of them while the VM is detached, so they must
+	 * survive the kexec.  Preserve them once here rather than once per vCPU
+	 * from the caretaker init hook -- the walk is O(size of the guest's page
+	 * tables) and holds mmu_lock for write, so repeating it per vCPU is both
+	 * redundant and a scalability problem on large guests.
+	 */
+	return kvm_mmu_preserve_kho(kvm);
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vm_luo_preserve);
 
@@ -158,6 +169,25 @@ int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *s
 	vcpu_put(vcpu);
 
 	KHOSER_STORE_PTR(ser->arch_state, state);
+
+	if (ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER) {
+		struct kvm_x86_caretaker_abi *abi;
+
+		kvm_arch_vcpu_caretaker_init(vcpu);
+		if (!vcpu->caretaker.cb) {
+			kho_unpreserve_free(state);
+			return -ENOMEM;
+		}
+		ser->cb.phys = virt_to_phys(vcpu->caretaker.cb);
+		abi = phys_to_virt(ser->cb.phys);
+		abi->arch_state_pa = ser->arch_state.phys;
+		abi->arch_state_size = size;
+#ifdef CONFIG_KVM_CARETAKER
+		container_of(abi, struct caretaker_x86_page, abi)->arch_state = state;
+#endif
+		cpu_preserved_map_buffer(state, size);
+	}
+
 	return 0;
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_preserve);
@@ -265,19 +295,13 @@ int kvm_arch_vcpu_luo_retrieve(struct kvm_vcpu *vcpu, struct kvm_vcpu_luo_ser *s
 		if ((ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER) &&
 		    (state->msrs[i].index == MSR_IA32_TSC ||
 		     state->msrs[i].index == MSR_IA32_TSC_ADJUST ||
-		     state->msrs[i].index == MSR_IA32_TSC_DEADLINE ||
-		     state->msrs[i].index == MSR_KERNEL_GS_BASE ||
-		     state->msrs[i].index == MSR_LSTAR ||
-		     state->msrs[i].index == MSR_STAR ||
-		     state->msrs[i].index == MSR_CSTAR ||
-		     state->msrs[i].index == MSR_SYSCALL_MASK)) {
+		     state->msrs[i].index == MSR_IA32_TSC_DEADLINE)) {
 			continue;
 		}
 		kvm_msr_write(vcpu, state->msrs[i].index, state->msrs[i].data);
 	}
 
-	if (!(ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER))
-		__set_regs(vcpu, &state->regs);
+	__set_regs(vcpu, &state->regs);
 
 	ret = 0;
 out:
@@ -295,6 +319,7 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_retrieve);
 
 void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_luo_ser *ser)
 {
+	kvm_arch_vcpu_caretaker_unpreserve(ser);
 	if (ser->arch_state.phys) {
 		struct kvm_vcpu_arch_luo_state *state =
 			phys_to_virt(__sme_clr(ser->arch_state.phys));
@@ -307,6 +332,7 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_unpreserve);
 
 void kvm_arch_vcpu_luo_finish(struct kvm_vcpu_luo_ser *ser)
 {
+	kvm_arch_vcpu_caretaker_finish(ser);
 	if (ser->arch_state.phys) {
 		struct kvm_vcpu_arch_luo_state *state =
 			phys_to_virt(__sme_clr(ser->arch_state.phys));

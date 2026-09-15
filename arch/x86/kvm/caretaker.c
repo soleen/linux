@@ -176,9 +176,6 @@ static void kvm_x86_caretaker_signal_attach(struct kvm_vcpu *vcpu, u64 cb_pa)
 	if (cb_pa) {
 		struct kvm_x86_caretaker_abi *abi = caretaker_pa_to_va(cb_pa);
 
-		if (ops && ops->signal_attach)
-			ops->signal_attach(vcpu, &abi->cb);
-
 		kvm_x86_caretaker_signal_attach_common(vcpu, &abi->cb, abi->apic_id,
 						      &abi->running,
 						      ops ? ops->name : "x86");
@@ -650,3 +647,292 @@ static __caretaker_text bool kvm_caretaker_emulate_msr(struct caretaker_x86_page
 		else
 			val &= ~MSR_IA32_APICBASE_BSP;
 		break;
+	case MSR_FS_BASE:
+	case MSR_GS_BASE:
+	case MSR_LSTAR:
+	case MSR_STAR:
+	case MSR_SYSCALL_MASK:
+		val = native_rdmsrq(msr);
+		break;
+	default:
+		return false;
+	}
+
+out:
+	*rax = (u32)val;
+	*rdx = (u32)(val >> 32);
+	return true;
+}
+
+static bool __cpu_preserved_text
+kvm_x86_caretaker_emulate_uart8250(struct caretaker_uart *uart,
+				   u16 port, int in, int size,
+				   unsigned long *rax)
+{
+	u8 offset;
+
+	if (port < COM1_PORT_BASE || port > COM1_PORT_END)
+		return false;
+
+	offset = port - COM1_PORT_BASE;
+
+	if (in) {
+		unsigned long val = 0;
+
+		switch (offset) {
+		case UART_RX:
+			val = (uart && (uart->lcr & UART_LCR_DLAB)) ? uart->dll : 0;
+			break;
+		case UART_IER:
+			val = (uart && (uart->lcr & UART_LCR_DLAB)) ? uart->dlm :
+				(uart ? uart->ier : 0);
+			break;
+		case UART_IIR:
+			val = UART_IIR_NO_INT;
+			break;
+		case UART_LCR:
+			val = uart ? uart->lcr : UART_LCR_WLEN8;
+			break;
+		case UART_MCR:
+			val = uart ? uart->mcr : (UART_MCR_DTR | UART_MCR_RTS);
+			break;
+		case UART_LSR:
+			val = UART_LSR_TEMT | UART_LSR_THRE;
+			break;
+		case UART_MSR:
+			val = UART_MSR_DCD | UART_MSR_DSR | UART_MSR_CTS;
+			break;
+		case UART_SCR:
+			val = uart ? uart->scr : 0;
+			break;
+		}
+
+		if (size < (int)sizeof(unsigned long)) {
+			unsigned long mask = (1UL << (size * 8)) - 1;
+			*rax = (*rax & ~mask) | (val & mask);
+		} else {
+			*rax = val;
+		}
+	} else {
+		u8 out_val = (u8)*rax;
+
+		if (uart) {
+			switch (offset) {
+			case UART_TX:
+				if (uart->lcr & UART_LCR_DLAB)
+					uart->dll = out_val;
+				break;
+			case UART_IER:
+				if (uart->lcr & UART_LCR_DLAB)
+					uart->dlm = out_val;
+				else
+					uart->ier = out_val;
+				break;
+			case UART_LCR:
+				uart->lcr = out_val;
+				break;
+			case UART_MCR:
+				uart->mcr = out_val;
+				break;
+			case UART_SCR:
+				uart->scr = out_val;
+				break;
+			}
+		}
+	}
+
+	return true;
+}
+STACK_FRAME_NON_STANDARD(kvm_x86_caretaker_emulate_uart8250);
+
+__caretaker_text bool
+kvm_x86_caretaker_handle_exit(void *data, struct kvm_caretaker_exit *exit)
+{
+	struct caretaker_x86_page *cxp = data;
+	bool handled = false;
+
+	if (exit->type == KVM_CARETAKER_EXIT_CROSS_VCPU)
+		return true;
+
+	switch ((int)exit->type) {
+	case KVM_CARETAKER_EXIT_CONSOLE: {
+		unsigned long *target = exit->mmio_io.val_ptr ?
+					(unsigned long *)exit->mmio_io.val_ptr :
+					(unsigned long *)&exit->mmio_io.val;
+
+		handled = kvm_x86_caretaker_emulate_uart8250(&cxp->uart,
+							     (u16)exit->mmio_io.addr,
+							     !exit->mmio_io.is_write,
+							     exit->mmio_io.size,
+							     target);
+		break;
+	}
+	case KVM_CARETAKER_EXIT_CPUID:
+		kvm_caretaker_emulate_cpuid(&cxp->rax, &cxp->rbx, &cxp->rcx, &cxp->rdx);
+		handled = true;
+		break;
+	case KVM_CARETAKER_EXIT_MSR:
+		handled = kvm_caretaker_emulate_msr(cxp, exit->msr.msr, exit->msr.is_write,
+						    &cxp->rax, &cxp->rdx);
+		break;
+	case KVM_CARETAKER_EXIT_RDTSC: {
+		u64 tsc = rdtsc();
+
+		cxp->rax = (u32)tsc;
+		cxp->rdx = (u32)(tsc >> 32);
+		handled = true;
+		break;
+	}
+	case KVM_CARETAKER_EXIT_INSN_STEP:
+		handled = true;
+		break;
+	case KVM_CARETAKER_EXIT_ARCH:
+	default:
+		handled = (exit->insn_len != 0);
+		break;
+	}
+
+	if (handled)
+		exit->rip += exit->insn_len;
+
+	return handled;
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_x86_caretaker_handle_exit);
+
+STACK_FRAME_NON_STANDARD(kvm_x86_caretaker_run_page);
+
+static enum oncore_exit_reason __cpu_preserved_text
+kvm_x86_caretaker_run_page(struct caretaker_x86_page *cxp,
+			   struct kvm_vcpu *vcpu, u64 deadline_ticks)
+{
+	const struct kvm_x86_caretaker_ops *ops = kvm_x86_caretaker_ops;
+	enum oncore_exit_reason reason = ONCORE_EXIT_QUANTUM_EXPIRED;
+	struct caretaker_x86_host_state host_state;
+	int pcpu;
+
+	if (!cxp || !cxp->hw_ctrl_pa || !ops)
+		return ONCORE_EXIT_ERROR;
+
+	{
+		struct cpu_preserved_stack_context *sctx =
+			cpu_preserved_get_stack_context();
+
+		if (sctx && sctx->cpu >= 0 && sctx->cpu < CONFIG_NR_CPUS)
+			pcpu = sctx->cpu;
+		else
+			pcpu = cxp->pcpu_id;
+		cxp->pcpu_id = pcpu;
+		cxp->cb.pcpu_id = pcpu;
+	}
+	if (kvm_caretaker_should_exit(&cxp->vcpu)) {
+		WRITE_ONCE(cxp->cb.attachment_state, KVM_CARETAKER_ATTACHED);
+		/* Order attachment state update before returning to oncore scheduler */
+		smp_mb();
+		return ONCORE_EXIT_ATTACH_SIGNALED;
+	}
+
+	cxp->deadline_tsc = deadline_ticks;
+
+	/* Save host context, switch to Caretaker descriptors and CR3 */
+	kvm_x86_caretaker_save_host_state(&host_state, cxp);
+
+	cxp->vcpu.ops = &ops->common;
+	cxp->vcpu.arch_data = cxp;
+	WRITE_ONCE(cxp->running, 1);
+	/* Order running state write before entering vCPU run loop */
+	smp_wmb();
+
+	reason = kvm_caretaker_vcpu_run(&cxp->vcpu, deadline_ticks);
+
+	iret_to_self();
+
+	if (ops->detach_serialize && cxp->arch_state)
+		ops->detach_serialize(cxp, cxp->arch_state);
+
+	kvm_x86_caretaker_restore_host_state(&host_state, cxp, vcpu, pcpu);
+
+	WRITE_ONCE(cxp->running, 0);
+	/* Order running state clear before checking/updating attachment state */
+	smp_wmb();
+
+	if (reason == ONCORE_EXIT_ATTACH_SIGNALED ||
+	    READ_ONCE(cxp->cb.attachment_state) == KVM_CARETAKER_ATTACHING) {
+		WRITE_ONCE(cxp->cb.attachment_state, KVM_CARETAKER_ATTACHED);
+		/* Order attachment state update before returning to oncore scheduler */
+		smp_mb();
+	}
+
+	return reason;
+}
+
+__caretaker_text void kvm_x86_caretaker_arm_timer(u64 deadline_ticks)
+{
+	if (!deadline_ticks)
+		return;
+
+	if (caretaker_x86_has_tsc_deadline) {
+		u32 lvtt = LOCAL_TIMER_VECTOR | APIC_LVT_TIMER_TSCDEADLINE;
+
+		native_wrmsrq(APIC_BASE_MSR + (APIC_LVTT >> 4), lvtt);
+		native_wrmsrq(MSR_IA32_TSC_DEADLINE, deadline_ticks);
+	} else {
+		u64 now = rdtsc();
+		u64 delta_tsc = (deadline_ticks > now) ? (deadline_ticks - now) : 1;
+		u32 lvtt = LOCAL_TIMER_VECTOR;
+		u64 count;
+
+		if (global_oncore_sched_config.counter_freq_hz && caretaker_x86_lapic_timer_period) {
+			u64 period = caretaker_x86_lapic_timer_period;
+			u64 apic_khz = (period * HZ) / 1000ULL;
+			u64 tsc_khz_val = global_oncore_sched_config.counter_freq_hz / 1000ULL;
+
+			count = (delta_tsc * apic_khz) / tsc_khz_val;
+		} else {
+			count = delta_tsc >> 4;
+		}
+		if (count == 0)
+			count = 1;
+		if (count > U32_MAX)
+			count = U32_MAX;
+
+		native_wrmsrq(APIC_BASE_MSR + (APIC_TDCR >> 4),
+			      APIC_TDR_DIV_16);
+		native_wrmsrq(APIC_BASE_MSR + (APIC_LVTT >> 4), lvtt);
+		native_wrmsrq(APIC_BASE_MSR + (APIC_TMICT >> 4), (u32)count);
+	}
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_x86_caretaker_arm_timer);
+
+__caretaker_text void kvm_x86_caretaker_disarm_timer(void)
+{
+	if (caretaker_x86_has_tsc_deadline)
+		native_wrmsrq(MSR_IA32_TSC_DEADLINE, 0);
+	else
+		native_wrmsrq(APIC_BASE_MSR + (APIC_TMICT >> 4), 0);
+
+	native_wrmsrq(APIC_BASE_MSR + (APIC_LVTT >> 4),
+		      APIC_LVT_MASKED | LOCAL_TIMER_VECTOR);
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_x86_caretaker_disarm_timer);
+
+void kvm_arch_vcpu_caretaker_unpreserve(struct kvm_vcpu_luo_ser *ser)
+{
+	if (ser->cb.phys) {
+		struct kvm_caretaker_cb *cb = caretaker_pa_to_va(ser->cb.phys);
+
+		if (cb->runtime_pa)
+			kho_unpreserve_free(caretaker_pa_to_va(cb->runtime_pa));
+		ser->cb.phys = 0;
+	}
+}
+
+void kvm_arch_vcpu_caretaker_finish(struct kvm_vcpu_luo_ser *ser)
+{
+	if (ser->cb.phys) {
+		struct kvm_caretaker_cb *cb = caretaker_pa_to_va(ser->cb.phys);
+
+		if (cb->runtime_pa)
+			kho_restore_free(caretaker_pa_to_va(cb->runtime_pa));
+		ser->cb.phys = 0;
+	}
+}
