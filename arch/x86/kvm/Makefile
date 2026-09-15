@@ -30,6 +30,7 @@ kvm-intel-$(CONFIG_KVM_HYPERV)	+= vmx/hyperv.o vmx/hyperv_evmcs.o
 kvm-intel-$(CONFIG_KVM_INTEL_TDX)	+= vmx/tdx.o
 
 kvm-amd-y		+= svm/svm.o svm/vmenter.o svm/pmu.o svm/nested.o svm/avic.o
+kvm-amd-$(CONFIG_KVM_CARETAKER) += svm/caretaker.o svm/caretaker_vmenter.o
 
 kvm-amd-$(CONFIG_KVM_AMD_SEV)	+= svm/sev.o
 kvm-amd-$(CONFIG_KVM_HYPERV)	+= svm/hyperv.o
@@ -46,6 +47,14 @@ obj-$(CONFIG_KVM_AMD)	+= kvm-amd.o
 
 AFLAGS_svm/vmenter.o    := -iquote $(obj)
 $(obj)/svm/vmenter.o: $(obj)/kvm-asm-offsets.h
+
+AFLAGS_svm/caretaker_vmenter.o := -iquote $(obj)
+$(obj)/svm/caretaker_vmenter.o: $(obj)/kvm-asm-offsets.h
+
+UBSAN_SANITIZE_svm/caretaker.o := n
+GCOV_PROFILE_svm/caretaker.o := n
+KMSAN_SANITIZE_svm/caretaker.o := n
+CFLAGS_svm/caretaker.o := $(DISABLE_KSTACK_ERASE) -DDISABLE_BRANCH_PROFILING $(call cc-option,-ftrivial-auto-var-init=uninitialized) $(call cc-option,-fno-jump-tables)
 
 AFLAGS_vmx/vmenter.o    := -iquote $(obj)
 $(obj)/vmx/vmenter.o: $(obj)/kvm-asm-offsets.h
