@@ -4121,12 +4121,12 @@ static struct file_operations kvm_vcpu_fops = {
 /*
  * Allocates an inode for the vcpu.
  */
-static int create_vcpu_fd(struct kvm_vcpu *vcpu)
+static struct file *create_vcpu_file(struct kvm_vcpu *vcpu)
 {
 	char name[8 + 1 + ITOA_MAX_LEN + 1];
 
 	snprintf(name, sizeof(name), "kvm-vcpu:%d", vcpu->vcpu_id);
-	return anon_inode_getfd(name, &kvm_vcpu_fops, vcpu, O_RDWR | O_CLOEXEC);
+	return anon_inode_getfile(name, &kvm_vcpu_fops, vcpu, O_RDWR);
 }
 
 #ifdef __KVM_HAVE_ARCH_VCPU_DEBUGFS
@@ -4163,11 +4163,12 @@ static void kvm_create_vcpu_debugfs(struct kvm_vcpu *vcpu)
 /*
  * Creates some virtual cpus.  Good luck creating more than one.
  */
-static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, unsigned long id)
+struct file *kvm_create_vcpu_file(struct kvm *kvm, unsigned long id)
 {
-	int r;
 	struct kvm_vcpu *vcpu;
+	struct file *file;
 	struct page *page;
+	int r;
 
 	/*
 	 * KVM tracks vCPU IDs as 'int', be kind to userspace and reject
@@ -4179,23 +4180,23 @@ static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, unsigned long id)
 	 */
 	BUILD_BUG_ON(KVM_MAX_VCPU_IDS > INT_MAX);
 	if (id >= KVM_MAX_VCPU_IDS)
-		return -EINVAL;
+		return ERR_PTR(-EINVAL);
 
 	mutex_lock(&kvm->lock);
 	if (kvm->created_vcpus >= kvm->max_vcpus) {
 		mutex_unlock(&kvm->lock);
-		return -EINVAL;
+		return ERR_PTR(-EINVAL);
 	}
 
 	if (test_bit(id, kvm->vcpu_ids)) {
 		mutex_unlock(&kvm->lock);
-		return -EEXIST;
+		return ERR_PTR(-EEXIST);
 	}
 
 	r = kvm_arch_vcpu_precreate(kvm, id);
 	if (r) {
 		mutex_unlock(&kvm->lock);
-		return r;
+		return ERR_PTR(r);
 	}
 
 	kvm->created_vcpus++;
@@ -4259,9 +4260,11 @@ static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, unsigned long id)
 	 */
 	mutex_lock(&vcpu->mutex);
 	kvm_get_kvm(kvm);
-	r = create_vcpu_fd(vcpu);
-	if (r < 0)
+	file = create_vcpu_file(vcpu);
+	if (IS_ERR(file)) {
+		r = PTR_ERR(file);
 		goto kvm_put_xa_erase;
+	}
 
 	/*
 	 * Pairs with smp_rmb() in kvm_get_vcpu.  Store the vcpu
@@ -4274,7 +4277,7 @@ static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, unsigned long id)
 	mutex_unlock(&kvm->lock);
 	kvm_arch_vcpu_postcreate(vcpu);
 	kvm_create_vcpu_debugfs(vcpu);
-	return r;
+	return file;
 
 kvm_put_xa_erase:
 	mutex_unlock(&vcpu->mutex);
@@ -4295,7 +4298,30 @@ vcpu_decrement:
 	kvm->created_vcpus--;
 	__clear_bit(id, kvm->vcpu_ids);
 	mutex_unlock(&kvm->lock);
-	return r;
+	return ERR_PTR(r);
+}
+
+static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, unsigned long id)
+{
+	struct file *file;
+	int fd;
+
+	/*
+	 * Reserve the fd up front: kvm_create_vcpu_file() publishes the vCPU
+	 * in kvm->vcpu_array, and there is no clean way to unwind that.
+	 */
+	fd = get_unused_fd_flags(O_RDWR | O_CLOEXEC);
+	if (fd < 0)
+		return fd;
+
+	file = kvm_create_vcpu_file(kvm, id);
+	if (IS_ERR(file)) {
+		put_unused_fd(fd);
+		return PTR_ERR(file);
+	}
+
+	fd_install(fd, file);
+	return fd;
 }
 
 static int kvm_vcpu_ioctl_set_sigmask(struct kvm_vcpu *vcpu, sigset_t *sigset)
@@ -4961,6 +4987,8 @@ static int kvm_vm_ioctl_check_extension_generic(struct kvm *kvm, long arg)
 	case KVM_CAP_GUEST_MEMFD_FLAGS:
 		return kvm_gmem_get_supported_flags(kvm);
 #endif
+	case KVM_CAP_VCPU_PRESERVE:
+		return IS_ENABLED(CONFIG_HAVE_KVM_ARCH_VCPU_PRESERVE);
 	default:
 		break;
 	}
@@ -5505,6 +5533,12 @@ bool file_is_kvm(struct file *file)
 	return file && file->f_op == &kvm_vm_fops;
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(file_is_kvm);
+
+bool file_is_kvm_vcpu(struct file *file)
+{
+	return file && file->f_op == &kvm_vcpu_fops;
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(file_is_kvm_vcpu);
 
 struct file *kvm_create_vm_file(unsigned long type, const char *fdname)
 {
