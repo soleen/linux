@@ -54,6 +54,7 @@
 #include "svm.h"
 #include "svm_ops.h"
 
+#include "caretaker.h"
 #include "hyperv.h"
 #include "kvm_onhyperv.h"
 #include "svm_onhyperv.h"
@@ -973,6 +974,8 @@ static void svm_hardware_unsetup(void)
 {
 	int cpu;
 
+	svm_caretaker_unregister();
+
 	avic_hardware_unsetup();
 
 	sev_hardware_unsetup();
@@ -1117,7 +1120,7 @@ static void svm_recalc_instruction_intercepts(struct kvm_vcpu *vcpu)
 		svm_clr_intercept(svm, INTERCEPT_RDPMC);
 }
 
-static void svm_recalc_intercepts(struct kvm_vcpu *vcpu)
+void svm_recalc_intercepts(struct kvm_vcpu *vcpu)
 {
 	svm_recalc_instruction_intercepts(vcpu);
 	svm_recalc_msr_intercepts(vcpu);
@@ -5761,6 +5764,8 @@ static __init int svm_hardware_setup(void)
 		if (r)
 			goto err;
 	}
+
+	svm_caretaker_register();
 
 	return 0;
 

@@ -24,6 +24,7 @@ struct caretaker_svm_page {
 
 	/* Page 4 (4KB): Preserved HSAVE area */
 	u8 hsave_area[PAGE_SIZE] __aligned(PAGE_SIZE);
+	u64 orig_hsave_pa;
 } __aligned(PAGE_SIZE);
 
 void svm_recalc_intercepts(struct kvm_vcpu *vcpu);
