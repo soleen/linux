@@ -12,6 +12,17 @@ obj-$(CONFIG_KVM) += hyp/
 
 CFLAGS_sys_regs.o += -Wno-override-init
 CFLAGS_handle_exit.o += -Wno-override-init
+UBSAN_SANITIZE_caretaker.o := n
+GCOV_PROFILE_caretaker.o := n
+KMSAN_SANITIZE_caretaker.o := n
+CFLAGS_caretaker.o += $(call cc-option,-mbranch-protection=none) \
+		      $(DISABLE_KSTACK_ERASE) \
+		      -DDISABLE_BRANCH_PROFILING \
+		      $(call cc-option,-ftrivial-auto-var-init=uninitialized) \
+		      $(call cc-option,-fno-jump-tables)
+AFLAGS_caretaker_vmenter.o += -D__KVM_VHE_HYPERVISOR__
+
+kvm-$(CONFIG_KVM_CARETAKER) += caretaker.o caretaker_vmenter.o
 
 kvm-y += arm.o mmu.o mmio.o psci.o hypercalls.o pvtime.o \
 	 inject_fault.o va_layout.o handle_exit.o config.o \
