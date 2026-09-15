@@ -26,6 +26,7 @@
 #include <linux/swap.h>
 #include <linux/rwsem.h>
 #include <linux/cc_platform.h>
+#include <linux/cpu_preserve.h>
 #include <linux/smp.h>
 #include <linux/string_choices.h>
 #include <linux/mutex.h>
@@ -54,6 +55,7 @@
 #include "svm.h"
 #include "svm_ops.h"
 
+#include "caretaker.h"
 #include "hyperv.h"
 #include "kvm_onhyperv.h"
 #include "svm_onhyperv.h"
@@ -314,6 +316,29 @@ static int __svm_skip_emulated_instruction(struct kvm_vcpu *vcpu,
 		svm->next_rip = svm->vmcb->control.next_rip;
 	}
 
+	if (!svm->next_rip && svm->vmcb->control.insn_len)
+		svm->next_rip = kvm_rip_read(vcpu) + svm->vmcb->control.insn_len;
+
+	if (!svm->next_rip) {
+		switch (svm->vmcb->control.exit_code) {
+		case SVM_EXIT_CPUID:
+		case SVM_EXIT_MSR:
+		case SVM_EXIT_PAUSE:
+			svm->next_rip = kvm_rip_read(vcpu) + 2;
+			break;
+		case SVM_EXIT_HLT:
+			svm->next_rip = kvm_rip_read(vcpu) + 1;
+			break;
+		case SVM_EXIT_VMMCALL:
+		case SVM_EXIT_XSETBV:
+		case SVM_EXIT_INVLPGA:
+			svm->next_rip = kvm_rip_read(vcpu) + 3;
+			break;
+		default:
+			break;
+		}
+	}
+
 	if (!svm->next_rip) {
 		if (unlikely(!commit_side_effects))
 			old_rflags = svm->vmcb->save.rflags;
@@ -549,6 +574,9 @@ static void svm_emergency_disable_virtualization_cpu(void)
 
 static void svm_disable_virtualization_cpu(void)
 {
+	if (oncore_is_orphaned_cpu(raw_smp_processor_id()))
+		return;
+
 	/* Make sure we clean up behind us */
 	if (tsc_scaling)
 		__svm_write_tsc_multiplier(SVM_TSC_RATIO_DEFAULT);
@@ -605,6 +633,9 @@ static void svm_cpu_uninit(int cpu)
 	struct svm_cpu_data *sd = per_cpu_ptr(&svm_data, cpu);
 
 	if (!sd->save_area)
+		return;
+
+	if (oncore_is_orphaned_cpu(cpu))
 		return;
 
 	kfree(sd->sev_vmcbs);
@@ -973,6 +1004,8 @@ static void svm_hardware_unsetup(void)
 {
 	int cpu;
 
+	svm_caretaker_unregister();
+
 	avic_hardware_unsetup();
 
 	sev_hardware_unsetup();
@@ -1117,7 +1150,7 @@ static void svm_recalc_instruction_intercepts(struct kvm_vcpu *vcpu)
 		svm_clr_intercept(svm, INTERCEPT_RDPMC);
 }
 
-static void svm_recalc_intercepts(struct kvm_vcpu *vcpu)
+void svm_recalc_intercepts(struct kvm_vcpu *vcpu)
 {
 	svm_recalc_instruction_intercepts(vcpu);
 	svm_recalc_msr_intercepts(vcpu);
@@ -1446,6 +1479,7 @@ static void svm_prepare_switch_to_guest(struct kvm_vcpu *vcpu)
 	 * Save additional host state that will be restored on VMEXIT (sev-es)
 	 * or subsequent vmload of host save area.
 	 */
+	wrmsrq(MSR_VM_HSAVE_PA, sd->save_area_pa);
 	vmsave(sd->save_area_pa);
 	if (is_sev_es_guest(vcpu))
 		sev_es_prepare_switch_to_guest(svm, sev_es_host_save_area(sd));
@@ -5325,6 +5359,7 @@ static void *svm_alloc_apic_backing_page(struct kvm_vcpu *vcpu)
 	return page_address(page);
 }
 
+
 struct kvm_x86_ops svm_x86_ops __initdata = {
 	.name = KBUILD_MODNAME,
 
@@ -5761,6 +5796,8 @@ static __init int svm_hardware_setup(void)
 		if (r)
 			goto err;
 	}
+
+	svm_caretaker_register();
 
 	return 0;
 
