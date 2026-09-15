@@ -217,11 +217,19 @@ void kvm_x86_caretaker_unregister_ops(const struct kvm_x86_caretaker_ops *ops);
 struct kvm_vcpu_ser;
 
 #ifdef CONFIG_KVM_CARETAKER
-void kvm_arch_vcpu_caretaker_init(struct kvm_vcpu *vcpu);
+int kvm_arch_vcpu_caretaker_preserve(struct kvm_vcpu *vcpu,
+				     struct kvm_vcpu_ser *ser,
+				     struct kvm_vcpu_arch_ser *state, size_t size);
 void kvm_arch_vcpu_caretaker_unpreserve(struct kvm_vcpu_ser *ser);
 void kvm_arch_vcpu_caretaker_finish(struct kvm_vcpu_ser *ser);
 #else
-static inline void kvm_arch_vcpu_caretaker_init(struct kvm_vcpu *vcpu) {}
+static inline int kvm_arch_vcpu_caretaker_preserve(struct kvm_vcpu *vcpu,
+						   struct kvm_vcpu_ser *ser,
+						   struct kvm_vcpu_arch_ser *state,
+						   size_t size)
+{
+	return 0;
+}
 static inline void kvm_arch_vcpu_caretaker_unpreserve(struct kvm_vcpu_ser *ser) {}
 static inline void kvm_arch_vcpu_caretaker_finish(struct kvm_vcpu_ser *ser) {}
 #endif

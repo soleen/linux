@@ -20,9 +20,11 @@
 #include <linux/mem_encrypt.h>
 #include <asm/virt.h>
 
+#include "caretaker.h"
 #include "cpuid.h"
 #include "fpu.h"
 #include "lapic.h"
+#include "mmu.h"
 #include "msrs.h"
 #include "pmu.h"
 #include "regs.h"
@@ -30,7 +32,23 @@
 
 int kvm_arch_vm_luo_preserve(struct kvm *kvm, struct kvm_luo_ser *ser)
 {
+	int ret;
+
 	ser->type = kvm->arch.vm_type;
+
+	/*
+	 * Shadow/TDP page tables are a VM-wide resource: an orphaned vCPU keeps
+	 * running the guest out of them while the VM is detached, so they must
+	 * survive the kexec.  Preserve them once here rather than once per vCPU
+	 * from the caretaker init hook -- the walk is O(size of the guest's page
+	 * tables) and holds mmu_lock for write, so repeating it per vCPU is both
+	 * redundant and a scalability problem on large guests.
+	 */
+	ret = kvm_mmu_preserve_kho(kvm);
+	if (ret)
+		return ret;
+
+	KHOSER_STORE_PTR(ser->kho_folios, kvm->kho_folios);
 	return 0;
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vm_luo_preserve);
@@ -185,6 +203,16 @@ int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_ser *ser)
 	vcpu_put(vcpu);
 
 	KHOSER_STORE_PTR(ser->arch_state, state);
+
+	if (ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER) {
+		int err = kvm_arch_vcpu_caretaker_preserve(vcpu, ser, state, size);
+
+		if (err) {
+			kho_unpreserve_free(state);
+			return err;
+		}
+	}
+
 	return 0;
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_preserve);
@@ -315,6 +343,7 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_retrieve);
 
 void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_ser *ser)
 {
+	kvm_arch_vcpu_caretaker_unpreserve(ser);
 	if (ser->arch_state.phys) {
 		struct kvm_vcpu_arch_ser *state =
 			phys_to_virt(__sme_clr(ser->arch_state.phys));
@@ -327,6 +356,7 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_arch_vcpu_luo_unpreserve);
 
 void kvm_arch_vcpu_luo_finish(struct kvm_vcpu_ser *ser)
 {
+	kvm_arch_vcpu_caretaker_finish(ser);
 	if (ser->arch_state.phys) {
 		struct kvm_vcpu_arch_ser *state =
 			phys_to_virt(__sme_clr(ser->arch_state.phys));
