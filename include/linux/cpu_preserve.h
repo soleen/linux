@@ -11,6 +11,7 @@
 #include <linux/compiler.h>
 #include <linux/cpumask.h>
 #include <linux/errno.h>
+#include <linux/list.h>
 #include <linux/smp.h>
 #include <linux/types.h>
 
@@ -207,16 +208,6 @@ void arch_cpu_preserved_dcache_clean(unsigned long start, unsigned long end);
 void arch_cpu_preserved_dcache_inval(unsigned long start, unsigned long end);
 
 /**
- * arch_cpu_preserved_preserve_pagetables - Preserve architecture page tables
- *
- * Architecture backend hook to preserve kernel page tables backing identity
- * and kernel mappings across live update.
- *
- * Executed by outgoing kernel in normal text context before kexec.
- */
-void arch_cpu_preserved_preserve_pagetables(void);
-
-/**
  * arch_cpu_preserved_wait_dead - Wait for CPU to reach dead state
  * @cpu: Logical CPU identifier.
  *
@@ -228,7 +219,6 @@ void arch_cpu_preserved_wait_dead(int cpu);
 
 struct page;
 
-void *arch_cpu_preserved_get_pgd(void);
 /**
  * arch_cpu_preserved_setup_buffer - Map preserved execution buffer outside Scratch
  * @text_page: Head page of allocated preserved text memory.
@@ -238,8 +228,7 @@ void *arch_cpu_preserved_get_pgd(void);
  *
  * Architecture backend hook to remap kernel page table entries for
  * __cpu_preserved_text and __cpu_preserved_data to the newly allocated
- * pages outside Scratch memory, and clone page tables for preserved CPUs
- * across live update.
+ * pages outside Scratch memory.
  *
  * Return: 0 on success, or a negative errno on failure.
  */
@@ -248,15 +237,94 @@ int arch_cpu_preserved_setup_buffer(struct page *text_page,
 				    struct page *data_page,
 				    unsigned int data_nr_pages);
 
-/**
- * arch_cpu_preserved_unpreserve_pagetables - Unpreserve architecture page tables
- *
- * Architecture backend hook to unpreserve and release page table pages that
- * were cloned and preserved for live update handover, invoked when live
- * update is cancelled or unpreserved.
+/*
+ * Upper bound on page table pages in one preserved address space.  Every
+ * mapping is forced down to PTE granularity and the mapped set is small (the
+ * preserved text and data, the per-CPU descriptors, one stack per preserved
+ * CPU and the workload buffers), so this is roughly an order of magnitude
+ * more than any real configuration needs.
  */
-void arch_cpu_preserved_unpreserve_pagetables(void);
+#define CPU_PRESERVED_AS_MAX_PGTABLE_PAGES	1024
+
+/**
+ * struct cpu_preserved_as - An address space a preserved CPU can run in
+ * @node:             Entry on the global list of preserved address spaces.
+ * @pgd:              Root page table.
+ * @pgd_pa:           Physical address of @pgd, as loaded into CR3 / TTBR1.
+ * @is_incoming:      This address space was built by the previous kernel.
+ * @nr_pgtable_pages: Number of valid entries in @pgtable_pages.
+ * @pgtable_pages:    Physical address of every page table page, @pgd
+ *                    included.  Recorded by physical address rather than on a
+ *                    struct page list because the incoming kernel has to free
+ *                    them and its struct pages are not the ones the outgoing
+ *                    kernel linked together.
+ *
+ * A preserved CPU runs with the host kernel torn down underneath it, so it
+ * cannot use the host page tables: it needs an address space that maps only
+ * memory that has been handed over, and that no longer depends on anything the
+ * incoming kernel is free to reuse.  Every such address space is built here,
+ * out of pages that are themselves preserved, and is registered on a global
+ * list so that a range mapped for preserved CPUs lands in all of them.
+ */
+struct cpu_preserved_as {
+	struct list_head	node;
+	void			*pgd;
+	phys_addr_t		pgd_pa;
+	bool			is_incoming;
+	unsigned int		nr_pgtable_pages;
+	phys_addr_t		pgtable_pages[CPU_PRESERVED_AS_MAX_PGTABLE_PAGES];
+};
+
+struct cpu_preserved_as *cpu_preserved_as_create(void);
+void cpu_preserved_as_destroy(struct cpu_preserved_as *as);
+void cpu_preserved_as_adopt(struct cpu_preserved_as *as);
+int cpu_preserved_as_map(struct cpu_preserved_as *as, phys_addr_t pa,
+			 unsigned long va, size_t size, pgprot_t prot);
+void *cpu_preserved_as_alloc_page(void *arg);
+
+/**
+ * arch_cpu_preserved_as_map - Add one range to a preserved address space
+ * @as: Address space to map into; @as->pgd is the root to populate.
+ * @pa: Physical address of the range.
+ * @va: Virtual address the range must appear at.
+ * @size: Size of the range in bytes.
+ * @prot: Protection to apply.
+ *
+ * Architecture backend for cpu_preserved_as_map().  Page table pages must be
+ * obtained from cpu_preserved_as_alloc_page() with @as as its argument, so
+ * that the core layer can preserve and later free them; the caller holds the
+ * mapping lock and takes care of cache maintenance and of the TLB.
+ *
+ * Return: 0 on success, or a negative errno on failure.
+ */
+int arch_cpu_preserved_as_map(struct cpu_preserved_as *as, phys_addr_t pa,
+			      unsigned long va, size_t size, pgprot_t prot);
+
+/**
+ * arch_cpu_preserved_as_flush_tlb - Publish preserved page table updates
+ *
+ * Called after every successful arch_cpu_preserved_as_map().  Architectures
+ * whose preserved CPUs can hold stale translations for these address spaces
+ * must invalidate them here; the others need do nothing.
+ */
+void arch_cpu_preserved_as_flush_tlb(void);
+
+/**
+ * arch_cpu_preserved_set_transition_as - Publish the default address space
+ * @as: Address space a preserved CPU parks in when its workload has none.
+ *
+ * The value has to be readable from preserved text after the kexec, which is
+ * architecture specific storage, so the core layer hands it over rather than
+ * exporting a variable.
+ */
+void arch_cpu_preserved_set_transition_as(struct cpu_preserved_as *as);
+
 int cpu_preserved_init_runtime_buffer(void);
+int cpu_preserved_map_range(phys_addr_t pa, unsigned long va,
+			    size_t size, pgprot_t prot);
+int cpu_preserved_map_buffer(void *va, size_t size);
+int arch_cpu_preserved_mpidr_to_cpu(u64 mpidr);
+bool arch_cpu_preserved_is_active(void);
 void arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa);
 
 #else /* !CONFIG_LIVEUPDATE_CPU */
@@ -308,9 +376,7 @@ static inline void arch_cpu_preserved_dcache_clean(unsigned long start,
 						   unsigned long end) {}
 static inline void arch_cpu_preserved_dcache_inval(unsigned long start,
 						   unsigned long end) {}
-static inline void arch_cpu_preserved_preserve_pagetables(void) {}
 static inline void arch_cpu_preserved_wait_dead(int cpu) {}
-static inline void *arch_cpu_preserved_get_pgd(void) { return NULL; }
 static inline phys_addr_t cpu_preserved_get_pgd(int cpu) { return 0; }
 static inline int arch_cpu_preserved_setup_buffer(struct page *text_page,
 						  unsigned int text_nr_pages,
@@ -319,8 +385,12 @@ static inline int arch_cpu_preserved_setup_buffer(struct page *text_page,
 {
 	return 0;
 }
-static inline void arch_cpu_preserved_unpreserve_pagetables(void) {}
 static inline int cpu_preserved_init_runtime_buffer(void) { return 0; }
+static inline int cpu_preserved_map_range(phys_addr_t pa, unsigned long va,
+					  size_t size, pgprot_t prot) { return 0; }
+static inline int cpu_preserved_map_buffer(void *va, size_t size) { return 0; }
+static inline int arch_cpu_preserved_mpidr_to_cpu(u64 mpidr) { return -EINVAL; }
+static inline bool arch_cpu_preserved_is_active(void) { return false; }
 static inline void arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa) {}
 static inline struct cpu_preserved_stack_context *
 cpu_preserved_get_stack_context(void)
