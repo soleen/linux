@@ -9600,6 +9600,22 @@ take care to differentiate between these cases.
 The presence of this capability indicates that the nested KVM guest can
 start in ESA mode.
 
+8.48 KVM_CAP_CARETAKER
+----------------------
+
+:Architectures: x86, arm64
+
+This capability, if ``KVM_CHECK_EXTENSION`` returns a non-zero value,
+indicates that the host kernel supports Caretaker on-core guest execution
+across kexec-based host live updates.
+
+When both a vCPU file descriptor and its backing physical CPU's preservation
+file descriptor (``/sys/devices/system/cpu/cpuX/preserve``) are preserved in a
+Live Update Orchestrator (LUO) session, KVM schedules the vCPU to continue
+executing on-core within the preserved Caretaker environment throughout the
+host kexec transition, rather than pausing vCPU execution until the incoming
+kernel re-attaches.
+
 9. Known KVM API problems
 =========================
 
