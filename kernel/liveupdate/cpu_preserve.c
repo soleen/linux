@@ -98,11 +98,312 @@ static struct cpu_preserved_outgoing cpu_preserved_outgoing __cpu_preserved_data
 static cpumask_t cpu_preserved_mask __cpu_preserved_data;
 static phys_addr_t cpu_preserved_pcpus_pa __cpu_preserved_data;
 static struct cpu_preserved_pcpu *cpu_preserved_pcpus_va __cpu_preserved_data;
+static struct cpu_preserved_global_ser *cpu_preserved_global_ser __cpu_preserved_data;
 
 static struct page *cpu_preserved_text_pages;
 static unsigned int cpu_preserved_text_order;
 static struct page *cpu_preserved_data_pages;
 static unsigned int cpu_preserved_data_order;
+static bool cpu_preserved_runtime_preserved;
+
+static __maybe_unused void cpu_preserved_sync_global_ser(void)
+{
+	struct cpu_preserved_global_ser *ser = cpu_preserved_global_ser;
+
+	if (!ser)
+		return;
+
+	bitmap_to_arr64(ser->cpu_preserved_bitmap,
+			cpumask_bits(&cpu_preserved_mask), nr_cpu_ids);
+	if (cpu_preserved_text_pages) {
+		ser->text_runtime_pa = page_to_phys(cpu_preserved_text_pages);
+		ser->text_runtime_size =
+			(1UL << cpu_preserved_text_order) * PAGE_SIZE;
+	}
+	if (cpu_preserved_data_pages) {
+		ser->data_runtime_pa = page_to_phys(cpu_preserved_data_pages);
+		ser->data_runtime_size =
+			(1UL << cpu_preserved_data_order) * PAGE_SIZE;
+	}
+	ser->pcpus_runtime_pa = cpu_preserved_pcpus_pa;
+	cpu_preserved_clean_sz(ser,
+			       struct_size(ser, cpu_preserved_bitmap, ser->nr_cpu_words));
+}
+
+/*
+ * Address spaces are mapped into under @cpu_preserved_as_map_lock and
+ * enumerated under @cpu_preserved_as_list_lock.  cpu_preserved_map_range()
+ * holds the list lock across the map lock; nothing takes them the other way
+ * round.
+ */
+static DEFINE_MUTEX(cpu_preserved_as_list_lock);
+static DEFINE_MUTEX(cpu_preserved_as_map_lock);
+static LIST_HEAD(cpu_preserved_as_list);
+static struct cpu_preserved_as *cpu_preserved_transition_as;
+
+/**
+ * cpu_preserved_as_alloc_page - Allocate a page table page for @arg
+ * @arg: The struct cpu_preserved_as being populated.
+ *
+ * Page table allocator handed to the architecture page table builders.
+ *
+ * There is deliberately no alloc_page() fallback.  It would be
+ * kho_alloc_preserve() open-coded, and the only way it could differ is by
+ * ignoring the preservation error -- which would hand back an unpreserved
+ * page table page.  The orphaned core has no fault handler, so that failure
+ * is unrecoverable and must not be silent.
+ *
+ * Return: A zeroed, preserved page, or NULL.
+ */
+void *cpu_preserved_as_alloc_page(void *arg)
+{
+	struct cpu_preserved_as *as = arg;
+	void *ptr;
+
+	if (WARN_ON_ONCE(as->nr_pgtable_pages >= ARRAY_SIZE(as->pgtable_pages)))
+		return NULL;
+
+	ptr = kho_alloc_preserve(PAGE_SIZE);
+	if (IS_ERR_OR_NULL(ptr))
+		return NULL;
+
+	cpu_preserved_clean_sz(ptr, PAGE_SIZE);
+	as->pgtable_pages[as->nr_pgtable_pages++] = virt_to_phys(ptr);
+
+	return ptr;
+}
+
+/*
+ * Page table pages are preserved as they are allocated, but a cancelled live
+ * update unpreserves everything, so state the preservation again after every
+ * change.  Pages inherited from the previous kernel already belong to KHO.
+ */
+static int cpu_preserved_as_preserve_pgtables(struct cpu_preserved_as *as)
+{
+	unsigned int i;
+
+	if (!as || as->is_incoming)
+		return 0;
+
+	for (i = 0; i < as->nr_pgtable_pages; i++) {
+		void *p = phys_to_virt(as->pgtable_pages[i]);
+		int ret;
+
+		cpu_preserved_clean_sz(p, PAGE_SIZE);
+		ret = kho_preserve_pages(virt_to_page(p), 1);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static void cpu_preserved_as_unpreserve_pgtables(struct cpu_preserved_as *as)
+{
+	unsigned int i;
+
+	if (!as || as->is_incoming)
+		return;
+
+	for (i = 0; i < as->nr_pgtable_pages; i++)
+		kho_unpreserve_pages(virt_to_page(phys_to_virt(as->pgtable_pages[i])), 1);
+}
+
+/**
+ * cpu_preserved_as_map - Map one range into one preserved address space
+ * @as: Address space to map into.  NULL is accepted and does nothing.
+ * @pa: Physical address of the range.
+ * @va: Virtual address the range must appear at.
+ * @size: Size of the range in bytes.
+ * @prot: Protection to apply.
+ *
+ * Return: 0 on success, negative errno on failure.
+ */
+int cpu_preserved_as_map(struct cpu_preserved_as *as, phys_addr_t pa,
+			 unsigned long va, size_t size, pgprot_t prot)
+{
+	int ret;
+
+	if (!as || !as->pgd || !size)
+		return 0;
+
+	guard(mutex)(&cpu_preserved_as_map_lock);
+
+	ret = arch_cpu_preserved_as_map(as, pa, va, size, prot);
+	if (ret)
+		return ret;
+
+	ret = cpu_preserved_as_preserve_pgtables(as);
+	if (ret)
+		return ret;
+
+	arch_cpu_preserved_as_flush_tlb();
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_as_map);
+
+/**
+ * cpu_preserved_as_create - Build a new preserved address space
+ *
+ * Allocates a root page table, maps the preserved text and data into it, and
+ * publishes it so that subsequent cpu_preserved_map_range() calls reach it.
+ * The caller must have set up the runtime buffer first.
+ *
+ * Return: The new address space, or an ERR_PTR() on failure.
+ */
+struct cpu_preserved_as *cpu_preserved_as_create(void)
+{
+	unsigned long text_start = (unsigned long)__cpu_preserved_text_start;
+	unsigned long data_start = (unsigned long)__cpu_preserved_data_start;
+	size_t text_sz = (unsigned long)__cpu_preserved_text_end - text_start;
+	size_t data_sz = (unsigned long)__cpu_preserved_data_end - data_start;
+	phys_addr_t text_pa = cpu_preserved_get_text_pa();
+	phys_addr_t data_pa = cpu_preserved_get_data_pa();
+	struct cpu_preserved_as *as;
+	int ret;
+
+	if (!text_pa || !data_pa)
+		return ERR_PTR(-EAGAIN);
+
+	as = kho_alloc_preserve(sizeof(*as));
+	if (IS_ERR(as))
+		return as;
+
+	INIT_LIST_HEAD(&as->node);
+
+	as->pgd = cpu_preserved_as_alloc_page(as);
+	if (!as->pgd) {
+		ret = -ENOMEM;
+		goto err;
+	}
+	as->pgd_pa = virt_to_phys(as->pgd);
+
+	ret = cpu_preserved_as_map(as, text_pa, text_start, text_sz,
+				   PAGE_KERNEL_ROX);
+	if (ret)
+		goto err;
+
+	ret = cpu_preserved_as_map(as, data_pa, data_start, data_sz,
+				   PAGE_KERNEL);
+	if (ret)
+		goto err;
+
+	scoped_guard(mutex, &cpu_preserved_as_list_lock)
+		list_add_tail(&as->node, &cpu_preserved_as_list);
+
+	return as;
+
+err:
+	cpu_preserved_as_destroy(as);
+	return ERR_PTR(ret);
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_as_create);
+
+/**
+ * cpu_preserved_as_destroy - Tear down a preserved address space
+ * @as: Address space to release.  NULL is accepted and does nothing.
+ */
+void cpu_preserved_as_destroy(struct cpu_preserved_as *as)
+{
+	bool is_incoming;
+	unsigned int i;
+
+	if (!as)
+		return;
+
+	scoped_guard(mutex, &cpu_preserved_as_list_lock)
+		list_del_init(&as->node);
+
+	scoped_guard(mutex, &cpu_preserved_as_map_lock) {
+		for (i = 0; i < as->nr_pgtable_pages; i++) {
+			void *p = phys_to_virt(as->pgtable_pages[i]);
+
+			if (as->is_incoming)
+				kho_restore_free(p);
+			else
+				kho_unpreserve_free(p);
+		}
+
+		as->nr_pgtable_pages = 0;
+		as->pgd = NULL;
+		as->pgd_pa = 0;
+	}
+
+	is_incoming = as->is_incoming;
+	if (is_incoming)
+		kho_restore_free(as);
+	else
+		kho_unpreserve_free(as);
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_as_destroy);
+
+/**
+ * cpu_preserved_as_adopt - Take over an address space from the previous kernel
+ * @as: Address space recovered from preserved memory.
+ *
+ * The page tables are left exactly as the outgoing kernel built them --
+ * preserved CPUs are running out of them right now -- but the list linkage is
+ * stale and has to be rebuilt, and the pages now belong to KHO rather than to
+ * this kernel's allocator.
+ */
+void cpu_preserved_as_adopt(struct cpu_preserved_as *as)
+{
+	if (!as)
+		return;
+
+	as->pgd = phys_to_virt(as->pgd_pa);
+	as->is_incoming = true;
+
+	guard(mutex)(&cpu_preserved_as_list_lock);
+	list_add_tail(&as->node, &cpu_preserved_as_list);
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_as_adopt);
+
+static void cpu_preserved_preserve_runtime_buffer(void)
+{
+	if (cpu_preserved_runtime_preserved)
+		return;
+	if (!cpu_preserved_text_pages || !cpu_preserved_data_pages)
+		return;
+
+	/*
+	 * This is the text the orphaned core executes and the data it reads
+	 * after the kexec.  If either cannot be preserved there is nothing to
+	 * hand over, so do not claim the runtime is preserved.
+	 */
+	if (WARN_ON_ONCE(kho_preserve_pages(cpu_preserved_text_pages,
+					    1 << cpu_preserved_text_order)))
+		return;
+	if (WARN_ON_ONCE(kho_preserve_pages(cpu_preserved_data_pages,
+					    1 << cpu_preserved_data_order)))
+		return;
+
+	scoped_guard(mutex, &cpu_preserved_as_map_lock)
+		WARN_ON_ONCE(cpu_preserved_as_preserve_pgtables(cpu_preserved_transition_as));
+
+	cpu_preserved_runtime_preserved = true;
+}
+
+static void cpu_preserved_unpreserve_runtime_buffer(void)
+{
+	if (!cpu_preserved_runtime_preserved)
+		return;
+
+	if (cpu_preserved_text_pages) {
+		kho_unpreserve_pages(cpu_preserved_text_pages,
+				     1 << cpu_preserved_text_order);
+	}
+	if (cpu_preserved_data_pages) {
+		kho_unpreserve_pages(cpu_preserved_data_pages,
+				     1 << cpu_preserved_data_order);
+	}
+
+	scoped_guard(mutex, &cpu_preserved_as_map_lock)
+		cpu_preserved_as_unpreserve_pgtables(cpu_preserved_transition_as);
+
+	cpu_preserved_runtime_preserved = false;
+}
 
 /**
  * cpu_preserved_init_runtime_buffer - Allocate execution buffer outside Scratch
