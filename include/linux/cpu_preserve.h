@@ -261,6 +261,57 @@ void cpu_preserved_as_unpreserve(struct cpu_preserved_as_ser *ser);
 void cpu_preserved_as_restore_free(struct cpu_preserved_as_ser *ser);
 int cpu_preserved_as_map(struct cpu_preserved_as_ser *as, phys_addr_t pa,
 			 unsigned long va, size_t size, pgprot_t prot);
+void *cpu_preserved_as_alloc_page(void *arg);
+
+/**
+ * arch_cpu_preserved_as_map - Add one range to a preserved address space
+ * @as: Address space to map into; its root PGD is at index 0 of pgtable_pages.
+ * @pa: Physical address of the range.
+ * @va: Virtual address the range must appear at.
+ * @size: Size of the range in bytes.
+ * @prot: Protection to apply.
+ *
+ * Architecture backend for cpu_preserved_as_map(). Page table pages must be
+ * obtained from cpu_preserved_as_alloc_page() with @as as its argument, so
+ * that the core layer can preserve and later free them; the caller holds the
+ * mapping lock and takes care of cache maintenance and of the TLB.
+ *
+ * Return: 0 on success, or a negative errno on failure.
+ */
+int arch_cpu_preserved_as_map(struct cpu_preserved_as_ser *as, phys_addr_t pa,
+			      unsigned long va, size_t size, pgprot_t prot);
+
+/**
+ * arch_cpu_preserved_as_flush_tlb - Publish preserved page table updates
+ *
+ * Called after every successful arch_cpu_preserved_as_map(). Architectures
+ * whose preserved CPUs can hold stale translations for these address spaces
+ * must invalidate them here; the others need do nothing.
+ */
+void arch_cpu_preserved_as_flush_tlb(void);
+
+/**
+ * arch_cpu_preserved_mpidr_to_cpu - Map an ARM64 MPIDR affinity value to a logical CPU ID
+ * @mpidr: Hardware MPIDR affinity value.
+ *
+ * Return: Logical CPU identifier, or -EINVAL if not found.
+ */
+int arch_cpu_preserved_mpidr_to_cpu(u64 mpidr);
+
+/**
+ * arch_cpu_preserved_is_active - Check whether any preserved CPU runtime mapping is active
+ *
+ * Return: %true if preserved runtime mappings are active, %false otherwise.
+ */
+bool arch_cpu_preserved_is_active(void);
+
+/**
+ * arch_cpu_preserved_switch_pgd - Switch the current preserved CPU to an isolated PGD
+ * @pgd_pa: Physical address of the root page table to install.
+ *
+ * This function must be placed in the __cpu_preserved_text section.
+ */
+void arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa);
 
 #else /* !CONFIG_LIVEUPDATE_CPU */
 

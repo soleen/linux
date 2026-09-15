@@ -197,6 +197,7 @@
 #include <linux/liveupdate.h>
 #include <linux/mm.h>
 #include <linux/objtool.h>
+#include <linux/oncore.h>
 #include <linux/reboot.h>
 
 #include <asm/sections.h>
@@ -269,6 +270,593 @@ static void cpu_preserved_free_kho(void *va, bool is_incoming)
 		kho_unpreserve_free(va);
 }
 
+/**
+ * cpu_preserved_as_alloc_page - Allocate a page table page for @arg
+ * @arg: The struct cpu_preserved_as_ser being populated.
+ *
+ * Page table allocator handed to the architecture page table builders.
+ *
+ * Return: A zeroed, preserved page, or NULL.
+ */
+void *cpu_preserved_as_alloc_page(void *arg)
+{
+	struct cpu_preserved_as_ser *as = arg;
+	void *ptr;
+
+	if (WARN_ON_ONCE(as->nr_pgtable_pages >= ARRAY_SIZE(as->pgtable_pages)))
+		return NULL;
+
+	ptr = kho_alloc_preserve(PAGE_SIZE);
+	if (IS_ERR_OR_NULL(ptr))
+		return NULL;
+
+	cpu_preserved_clean_sz(ptr, PAGE_SIZE);
+	as->pgtable_pages[as->nr_pgtable_pages++] = virt_to_phys(ptr);
+
+	return ptr;
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_as_alloc_page);
+
+/**
+ * cpu_preserved_as_map - Map one range into one preserved address space
+ * @as: Address space to map into.
+ * @pa: Physical address of the range.
+ * @va: Virtual address the range must appear at.
+ * @size: Size of the range in bytes.
+ * @prot: Protection to apply.
+ *
+ * Return: 0 on success, negative errno on failure.
+ */
+int cpu_preserved_as_map(struct cpu_preserved_as_ser *as, phys_addr_t pa,
+			 unsigned long va, size_t size, pgprot_t prot)
+{
+	unsigned int i;
+	int ret;
+
+	guard(mutex)(&cpu_preserved_as_map_lock);
+	ret = arch_cpu_preserved_as_map(as, pa, va, size, prot);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < as->nr_pgtable_pages; i++)
+		cpu_preserved_clean_sz(phys_to_virt(as->pgtable_pages[i]), PAGE_SIZE);
+	cpu_preserved_clean(as);
+
+	arch_cpu_preserved_as_flush_tlb();
+	return 0;
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_as_map);
+
+static int cpu_preserved_init_runtime_buffer(void);
+
+static int cpu_preserved_as_map_runtime(struct cpu_preserved_as_ser *as)
+{
+	unsigned long text_start = (unsigned long)__cpu_preserved_text_start;
+	unsigned long data_start = (unsigned long)__cpu_preserved_data_start;
+	size_t text_sz = (unsigned long)__cpu_preserved_text_end - text_start;
+	size_t data_sz = (unsigned long)__cpu_preserved_data_end - data_start;
+	int ret;
+
+	ret = cpu_preserved_as_map(as, cpu_preserved_get_text_pa(),
+				   text_start, text_sz, PAGE_KERNEL_ROX);
+	if (ret)
+		return ret;
+
+	return cpu_preserved_as_map(as, cpu_preserved_get_data_pa(),
+				    data_start, data_sz, PAGE_KERNEL);
+}
+
+/**
+ * cpu_preserved_as_create - Build a new preserved address space
+ *
+ * Allocates a root page table and maps the preserved text and data into it.
+ *
+ * Return: The new address space, or an ERR_PTR() on failure.
+ */
+struct cpu_preserved_as_ser *cpu_preserved_as_create(void)
+{
+	struct cpu_preserved_as_ser *as;
+	void *pgd;
+	int ret;
+
+	ret = cpu_preserved_init_runtime_buffer();
+	if (ret)
+		return ERR_PTR(ret);
+
+	as = kho_alloc_preserve(sizeof(*as));
+	if (IS_ERR(as))
+		return as;
+
+	memset(as, 0, sizeof(*as));
+
+	pgd = cpu_preserved_as_alloc_page(as);
+	if (!pgd) {
+		kho_unpreserve_free(as);
+		return ERR_PTR(-ENOMEM);
+	}
+	cpu_preserved_clean(as);
+
+	ret = cpu_preserved_as_map_runtime(as);
+	if (ret) {
+		cpu_preserved_as_unpreserve(as);
+		return ERR_PTR(ret);
+	}
+
+	return as;
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_as_create);
+
+/**
+ * cpu_preserved_as_unpreserve - Free an outgoing preserved address space
+ * @ser: Address space descriptor to release.
+ */
+void cpu_preserved_as_unpreserve(struct cpu_preserved_as_ser *ser)
+{
+	if (!ser)
+		return;
+
+	scoped_guard(mutex, &cpu_preserved_as_map_lock) {
+		for (unsigned int i = 0; i < ser->nr_pgtable_pages; i++) {
+			void *va = phys_to_virt(ser->pgtable_pages[i]);
+
+			kho_unpreserve_free(va);
+		}
+	}
+	kho_unpreserve_free(ser);
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_as_unpreserve);
+
+/**
+ * cpu_preserved_as_restore_free - Free an incoming preserved address space
+ * @ser: Address space descriptor recovered from preserved memory.
+ */
+void cpu_preserved_as_restore_free(struct cpu_preserved_as_ser *ser)
+{
+	if (!ser)
+		return;
+
+	for (unsigned int i = 0; i < ser->nr_pgtable_pages; i++) {
+		void *va = phys_to_virt(ser->pgtable_pages[i]);
+
+		kho_restore_free(va);
+	}
+	kho_restore_free(ser);
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_as_restore_free);
+
+static void cpu_preserved_preserve_runtime_buffer(void)
+{
+	if (cpu_preserved_runtime_preserved)
+		return;
+
+	if (WARN_ON_ONCE(kho_preserve_pages(cpu_preserved_text_pages,
+					    1 << cpu_preserved_text_order)))
+		return;
+	if (WARN_ON_ONCE(kho_preserve_pages(cpu_preserved_data_pages,
+					    1 << cpu_preserved_data_order)))
+		return;
+
+	cpu_preserved_runtime_preserved = true;
+}
+
+static void cpu_preserved_unpreserve_runtime_buffer(void)
+{
+	if (!cpu_preserved_runtime_preserved)
+		return;
+
+	kho_unpreserve_pages(cpu_preserved_text_pages,
+			     1 << cpu_preserved_text_order);
+	kho_unpreserve_pages(cpu_preserved_data_pages,
+			     1 << cpu_preserved_data_order);
+
+	cpu_preserved_runtime_preserved = false;
+}
+
+/**
+ * cpu_preserved_init_runtime_buffer - Allocate execution buffer outside Scratch
+ *
+ * Return: 0 on success, or negative error code on allocation/setup failure.
+ */
+static int cpu_preserved_init_runtime_buffer(void)
+{
+	size_t text_size = (unsigned long)__cpu_preserved_text_end -
+			   (unsigned long)__cpu_preserved_text_start;
+	size_t data_size = (unsigned long)__cpu_preserved_data_end -
+			   (unsigned long)__cpu_preserved_data_start;
+	unsigned int text_nr_pages = DIV_ROUND_UP(text_size, PAGE_SIZE);
+	unsigned int data_nr_pages = DIV_ROUND_UP(data_size, PAGE_SIZE);
+	int ret;
+
+	if (cpu_preserved_text_pages) {
+		cpu_preserved_preserve_runtime_buffer();
+		return 0;
+	}
+
+	cpu_preserved_text_order = get_order(text_size);
+	cpu_preserved_text_pages = alloc_pages(GFP_KERNEL, cpu_preserved_text_order);
+	if (!cpu_preserved_text_pages)
+		return -ENOMEM;
+
+	cpu_preserved_data_order = get_order(data_size);
+	cpu_preserved_data_pages = alloc_pages(GFP_KERNEL, cpu_preserved_data_order);
+	if (!cpu_preserved_data_pages) {
+		__free_pages(cpu_preserved_text_pages, cpu_preserved_text_order);
+		cpu_preserved_text_pages = NULL;
+		return -ENOMEM;
+	}
+
+	memcpy(page_address(cpu_preserved_text_pages),
+	       __cpu_preserved_text_start, text_size);
+	memcpy(page_address(cpu_preserved_data_pages),
+	       __cpu_preserved_data_start, data_size);
+
+	ret = arch_cpu_preserved_setup_buffer(cpu_preserved_text_pages,
+					      text_nr_pages,
+					      cpu_preserved_data_pages,
+					      data_nr_pages);
+	if (ret)
+		goto err_free;
+
+	cpu_preserved_preserve_runtime_buffer();
+	return 0;
+
+err_free:
+	__free_pages(cpu_preserved_data_pages, cpu_preserved_data_order);
+	__free_pages(cpu_preserved_text_pages, cpu_preserved_text_order);
+	cpu_preserved_data_pages = NULL;
+	cpu_preserved_text_pages = NULL;
+	return ret;
+}
+
+/**
+ * cpu_is_preserved - Check whether a CPU is currently preserved
+ * @cpu: Logical CPU identifier.
+ *
+ * Return: True if @cpu is currently preserved, false otherwise.
+ */
+bool __cpu_preserved_text cpu_is_preserved(int cpu)
+{
+	if ((unsigned int)cpu >= CONFIG_NR_CPUS)
+		return false;
+	cpu_preserved_inval(&cpu_preserved_mask);
+	return arch_test_bit(cpu, cpumask_bits(&cpu_preserved_mask));
+}
+EXPORT_SYMBOL_GPL(cpu_is_preserved);
+
+static bool cpu_preserved_is_incoming(int cpu)
+{
+	if ((unsigned int)cpu >= CONFIG_NR_CPUS)
+		return false;
+	return cpumask_test_cpu(cpu, &cpu_preserved_incoming.mask);
+}
+
+static struct cpu_preserved_ser *cpu_preserved_get_ser(int cpu)
+{
+	if ((unsigned int)cpu >= nr_cpu_ids)
+		return NULL;
+
+	if (cpu_preserved_is_incoming(cpu))
+		return cpu_preserved_incoming.cpus ? cpu_preserved_incoming.cpus[cpu] : NULL;
+
+	return cpu_preserved_outgoing.cpus ? cpu_preserved_outgoing.cpus[cpu] : NULL;
+}
+
+static void *cpu_preserved_stack_va(int cpu)
+{
+	struct cpu_preserved_ser *ser;
+	phys_addr_t pa;
+
+	ser = cpu_preserved_get_ser(cpu);
+	if (!ser)
+		return NULL;
+
+	cpu_preserved_inval(&ser->stack_pa);
+	pa = READ_ONCE(ser->stack_pa);
+	if (!pa)
+		return NULL;
+
+	return phys_to_virt(pa);
+}
+
+/**
+ * cpu_preserved_get_pgd - Get root page table physical address for a preserved CPU
+ * @cpu: Logical CPU identifier.
+ *
+ * Return: Root PGD physical address assigned to @cpu, or 0 if not set.
+ */
+phys_addr_t __cpu_preserved_text cpu_preserved_get_pgd(int cpu)
+{
+	struct cpu_preserved_stack_context *sctx = cpu_preserved_get_stack_context();
+
+	if (sctx && sctx->session_pgd_pa)
+		return sctx->session_pgd_pa;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_get_pgd);
+
+/**
+ * cpu_get_preserved_mask - Get the mask of all currently preserved CPUs
+ *
+ * Return: Read-only pointer to the cpumask of preserved CPUs.
+ */
+const struct cpumask *cpu_get_preserved_mask(void)
+{
+	return &cpu_preserved_mask;
+}
+EXPORT_SYMBOL_GPL(cpu_get_preserved_mask);
+
+/**
+ * cpu_preserved_set_dead - Mark a preserved CPU as fully dead/stopped
+ * @cpu: Logical CPU identifier.
+ */
+void __cpu_preserved_text cpu_preserved_set_dead(int cpu)
+{
+	struct cpu_preserved_stack_context *ser = cpu_preserved_get_stack_context();
+
+	if (ser) {
+		/* Memory barrier before updating workload state */
+		smp_mb();
+		WRITE_ONCE(ser->ser->state, CPU_PRESERVED_DEAD);
+		cpu_preserved_clean(ser->ser);
+	}
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_set_dead);
+
+static void cpu_signal_exit(int cpu)
+{
+	struct cpu_preserved_stack_context *sctx = cpu_preserved_stack_va(cpu);
+	struct cpu_preserved_ser *ser = cpu_preserved_get_ser(cpu);
+
+	if (ser) {
+		WRITE_ONCE(ser->state, CPU_PRESERVED_EXITING);
+		cpu_preserved_clean(ser);
+	}
+	if (sctx) {
+		WRITE_ONCE(sctx->entry_fn, NULL);
+		WRITE_ONCE(sctx->workload_context, 0);
+		cpu_preserved_clean(sctx);
+	}
+}
+
+/**
+ * cpu_preserved_should_exit - Check if a running preserved workload should exit
+ * @cpu: Logical CPU identifier.
+ *
+ * Return: %true if the workload on @cpu must exit back to the park loop,
+ *         %false otherwise.
+ */
+bool __cpu_preserved_text cpu_preserved_should_exit(int cpu)
+{
+	struct cpu_preserved_stack_context *sctx = cpu_preserved_get_stack_context();
+
+	if (!sctx || !sctx->ser)
+		return false;
+
+	cpu_preserved_inval(sctx->ser);
+	return READ_ONCE(sctx->ser->state) != CPU_PRESERVED_WORKLOAD;
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_should_exit);
+
+/**
+ * cpu_preserved_attach_workload - Attach & start workload execution on core
+ * @cpu: Logical CPU identifier.
+ * @entry_fn: Workload callback to execute repeatedly on the physical core.
+ * @data: Opaque argument passed to @entry_fn.
+ *
+ * Return: 0 on success, negative error code on failure.
+ */
+int cpu_preserved_attach_workload(int cpu,
+				  void (*entry_fn)(void *data), void *data)
+{
+	struct cpu_preserved_stack_context *sctx;
+	struct cpu_preserved_ser *ser;
+
+	if ((unsigned int)cpu >= nr_cpu_ids)
+		return -EINVAL;
+
+	mutex_lock(&cpu_preserved_lock);
+	if (!cpumask_test_cpu(cpu, &cpu_preserved_outgoing.mask)) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -ENODEV;
+	}
+
+	sctx = cpu_preserved_stack_va(cpu);
+	if (!sctx || sctx->magic != CPU_PRESERVED_STACK_MAGIC) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -ENODEV;
+	}
+
+	ser = cpu_preserved_get_ser(cpu);
+	if (!ser || ser->state != CPU_PRESERVED_PARKED || sctx->entry_fn) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -EBUSY;
+	}
+
+	WRITE_ONCE(sctx->workload_context, (u64)(uintptr_t)data);
+	WRITE_ONCE(sctx->entry_fn, entry_fn);
+	WRITE_ONCE(ser->state, CPU_PRESERVED_WORKLOAD);
+
+	cpu_preserved_clean(sctx);
+	cpu_preserved_clean(ser);
+
+	arch_cpu_preserved_kick(cpu);
+	mutex_unlock(&cpu_preserved_lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_attach_workload);
+
+/**
+ * cpu_preserved_detach_workload - Detach workload and return core to idle park
+ * @cpu: Logical CPU identifier.
+ *
+ * Return: 0 on success, negative error code on failure.
+ */
+int cpu_preserved_detach_workload(int cpu)
+{
+	struct cpu_preserved_stack_context *sctx;
+	struct cpu_preserved_ser *ser;
+
+	if ((unsigned int)cpu >= nr_cpu_ids)
+		return -EINVAL;
+
+	mutex_lock(&cpu_preserved_lock);
+	if (!cpumask_test_cpu(cpu, &cpu_preserved_mask)) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -ENODEV;
+	}
+
+	sctx = cpu_preserved_stack_va(cpu);
+	if (!sctx || sctx->magic != CPU_PRESERVED_STACK_MAGIC) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -ENODEV;
+	}
+
+	ser = cpu_preserved_get_ser(cpu);
+	if (ser && READ_ONCE(ser->state) == CPU_PRESERVED_WORKLOAD) {
+		WRITE_ONCE(ser->state, CPU_PRESERVED_PARKED);
+		cpu_preserved_clean(ser);
+	}
+	WRITE_ONCE(sctx->entry_fn, NULL);
+	WRITE_ONCE(sctx->workload_context, 0);
+	cpu_preserved_clean(sctx);
+
+	arch_cpu_preserved_kick(cpu);
+	mutex_unlock(&cpu_preserved_lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_detach_workload);
+
+/**
+ * cpu_preserved_set_workload_context - Set workload context and root page table
+ * @cpu: Logical CPU identifier.
+ * @ctx: Opaque owning workload context pointer.
+ * @pgd_pa: Physical address of workload root page table (or 0 for default).
+ */
+void cpu_preserved_set_workload_context(int cpu, void *ctx, phys_addr_t pgd_pa)
+{
+	struct cpu_preserved_stack_context *sctx;
+
+	if (cpu < 0 || cpu >= nr_cpu_ids)
+		return;
+
+	mutex_lock(&cpu_preserved_lock);
+	sctx = cpu_preserved_stack_va(cpu);
+	if (sctx && sctx->magic == CPU_PRESERVED_STACK_MAGIC) {
+		sctx->workload_context = (u64)(uintptr_t)ctx;
+		sctx->session_pgd_pa = pgd_pa;
+		cpu_preserved_clean(sctx);
+	}
+	mutex_unlock(&cpu_preserved_lock);
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_set_workload_context);
+
+#define CPU_WAIT_DEAD_TIMEOUT_US	20000000
+#define CPU_WAIT_DEAD_STEP_US		100
+#define CPU_WAIT_DEAD_KICK_STEPS	50
+
+static int cpu_wait_dead(int cpu)
+{
+	struct cpu_preserved_stack_context *sctx = cpu_preserved_stack_va(cpu);
+	struct cpu_preserved_ser *ser = cpu_preserved_get_ser(cpu);
+	int i;
+
+	if (!sctx || !ser)
+		return -ENODEV;
+
+	for (i = 0; i < CPU_WAIT_DEAD_TIMEOUT_US / CPU_WAIT_DEAD_STEP_US; i++) {
+		cpu_preserved_inval(ser);
+		if (READ_ONCE(ser->state) == CPU_PRESERVED_DEAD) {
+			arch_cpu_preserved_wait_dead(cpu);
+			return 0;
+		}
+		if (i && (i % CPU_WAIT_DEAD_KICK_STEPS) == 0)
+			arch_cpu_preserved_kick(cpu);
+		udelay(CPU_WAIT_DEAD_STEP_US);
+	}
+
+	pr_err("Timed out waiting for preserved cpu %d to stop (state=%u)\n",
+	       cpu, READ_ONCE(ser->state));
+	return -ETIMEDOUT;
+}
+
+static void __cpu_preserved_text
+cpu_preserved_run_workload(struct cpu_preserved_stack_context *sctx)
+{
+	struct cpu_preserved_ser *ser = sctx->ser;
+	void (*fn)(void *data);
+	void *arg;
+
+	cpu_preserved_inval(sctx);
+	fn = READ_ONCE(sctx->entry_fn);
+	arg = (void *)(uintptr_t)READ_ONCE(sctx->workload_context);
+	if (fn)
+		fn(arg);
+
+	cpu_preserved_inval(ser);
+	if (cpu_preserved_cmpxchg32(&ser->state, CPU_PRESERVED_WORKLOAD,
+				    CPU_PRESERVED_PARKED) == CPU_PRESERVED_WORKLOAD)
+		cpu_preserved_clean(ser);
+}
+STACK_FRAME_NON_STANDARD(cpu_preserved_run_workload);
+
+/**
+ * cpu_preserved_park_loop - Generic execution loop for a parked preserved CPU
+ * @cpu: Logical CPU identifier.
+ */
+void __cpu_preserved_text cpu_preserved_park_loop(int cpu)
+{
+	struct cpu_preserved_stack_context *sctx = cpu_preserved_get_stack_context();
+	struct cpu_preserved_ser *ser;
+
+	if (!sctx || !sctx->ser)
+		return;
+
+	ser = sctx->ser;
+	WRITE_ONCE(ser->state, CPU_PRESERVED_PARKED);
+	cpu_preserved_clean(ser);
+
+	arch_cpu_preserved_park_init(cpu);
+
+	for (;;) {
+		cpu_preserved_inval(ser);
+		switch (READ_ONCE(ser->state)) {
+		case CPU_PRESERVED_EXITING:
+		case CPU_PRESERVED_DEAD:
+			return;
+		case CPU_PRESERVED_WORKLOAD:
+			cpu_preserved_run_workload(sctx);
+			break;
+		default:
+			arch_cpu_preserved_park_wait();
+			break;
+		}
+	}
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_park_loop);
+STACK_FRAME_NON_STANDARD(cpu_preserved_park_loop);
+
+/**
+ * cpu_preserved_park - Main execution and parking loop for a preserved CPU
+ * @cpu: Logical CPU identifier of the calling core.
+ */
+void cpu_preserved_park(int cpu)
+{
+	void *stack = cpu_preserved_stack_va(cpu);
+
+	if (stack) {
+		unsigned long top_of_stack = (unsigned long)stack +
+			CPU_PRESERVED_STACK_SIZE - CPU_PRESERVED_STACK_HEADROOM;
+		arch_cpu_preserved_park_on_stack(cpu, top_of_stack);
+	} else {
+		cpu_preserved_park_loop(cpu);
+		arch_cpu_preserved_park_finish(cpu);
+		cpu_preserved_set_dead(cpu);
+	}
+}
+EXPORT_SYMBOL_GPL(cpu_preserved_park);
+STACK_FRAME_NON_STANDARD(cpu_preserved_park);
+
 static void cpu_preserved_free_stack(phys_addr_t stack_pa, bool is_incoming)
 {
 	if (stack_pa)
@@ -321,6 +909,119 @@ static void __cpu_unpreserve_locked(unsigned int cpu)
 	cpu_preserved_free_stack(stack_pa, is_incoming);
 	cpu_preserved_state_cleanup(outgoing, false);
 	cpu_preserved_state_cleanup(incoming, true);
+}
+
+static int cpu_preserved_init_outgoing(void)
+{
+	struct cpu_preserved_state *outgoing = &cpu_preserved_outgoing;
+	int ret;
+
+	if (outgoing->cpus)
+		return 0;
+
+	ret = cpu_preserved_init_runtime_buffer();
+	if (ret)
+		return ret;
+
+	outgoing->cpus = kcalloc(nr_cpu_ids, sizeof(*outgoing->cpus),
+				  GFP_KERNEL);
+	if (!outgoing->cpus)
+		return -ENOMEM;
+
+	return 0;
+}
+
+static int cpu_preserve(unsigned int cpu, struct cpu_preserved_as_ser *as,
+			struct oncore_session_ser *oncore)
+{
+	struct cpu_preserved_state *outgoing = &cpu_preserved_outgoing;
+	struct cpu_preserved_stack_context *sctx;
+	struct cpu_preserved_ser *ser;
+	void *stack;
+	int ret;
+
+	stack = kho_alloc_preserve(CPU_PRESERVED_STACK_SIZE);
+	if (IS_ERR(stack))
+		return PTR_ERR(stack);
+
+	ser = kho_alloc_preserve(sizeof(*ser));
+	if (IS_ERR(ser)) {
+		kho_unpreserve_free(stack);
+		return PTR_ERR(ser);
+	}
+	memset(ser, 0, sizeof(*ser));
+	ser->cpu = cpu;
+	ser->state = CPU_PRESERVED_PARKED;
+	ser->stack_pa = virt_to_phys(stack);
+	KHOSER_STORE_PTR(ser->as, as);
+	KHOSER_STORE_PTR(ser->oncore, oncore);
+	cpu_preserved_clean(ser);
+
+	if (as) {
+		ret = cpu_preserved_as_map(as, virt_to_phys(stack),
+					   (unsigned long)stack, CPU_PRESERVED_STACK_SIZE,
+					   PAGE_KERNEL);
+		if (ret) {
+			kho_unpreserve_free(ser);
+			kho_unpreserve_free(stack);
+			return ret;
+		}
+
+		ret = cpu_preserved_as_map(as, virt_to_phys(ser),
+					   (unsigned long)ser, sizeof(*ser),
+					   PAGE_KERNEL);
+		if (ret) {
+			kho_unpreserve_free(ser);
+			kho_unpreserve_free(stack);
+			return ret;
+		}
+	}
+
+	sctx = stack;
+	sctx->magic = CPU_PRESERVED_STACK_MAGIC;
+	sctx->cpu = cpu;
+	sctx->reserved = 0;
+	sctx->workload_context = 0;
+	sctx->session_pgd_pa = (as && as->nr_pgtable_pages) ? as->pgtable_pages[0] : 0;
+	sctx->ser = ser;
+	sctx->entry_fn = NULL;
+	cpu_preserved_clean(sctx);
+
+	scoped_guard(mutex, &cpu_preserved_lock) {
+		if (cpu_is_preserved(cpu)) {
+			kho_unpreserve_free(ser);
+			kho_unpreserve_free(stack);
+			return -EBUSY;
+		}
+
+		ret = cpu_preserved_init_outgoing();
+		if (ret) {
+			kho_unpreserve_free(ser);
+			kho_unpreserve_free(stack);
+			return ret;
+		}
+
+		cpumask_set_cpu(cpu, &outgoing->mask);
+		cpumask_set_cpu(cpu, &cpu_preserved_mask);
+		cpu_preserved_clean(&cpu_preserved_mask);
+
+		outgoing->cpus[cpu] = ser;
+		cpu_preserved_sync_global_ser();
+	}
+
+	if (cpu_online(cpu)) {
+		ret = remove_cpu(cpu);
+		if (ret < 0) {
+			pr_err("Failed to offline preserved cpu %u: %d\n",
+			       cpu, ret);
+			scoped_guard(mutex, &cpu_preserved_lock)
+				__cpu_unpreserve_locked(cpu);
+			return ret;
+		}
+	}
+
+	set_cpu_present(cpu, false);
+	return 0;
 }
 
 /**
@@ -506,6 +1207,7 @@ static struct liveupdate_flb cpu_preserved_flb = {
 	.compatible = CPU_PRESERVED_LUO_FLB_COMPATIBLE,
 };
 
+
 static int cpu_preserve_reboot_notify(struct notifier_block *nb,
 				      unsigned long action, void *data)
 {
@@ -560,6 +1262,21 @@ static int __init cpu_preserve_early_init(void)
 	cpu_preserved_outgoing.cpus = NULL;
 	cpu_preserved_incoming.cpus = NULL;
 	cpu_preserved_global_ser = NULL;
+
+	err = liveupdate_register_file_handler(&cpu_preserve_handler);
+	if (err && err != -EOPNOTSUPP) {
+		pr_err("Could not register cpu_preserve file handler: %pe\n",
+		       ERR_PTR(err));
+		return err;
+	}
+
+	err = liveupdate_register_flb(&cpu_preserve_handler,
+				      &cpu_preserved_flb);
+	if (err && err != -EOPNOTSUPP) {
+		pr_err("Could not register cpu_preserved FLB: %pe\n",
+		       ERR_PTR(err));
+		return err;
+	}
 
 	/* Retrieve incoming preserved CPUs before secondary CPU bringup */
 	if (liveupdate_enabled())
