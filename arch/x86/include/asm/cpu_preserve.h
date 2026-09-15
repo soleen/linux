@@ -8,9 +8,12 @@
 
 #include <asm/page_types.h>
 
-#ifdef CONFIG_CC_IS_GCC
+#if __has_attribute(indirect_branch) && __has_attribute(function_return)
 #define ARCH_CPU_PRESERVED_TEXT \
 	__attribute__((indirect_branch("keep"), function_return("keep")))
+#elif __has_attribute(indirect_branch)
+#define ARCH_CPU_PRESERVED_TEXT \
+	__attribute__((indirect_branch("keep")))
 #else
 #define ARCH_CPU_PRESERVED_TEXT
 #endif

@@ -78,6 +78,11 @@ obj-$(CONFIG_IRQ_WORK)  += irq_work.o
 obj-y			+= probe_roms.o
 obj-$(CONFIG_X86_32)	+= sys_ia32.o
 obj-$(CONFIG_IA32_EMULATION)	+= sys_ia32.o signal_32.o
+UBSAN_SANITIZE_cpu_preserve.o := n
+GCOV_PROFILE_cpu_preserve.o := n
+KMSAN_SANITIZE_cpu_preserve.o := n
+CFLAGS_cpu_preserve.o += $(DISABLE_KSTACK_ERASE) -DDISABLE_BRANCH_PROFILING $(call cc-option,-ftrivial-auto-var-init=uninitialized) $(call cc-option,-fno-jump-tables)
+obj-$(CONFIG_LIVEUPDATE_CPU)	+= cpu_preserve.o preserve_cpu.o
 obj-$(CONFIG_X86_64)	+= sys_x86_64.o
 obj-$(CONFIG_X86_ESPFIX64)	+= espfix_64.o
 obj-$(CONFIG_SYSFS)	+= ksysfs.o
