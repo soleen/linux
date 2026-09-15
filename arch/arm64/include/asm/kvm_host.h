@@ -306,6 +306,8 @@ enum fgt_group_id {
 	__NR_FGT_GROUP_IDS__
 };
 
+struct caretaker_arm64_vm;
+
 struct kvm_arch {
 	struct kvm_s2_mmu mmu;
 
@@ -426,6 +428,9 @@ struct kvm_arch {
 #ifdef CONFIG_PTDUMP_STAGE2_DEBUGFS
 	/* Nested virtualization info */
 	struct dentry *debugfs_nv_dentry;
+#endif
+#ifdef CONFIG_KVM_CARETAKER
+	struct caretaker_arm64_vm *caretaker_vm;
 #endif
 };
 
