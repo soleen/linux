@@ -2,6 +2,8 @@
 #ifndef __ASM_X86_CPU_PRESERVE_H
 #define __ASM_X86_CPU_PRESERVE_H
 
+#include <asm/page_types.h>
+
 #define ARCH_CPU_PRESERVED_STACK_ORDER	THREAD_SIZE_ORDER
 
 #ifdef CONFIG_CC_IS_GCC
@@ -11,13 +13,21 @@
 #define ARCH_CPU_PRESERVED_TEXT
 #endif
 
+#if IS_ENABLED(CONFIG_KVM_X86)
+void x86_virt_reset_cpu(int cpu);
+#else
+static inline void x86_virt_reset_cpu(int cpu) {}
+#endif
+
 #ifdef CONFIG_LIVEUPDATE_CPU
+void arch_cpu_preserved_load_desc(void);
 bool arch_cpu_preserved_is_active(void);
 void x86_preserved_iret_stub(void);
 void x86_preserved_iret_err_stub(void);
 void x86_preserved_apic_eoi_stub(void);
 u32 arch_cpu_preserved_get_apicid(int cpu);
 #else
+static inline void arch_cpu_preserved_load_desc(void) {}
 static inline bool arch_cpu_preserved_is_active(void) { return false; }
 static inline u32 arch_cpu_preserved_get_apicid(int cpu) { return (u32)-1; }
 #endif

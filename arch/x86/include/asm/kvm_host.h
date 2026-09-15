@@ -1029,6 +1029,10 @@ struct kvm_vcpu_arch {
 #if IS_ENABLED(CONFIG_HYPERV)
 	hpa_t hv_root_tdp;
 #endif
+#ifdef CONFIG_KVM_CARETAKER
+	/* Physical address of this vCPU's Caretaker control block. */
+	u64 cb_pa;
+#endif
 };
 
 struct kvm_lpage_info {
@@ -1911,6 +1915,23 @@ static inline bool kvm_arch_has_irq_bypass(void)
 {
 	return enable_device_posted_irqs;
 }
+
+struct kvm_vcpu_luo_ser;
+
+#ifdef CONFIG_KVM_CARETAKER
+void kvm_arch_vcpu_caretaker_init(struct kvm_vcpu *vcpu, u64 *cb_pa);
+void kvm_arch_vcpu_caretaker_unpreserve(struct kvm_vcpu_luo_ser *ser);
+void kvm_arch_vcpu_caretaker_finish(struct kvm_vcpu_luo_ser *ser);
+#else
+static inline void kvm_arch_vcpu_caretaker_init(struct kvm_vcpu *vcpu,
+						u64 *cb_pa)
+{
+	if (cb_pa)
+		*cb_pa = 0;
+}
+static inline void kvm_arch_vcpu_caretaker_unpreserve(struct kvm_vcpu_luo_ser *ser) {}
+static inline void kvm_arch_vcpu_caretaker_finish(struct kvm_vcpu_luo_ser *ser) {}
+#endif
 
 struct kvm_cpuid_entry2;
 int kvm_set_cpuid(struct kvm_vcpu *vcpu, struct kvm_cpuid_entry2 *e2,

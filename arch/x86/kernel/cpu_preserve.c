@@ -437,6 +437,36 @@ int arch_cpu_preserved_setup_buffer(struct page *text_page,
 
 void arch_cpu_preserved_wait_dead(int cpu)
 {
+	x86_virt_reset_cpu(cpu);
 }
 
+#ifdef CONFIG_LIVEUPDATE_ONCORE
+u64 __cpu_preserved_text arch_oncore_ticks_to_ns(u64 ticks)
+{
+	u64 khz = global_oncore_sched_config.tsc_khz;
 
+	if (khz > 0) {
+		u64 mul = 1000000ULL;
+		u64 low, high;
+
+		asm("mulq %3" : "=a"(low), "=d"(high) : "a"(ticks), "r"(mul) : "cc");
+		asm("divq %2" : "=a"(low), "=d"(high) : "r"(khz), "a"(low), "d"(high) : "cc");
+		return low;
+	}
+	return ticks;
+}
+EXPORT_SYMBOL_GPL(arch_oncore_ticks_to_ns);
+
+void arch_oncore_update_quantum_ticks(struct oncore_sched_config *cfg)
+{
+	u32 ms = cfg->quantum_ms;
+
+	if (tsc_khz > 0) {
+		cfg->tsc_khz = tsc_khz;
+		cfg->quantum_ticks = (u64)ms * tsc_khz;
+	} else {
+		cfg->quantum_ticks = (u64)ms * 2000000ULL;
+	}
+}
+EXPORT_SYMBOL_GPL(arch_oncore_update_quantum_ticks);
+#endif
