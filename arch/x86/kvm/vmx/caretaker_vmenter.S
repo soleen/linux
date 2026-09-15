@@ -26,8 +26,8 @@ SYM_TYPED_FUNC_START(vmx_caretaker_enter)
 	CARETAKER_PUSH_HOST_REGS
 	movq %rsp, CXP_STACK_ORIG(%rdi)
 
-	/* Switch to private preserved stack */
-	movq CXP_STACK_TOP(%rdi), %rsp
+	/* Switch to private preserved stack at top of caretaker_x86_page */
+	leaq PAGE_SIZE(%rdi), %rsp
 
 	/* Activate VMCS on this pCPU */
 	vmptrld CXP_VMCS_PA(%rdi)
@@ -60,11 +60,10 @@ SYM_TYPED_FUNC_START(vmx_caretaker_enter)
 	vmresume
 	vmlaunch
 
-	/* If both fail, record error and return */
+	/* If both fail, return error in %rax */
 	popq %rdi
 	mov $VMCS_VM_INSTRUCTION_ERROR, %eax
 	vmread %rax, %rax
-	movq %rax, CXP_LAST_EXIT_CODE(%rdi)
 	btsq $31, %rax
 	jmp .Lvmx_ret
 SYM_FUNC_END(vmx_caretaker_enter)
@@ -73,15 +72,14 @@ SYM_FUNC_START(vmx_caretaker_exit_handler)
 	ENDBR
 	/*
 	 * Hardware jumps here on VM-Exit with:
-	 * RSP = HOST_RSP (CXP_STACK_TOP)
+	 * RSP = HOST_RSP (top of 4 KB struct caretaker_x86_page)
 	 * CR3 = HOST_CR3
 	 */
 	pushq %rdi
 
-	/* Recompute CVP pointer from RSP: CVP = (RSP & PAGE_MASK) - CXP_STACK_OFFSET */
+	/* Recover CVP base from RSP: stack lives in the upper half of page 0 */
 	movq %rsp, %rdi
 	andq $PAGE_MASK, %rdi
-	subq $CXP_STACK_OFFSET, %rdi
 
 	/* Save guest GPRs into CVP */
 	CARETAKER_SAVE_GPRS %rdi

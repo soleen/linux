@@ -342,6 +342,7 @@ static __always_inline u32 vmx_get_intr_info(struct kvm_vcpu *vcpu)
 }
 
 void vmx_vcpu_load_vmcs(struct kvm_vcpu *vcpu, int cpu);
+void loaded_vmcs_clear(struct loaded_vmcs *loaded_vmcs);
 int allocate_vpid(void);
 void free_vpid(int vpid);
 void vmx_set_constant_host_state(struct vcpu_vmx *vmx);
