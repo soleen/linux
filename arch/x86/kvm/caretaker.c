@@ -321,3 +321,332 @@ static void kvm_x86_caretaker_save_gprs(struct kvm_vcpu *vcpu, u64 *gprs)
 	gprs[11] = kvm_register_read_raw(vcpu, VCPU_REGS_R12);
 	gprs[12] = kvm_register_read_raw(vcpu, VCPU_REGS_R13);
 	gprs[13] = kvm_register_read_raw(vcpu, VCPU_REGS_R14);
+	gprs[14] = kvm_register_read_raw(vcpu, VCPU_REGS_R15);
+}
+
+
+static void kvm_x86_caretaker_init_idt(gate_desc *idt)
+{
+	int v;
+
+	for (v = 0; v < IDT_ENTRIES; v++) {
+		bool has_err = (v == X86_TRAP_DF ||
+				(v >= X86_TRAP_TS && v <= X86_TRAP_PF) ||
+				v == X86_TRAP_AC || v == X86_TRAP_CP ||
+				v == X86_TRAP_VC || v == 30);
+		unsigned long handler = (v >= FIRST_EXTERNAL_VECTOR) ?
+			(unsigned long)&x86_preserved_apic_eoi_stub :
+			(has_err ? (unsigned long)&x86_preserved_iret_err_stub :
+				   (unsigned long)&x86_preserved_iret_stub);
+
+		pack_gate(&idt[v], GATE_INTERRUPT, handler, 0, 0, __KERNEL_CS);
+	}
+}
+
+static void kvm_x86_caretaker_init_gdt_tss(struct desc_struct *gdt,
+					   struct x86_hw_tss *tss,
+					   unsigned long stack_top)
+{
+	int k;
+
+	oncore_memcpy(gdt, get_current_gdt_ro(), sizeof(struct desc_struct) * GDT_ENTRIES);
+	oncore_memset(tss, 0, sizeof(*tss));
+	tss->sp0 = stack_top;
+	tss->io_bitmap_base = sizeof(*tss);
+	for (k = 0; k < ARRAY_SIZE(tss->ist); k++)
+		tss->ist[k] = stack_top;
+
+	caretaker_set_tss_desc(gdt, (unsigned long)tss, sizeof(struct x86_hw_tss) - 1);
+}
+
+static void __cpu_preserved_text
+kvm_x86_caretaker_load_desc(struct desc_struct *gdt, size_t gdt_size,
+			    gate_desc *idt, size_t idt_size,
+			    void *tss)
+{
+	struct desc_ptr gdt_desc = {
+		.size = gdt_size - 1,
+		.address = (unsigned long)gdt,
+	};
+	struct desc_ptr idt_desc = {
+		.size = idt_size - 1,
+		.address = (unsigned long)idt,
+	};
+
+	caretaker_set_tss_desc(gdt, (unsigned long)tss, sizeof(struct x86_hw_tss) - 1);
+	load_gdt(&gdt_desc);
+	native_load_idt(&idt_desc);
+	asm volatile("ltr %w0" : : "q" ((u16)(GDT_ENTRY_TSS * 8)));
+}
+
+static void __cpu_preserved_text
+kvm_x86_caretaker_restore_host_desc(int pcpu, const struct desc_ptr *orig_idt)
+{
+	load_direct_gdt(pcpu);
+	{
+		struct desc_struct *gdt = get_cpu_gdt_rw(pcpu);
+		tss_desc tss = *(tss_desc *)&gdt[GDT_ENTRY_TSS];
+
+		tss.type = DESC_TSS;
+		write_gdt_entry(gdt, GDT_ENTRY_TSS, &tss, DESC_TSS);
+	}
+	load_TR_desc();
+	load_fixmap_gdt(pcpu);
+	if (orig_idt)
+		native_load_idt(orig_idt);
+}
+
+static __caretaker_text void
+kvm_x86_caretaker_save_host_state(struct caretaker_x86_host_state *host,
+				  struct caretaker_x86_page *cxp)
+{
+	native_store_gdt(&host->orig_gdt);
+	store_idt(&host->orig_idt);
+	host->orig_cr3 = __read_cr3();
+	host->orig_gs_base = native_rdmsrq(MSR_GS_BASE);
+	host->orig_kernel_gs_base = native_rdmsrq(MSR_KERNEL_GS_BASE);
+	host->orig_star = native_rdmsrq(MSR_STAR);
+	host->orig_lstar = native_rdmsrq(MSR_LSTAR);
+	host->orig_fmask = native_rdmsrq(MSR_SYSCALL_MASK);
+
+	/* Ensure Local APIC is software enabled */
+	{
+		u64 apic_base;
+
+		apic_base = native_rdmsrq(MSR_IA32_APICBASE);
+		if (!(apic_base & MSR_IA32_APICBASE_ENABLE))
+			native_wrmsrq(MSR_IA32_APICBASE,
+				      apic_base | MSR_IA32_APICBASE_ENABLE);
+	}
+
+	/* Switch to self-contained Caretaker GDT, IDT, and TSS before CR3 switch */
+	kvm_x86_caretaker_load_desc(cxp->gdt, sizeof(cxp->gdt),
+				    cxp->idt, sizeof(cxp->idt),
+				    &cxp->tss);
+
+	/* Switch to preserved CR3 if specified */
+	{
+		struct cpu_preserved_stack_context *sctx = oncore_get_current_context();
+
+		if (sctx && sctx->session_pgd_pa)
+			cxp->host_cr3 = sctx->session_pgd_pa;
+		else if (!cxp->host_cr3 && x86_caretaker_pgd_pa)
+			cxp->host_cr3 = x86_caretaker_pgd_pa;
+	}
+	if (cxp->host_cr3 && host->orig_cr3 != cxp->host_cr3)
+		write_cr3(cxp->host_cr3);
+
+	raw_local_irq_disable();
+}
+
+static __caretaker_text void
+kvm_x86_caretaker_restore_host_state(const struct caretaker_x86_host_state *host,
+				     const struct caretaker_x86_page *cxp,
+				     struct kvm_vcpu *vcpu, int pcpu)
+{
+	/*
+	 * Restore host CPU descriptor/page tables only when
+	 * remaining in the current kernel context. If attaching across
+	 * kexec to an incoming kernel, the pre-kexec host descriptors
+	 * and page tables are obsolete and must not be restored.
+	 */
+	native_wrmsrq(MSR_GS_BASE, host->orig_gs_base);
+	native_wrmsrq(MSR_KERNEL_GS_BASE, host->orig_kernel_gs_base);
+	if (host->orig_lstar)
+		native_wrmsrq(MSR_LSTAR, host->orig_lstar);
+	if (host->orig_star)
+		native_wrmsrq(MSR_STAR, host->orig_star);
+	if (host->orig_fmask)
+		native_wrmsrq(MSR_SYSCALL_MASK, host->orig_fmask);
+
+	if (vcpu && !cpu_is_preserved(pcpu) && !cpu_preserved_is_incoming(pcpu)) {
+		if (host->orig_cr3 && host->orig_cr3 != cxp->host_cr3)
+			write_cr3(host->orig_cr3);
+
+		kvm_x86_caretaker_restore_host_desc(pcpu, &host->orig_idt);
+	} else if (cpu_is_preserved(pcpu)) {
+		arch_cpu_preserved_load_desc();
+	} else if (host->orig_idt.size) {
+		native_load_idt(&host->orig_idt);
+	}
+}
+
+__caretaker_text void
+kvm_x86_caretaker_update_msr(struct kvm_vcpu_arch_luo_state *state,
+			     u32 msr, u64 val)
+{
+	u32 i;
+
+	for (i = 0; i < state->num_msrs; i++) {
+		if (state->msrs[i].index == msr) {
+			state->msrs[i].data = val;
+			return;
+		}
+	}
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_x86_caretaker_update_msr);
+
+__caretaker_text void
+kvm_x86_caretaker_detach_serialize_common(struct caretaker_x86_page *cxp,
+					  struct kvm_vcpu_arch_luo_state *state)
+{
+	if (!cxp || !state)
+		return;
+
+	state->regs.rax = cxp->rax;
+	state->regs.rbx = cxp->rbx;
+	state->regs.rcx = cxp->rcx;
+	state->regs.rdx = cxp->rdx;
+	state->regs.rsi = cxp->rsi;
+	state->regs.rdi = cxp->rdi;
+	state->regs.rbp = cxp->rbp;
+	state->regs.r8  = cxp->r8;
+	state->regs.r9  = cxp->r9;
+	state->regs.r10 = cxp->r10;
+	state->regs.r11 = cxp->r11;
+	state->regs.r12 = cxp->r12;
+	state->regs.r13 = cxp->r13;
+	state->regs.r14 = cxp->r14;
+	state->regs.r15 = cxp->r15;
+
+	if (cxp->last_exit_rip)
+		state->regs.rip = cxp->last_exit_rip;
+	if (cxp->last_exit_rsp)
+		state->regs.rsp = cxp->last_exit_rsp;
+	if (cxp->last_exit_rflags)
+		state->regs.rflags = cxp->last_exit_rflags;
+
+	if (cxp->cr0)
+		state->sregs.cr0 = cxp->cr0;
+	if (cxp->cr3)
+		state->sregs.cr3 = cxp->cr3;
+	if (cxp->cr4)
+		state->sregs.cr4 = cxp->cr4;
+	if (cxp->efer)
+		state->sregs.efer = cxp->efer;
+
+	state->events.exception.injected = 0;
+	state->events.interrupt.injected = 0;
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_x86_caretaker_detach_serialize_common);
+
+void kvm_x86_caretaker_sync_vcpu_common(struct kvm_vcpu *vcpu)
+{
+	kvm_register_mark_dirty(vcpu, VCPU_REG_CR3);
+	kvm_clear_interrupt_queue(vcpu);
+	kvm_clear_exception_queue(vcpu);
+
+	vcpu->cpu = -1;
+	kvm_make_request(KVM_REQ_LOAD_MMU_PGD, vcpu);
+	kvm_make_request(KVM_REQ_TLB_FLUSH_CURRENT, vcpu);
+	kvm_make_request(KVM_REQ_RECALC_INTERCEPTS, vcpu);
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_x86_caretaker_sync_vcpu_common);
+
+static __caretaker_text void kvm_caretaker_emulate_cpuid(u64 *rax,
+							u64 *rbx,
+							u64 *rcx,
+							u64 *rdx)
+{
+	unsigned int a = (unsigned int)*rax;
+	unsigned int b = (unsigned int)*rbx;
+	unsigned int c = (unsigned int)*rcx;
+	unsigned int d = (unsigned int)*rdx;
+
+	asm volatile("cpuid"
+		     : "=a" (a), "=b" (b), "=c" (c), "=d" (d)
+		     : "0" (a), "2" (c));
+
+	*rax = a;
+	*rbx = b;
+	*rcx = c;
+	*rdx = d;
+}
+
+static __caretaker_text bool kvm_caretaker_emulate_msr(struct caretaker_x86_page *cxp,
+						       u32 msr, bool write,
+						       u64 *rax,
+						       u64 *rdx)
+{
+	bool x2apic = msr >= APIC_BASE_MSR &&
+		      msr < APIC_BASE_MSR + X2APIC_MSR_COUNT;
+	u32 apic_id = cxp ? cxp->cb.vcpu_id : 0;
+	u64 val;
+
+	if (write) {
+		val = (u32)(*rax) | ((*rdx) << 32);
+
+		/* Absorb guest x2APIC writes in Caretaker mode */
+		if (x2apic)
+			return true;
+
+		switch (msr) {
+		case MSR_IA32_TSC:
+		case MSR_IA32_TSC_DEADLINE:
+		case MSR_IA32_TSC_ADJUST:
+		case MSR_IA32_SPEC_CTRL:
+		case MSR_IA32_PRED_CMD:
+			/* Discarded: the caretaker owns these while detached. */
+			return true;
+		case MSR_KERNEL_GS_BASE:
+			/* Also cached, so the read side can answer without an rdmsr. */
+			if (cxp)
+				cxp->kernel_gs_base = val;
+			fallthrough;
+		case MSR_FS_BASE:
+		case MSR_GS_BASE:
+		case MSR_LSTAR:
+		case MSR_STAR:
+		case MSR_SYSCALL_MASK:
+		case MSR_IA32_APICBASE:
+			native_wrmsrq(msr, val);
+			return true;
+		}
+		return false;
+	}
+
+	if (x2apic) {
+		switch ((msr - APIC_BASE_MSR) << 4) {
+		case APIC_ID:
+			val = apic_id;
+			break;
+		case APIC_LVR:
+			val = CARETAKER_APIC_LVR;
+			break;
+		case APIC_SPIV:
+			val = APIC_SPIV_APIC_ENABLED | APIC_VECTOR_MASK;
+			break;
+		case APIC_LDR:
+			val = ((apic_id >> 4) << 16) | (1U << (apic_id & 0xf));
+			break;
+		default:
+			val = 0;
+			break;
+		}
+		goto out;
+	}
+
+	switch (msr) {
+	case MSR_IA32_TSC:
+		val = rdtsc();
+		break;
+	case MSR_IA32_TSC_DEADLINE:
+	case MSR_IA32_TSC_ADJUST:
+	case MSR_IA32_SPEC_CTRL:
+		val = 0;
+		break;
+	case MSR_KERNEL_GS_BASE:
+		if (cxp && cxp->kernel_gs_base)
+			val = cxp->kernel_gs_base;
+		else
+			val = native_rdmsrq(MSR_KERNEL_GS_BASE);
+		break;
+	case MSR_IA32_APICBASE:
+		val = native_rdmsrq(MSR_IA32_APICBASE);
+		if (!val)
+			val = APIC_DEFAULT_PHYS_BASE | MSR_IA32_APICBASE_ENABLE;
+		if (cxp && apic_id == 0)
+			val |= MSR_IA32_APICBASE_BSP;
+		else
+			val &= ~MSR_IA32_APICBASE_BSP;
+		break;
