@@ -14,6 +14,7 @@
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/cpu_preserve.h>
 #include <linux/highmem.h>
 #include <linux/hrtimer.h>
 #include <linux/kernel.h>
@@ -54,6 +55,7 @@
 #include <trace/events/ipi.h>
 
 #include "capabilities.h"
+#include "caretaker.h"
 #include "common.h"
 #include "cpuid.h"
 #include "hyperv.h"
@@ -1524,7 +1526,7 @@ static void shrink_ple_window(struct kvm_vcpu *vcpu)
 void vmx_vcpu_load_vmcs(struct kvm_vcpu *vcpu, int cpu)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
-	bool already_loaded = vmx->loaded_vmcs->cpu == cpu;
+	bool already_loaded = vmx->loaded_vmcs->cpu == cpu && vmx->loaded_vmcs->launched;
 	struct vmcs *prev;
 
 	if (!already_loaded) {
@@ -1545,7 +1547,7 @@ void vmx_vcpu_load_vmcs(struct kvm_vcpu *vcpu, int cpu)
 	}
 
 	prev = per_cpu(current_vmcs, cpu);
-	if (prev != vmx->loaded_vmcs->vmcs) {
+	if (!already_loaded || prev != vmx->loaded_vmcs->vmcs) {
 		per_cpu(current_vmcs, cpu) = vmx->loaded_vmcs->vmcs;
 		vmcs_load(vmx->loaded_vmcs->vmcs);
 	}
@@ -1566,6 +1568,10 @@ void vmx_vcpu_load_vmcs(struct kvm_vcpu *vcpu, int cpu)
 		vmcs_writel(HOST_TR_BASE,
 			    (unsigned long)&get_cpu_entry_area(cpu)->tss.x86_tss);
 		vmcs_writel(HOST_GDTR_BASE, (unsigned long)gdt);   /* 22.2.4 */
+		vmcs_writel(HOST_IDTR_BASE, host_idt_base);
+		vmcs_writel(HOST_CR3, __read_cr3());
+		vmcs_writel(HOST_RIP, (unsigned long)vmx_vmexit);
+		vmx->loaded_vmcs->host_state.rsp = 0;
 
 		if (IS_ENABLED(CONFIG_IA32_EMULATION) || IS_ENABLED(CONFIG_X86_32)) {
 			/* 22.2.3 */
@@ -1594,6 +1600,10 @@ void vmx_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 void vmx_vcpu_put(struct kvm_vcpu *vcpu)
 {
 	vmx_vcpu_pi_put(vcpu);
+
+	kvm_rip_read(vcpu);
+	kvm_rsp_read(vcpu);
+	kvm_get_rflags(vcpu);
 
 	vmx_prepare_switch_to_host(to_vmx(vcpu));
 }
@@ -3044,6 +3054,9 @@ static void vmclear_local_loaded_vmcss(void)
 void vmx_disable_virtualization_cpu(void)
 {
 	vmclear_local_loaded_vmcss();
+
+	if (oncore_is_orphaned_cpu(raw_smp_processor_id()))
+		return;
 
 	x86_virt_put_ref(X86_FEATURE_VMX);
 
@@ -8560,6 +8573,7 @@ void vmx_migrate_timers(struct kvm_vcpu *vcpu)
 
 void vmx_hardware_unsetup(void)
 {
+	vmx_caretaker_unregister();
 	kvm_set_posted_intr_wakeup_handler(NULL);
 
 	if (nested)
@@ -8867,8 +8881,11 @@ __init int vmx_hardware_setup(void)
 
 	kvm_caps.inapplicable_quirks &= ~KVM_X86_QUIRK_IGNORE_GUEST_PAT;
 
+	vmx_caretaker_register();
+
 	return 0;
 }
+
 
 void vmx_exit(void)
 {
