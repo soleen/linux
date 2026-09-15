@@ -80,6 +80,32 @@ static_assert(offsetof(struct kvm_vcpu_arch_ser, msrs) % sizeof(u64) == 0,
 static_assert(offsetof(struct kvm_vcpu_arch_ser, xsave) % 64 == 0,
 	      "xsave must be 64-byte aligned to be XSAVE-able in place");
 
+#define KVM_X86_CARETAKER_MAX_PAGES	5
+
+/**
+ * struct kvm_caretaker_arch_ser - x86-specific Caretaker control block ABI
+ * @cb:                 Common Caretaker control block header (must be at offset 0).
+ * @apic_id:            Hardware APIC ID of the preserved core, used by the incoming
+ *                      kernel to deliver the attach-signal IPI.
+ * @nr_preserved_pages: Number of valid physical addresses in @preserved_pages_pa.
+ * @vmcs_pa:            Physical address of the VMCS the Caretaker ran the vCPU on
+ *                      (Intel VMX), used by the incoming kernel to VMCLEAR and
+ *                      flush the VMCS after the vCPU stops.
+ * @pi_desc_pa:         Physical address of the KHO-preserved Posted Interrupt
+ *                      Descriptor (struct pi_desc) when Intel IPIv is active,
+ *                      or 0 otherwise.
+ * @preserved_pages_pa: Physical addresses of per-vCPU hardware control pages
+ *                      preserved via kho_preserve_pages().
+ */
+struct kvm_caretaker_arch_ser {
+	struct kvm_caretaker_cb_ser cb;
+	u32 apic_id;
+	u32 nr_preserved_pages;
+	u64 vmcs_pa;
+	u64 pi_desc_pa;
+	u64 preserved_pages_pa[KVM_X86_CARETAKER_MAX_PAGES];
+} __packed;
+
 #endif /* CONFIG_X86_64 */
 
 #endif /* _LINUX_KHO_ABI_KVM_X86_H */
