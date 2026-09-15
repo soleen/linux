@@ -8,6 +8,8 @@
 #ifndef _LINUX_KHO_ABI_KVM_H
 #define _LINUX_KHO_ABI_KVM_H
 
+#include <linux/build_bug.h>
+#include <linux/stddef.h>
 #include <linux/types.h>
 #include <linux/bits.h>
 #include <linux/kho/abi/kexec_handover.h>
@@ -27,6 +29,51 @@
  * version number in the KVM_LUO_FH_COMPATIBLE or
  * GUEST_MEMFD_LUO_FH_COMPATIBLE compatibility strings.
  */
+
+#define KVM_VCPU_LUO_FLAG_CARETAKER	BIT(0)
+
+/* KVM Caretaker attachment states */
+#define KVM_CARETAKER_ATTACHED		0	/* Normal host KVM handling */
+#define KVM_CARETAKER_DETACHED		1	/* Exits run in Caretaker */
+#define KVM_CARETAKER_ATTACHING		2	/* Transitioning from Caretaker to host KVM */
+#define KVM_CARETAKER_INVALID_PCPU	U32_MAX	/* Unassigned pCPU identifier */
+
+/**
+ * struct kvm_caretaker_cb - KVM Caretaker Control Block
+ * @attachment_state: Current attachment state (%KVM_CARETAKER_ATTACHED or
+ *                    %KVM_CARETAKER_DETACHED).
+ * @pcpu_id: Physical CPU ID where this vCPU runs while detached.
+ * @vcpu_id: Guest vCPU identifier.
+ * @runtime_pa: Hypervisor private runtime execution context physical address.
+ * @runtime_size: Hypervisor private runtime execution context size in bytes.
+ *
+ * Coordinates vCPU execution state across hypervisor detachment,
+ * live update, and Caretaker CPU preservation.
+ *
+ * Deliberately not __packed.  @attachment_state is written with
+ * smp_store_release() by both the host kernel and the preserved Caretaker
+ * text, and __packed sets the struct alignment to 1, which lets the compiler
+ * assume that store may be misaligned: on arm64 that makes STLR fault, and on
+ * any architecture it permits the store to be split, destroying the
+ * single-copy atomicity the release is there for.  The layout below is
+ * naturally aligned with no padding, so __packed bought nothing.  The
+ * static_asserts make the layout a checked property rather than a hoped-for
+ * one, which is what a cross-kexec ABI actually needs.
+ */
+struct kvm_caretaker_cb {
+	u64 attachment_state;
+	u32 pcpu_id;
+	u32 vcpu_id;
+	u64 runtime_pa;
+	u64 runtime_size;
+};
+
+static_assert(sizeof(struct kvm_caretaker_cb) == 32);
+static_assert(offsetof(struct kvm_caretaker_cb, attachment_state) == 0);
+static_assert(offsetof(struct kvm_caretaker_cb, pcpu_id) == 8);
+static_assert(offsetof(struct kvm_caretaker_cb, vcpu_id) == 12);
+static_assert(offsetof(struct kvm_caretaker_cb, runtime_pa) == 16);
+static_assert(offsetof(struct kvm_caretaker_cb, runtime_size) == 24);
 
 #if defined(CONFIG_X86_64)
 #include <linux/kho/abi/kvm_x86.h>
@@ -50,10 +97,6 @@ struct kvm_luo_ser {
 /* The compatibility string for KVM VM file handler */
 #define KVM_LUO_FH_COMPATIBLE	"kvm_vm_luo_v1"
 
-#define KVM_VCPU_LUO_FLAG_CARETAKER	BIT(0)
-
-struct kvm_caretaker_cb;
-
 /**
  * struct kvm_vcpu_luo_ser - Main serialization structure for a KVM vCPU.
  * @vcpu_id:    The ID of the virtual CPU.
@@ -61,6 +104,13 @@ struct kvm_caretaker_cb;
  * @vm_token:   Token of the associated KVM VM instance.
  * @arch_state: Preservation pointer to vCPU architectural state.
  * @cb:         Preservation pointer to Caretaker Control Block.
+ *
+ * Cross-kexec invariant: the incoming kernel may only dereference structures
+ * declared in include/linux/kho/abi/ headers.  When @flags includes
+ * %KVM_VCPU_LUO_FLAG_CARETAKER, the preserved Caretaker text writes live guest
+ * state into @arch_state at detach time before transitioning @cb to
+ * %KVM_CARETAKER_ATTACHED; the incoming kernel reads only @cb (via the
+ * arch-specific ABI prefix) and @arch_state.
  */
 struct kvm_vcpu_luo_ser {
 	u32 vcpu_id;
