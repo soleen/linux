@@ -437,5 +437,3 @@ int arch_cpu_preserved_setup_buffer(struct page *text_page,
 void arch_cpu_preserved_wait_dead(int cpu)
 {
 }
-
-
