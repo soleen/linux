@@ -241,6 +241,7 @@ void kvm_arch_vcpu_luo_pre_retrieve_caretaker(struct kvm_vcpu *vcpu,
 void kvm_arch_vcpu_luo_attach_caretaker(struct kvm_vcpu *vcpu,
 					struct kvm_vcpu_ser *ser);
 
+void kvm_caretaker_vm_pre_retrieve(void);
 int kvm_caretaker_vcpu_pre_preserve(struct kvm_vcpu *vcpu,
 				    struct liveupdate_session *session,
 				    struct kvm_vcpu_ser *ser);
