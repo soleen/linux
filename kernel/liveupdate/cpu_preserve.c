@@ -106,6 +106,59 @@ static struct page *cpu_preserved_data_pages;
 static unsigned int cpu_preserved_data_order;
 static bool cpu_preserved_runtime_preserved;
 
+/*
+ * The workload layer, if any.  Set once at init and never torn down, so the
+ * dispatch helpers below can read it without synchronisation.
+ */
+static const struct cpu_preserved_client *cpu_preserved_client;
+
+/**
+ * cpu_preserved_register_client - Install the workload layer
+ * @client: Fully populated op table, with static storage duration.
+ *
+ * Return: 0 on success, -EINVAL on a partial table, -EBUSY if a client is
+ * already registered.
+ */
+int cpu_preserved_register_client(const struct cpu_preserved_client *client)
+{
+	if (!client || !client->attach || !client->detach ||
+	    !client->serialize || !client->restore)
+		return -EINVAL;
+
+	if (cmpxchg(&cpu_preserved_client, NULL, client))
+		return -EBUSY;
+
+	return 0;
+}
+
+static int cpu_preserved_client_attach(struct liveupdate_session *session,
+				       int cpu)
+{
+	return cpu_preserved_client ?
+		cpu_preserved_client->attach(session, cpu) : 0;
+}
+
+static void cpu_preserved_client_detach(struct liveupdate_session *session,
+					int cpu)
+{
+	if (cpu_preserved_client)
+		cpu_preserved_client->detach(session, cpu);
+}
+
+static phys_addr_t
+cpu_preserved_client_serialize(struct liveupdate_session *session)
+{
+	return cpu_preserved_client ?
+		cpu_preserved_client->serialize(session) : 0;
+}
+
+static void cpu_preserved_client_restore(struct liveupdate_session *session,
+					 phys_addr_t client_ser_pa)
+{
+	if (cpu_preserved_client)
+		cpu_preserved_client->restore(session, client_ser_pa);
+}
+
 static void cpu_preserved_sync_global_ser(void)
 {
 	struct cpu_preserved_global_ser *ser = cpu_preserved_global_ser;
@@ -1393,15 +1446,23 @@ static int cpu_preserve_preserve(struct liveupdate_file_op_args *args)
 	if (ret)
 		return ret;
 
+	ret = cpu_preserved_client_attach(args->session, cpu);
+	if (ret) {
+		cpu_unpreserve(cpu);
+		return ret;
+	}
+
 	fser = kho_alloc_preserve(sizeof(*fser));
 	if (IS_ERR(fser)) {
 		cpu_unpreserve(cpu);
+		cpu_preserved_client_detach(args->session, cpu);
 		return PTR_ERR(fser);
 	}
 
 	memset(fser, 0, sizeof(*fser));
 	fser->magic = CPU_PRESERVED_FILE_MAGIC;
 	fser->cpu = cpu;
+	fser->client_ser_pa = cpu_preserved_client_serialize(args->session);
 
 	scoped_guard(mutex, &cpu_preserved_lock) {
 		const char *sname = liveupdate_session_name(args->session);
@@ -1437,6 +1498,7 @@ static void cpu_preserve_unpreserve(struct liveupdate_file_op_args *args)
 	cpu = fser->cpu;
 
 	cpu_unpreserve(cpu);
+	cpu_preserved_client_detach(args->session, cpu);
 
 	kho_unpreserve_free(fser);
 }
@@ -1454,6 +1516,10 @@ static int cpu_preserve_retrieve(struct liveupdate_file_op_args *args)
 	fser = phys_to_virt(args->serialized_data);
 	if (fser->magic != CPU_PRESERVED_FILE_MAGIC)
 		return -EINVAL;
+
+	/* Hand the client back whatever it serialised in the old kernel. */
+	if (fser->client_ser_pa)
+		cpu_preserved_client_restore(args->session, fser->client_ser_pa);
 
 	cpu = fser->cpu;
 
@@ -1522,6 +1588,7 @@ static void cpu_preserve_finish(struct liveupdate_file_op_args *args)
 	cpu = fser->cpu;
 
 	cpu_unpreserve(cpu);
+	cpu_preserved_client_detach(args->session, cpu);
 
 	kho_restore_free(fser);
 }

@@ -100,6 +100,41 @@ void cpu_preserved_set_workload_context(int cpu, void *ctx, phys_addr_t pgd_pa);
 int cpu_preserved_get_stack_info(int cpu, phys_addr_t *pa, unsigned long *va, size_t *size);
 int cpu_preserved_get_pcpus_info(phys_addr_t *pa, unsigned long *va, size_t *size);
 
+struct liveupdate_session;
+
+/**
+ * struct cpu_preserved_client - The layer that puts preserved CPUs to work
+ *
+ * A preserved CPU is only useful to something that wants to run code on it.
+ * That something registers here.  CPU preservation itself has no opinion about
+ * what a preserved CPU ends up executing and must not acquire one: the whole
+ * point of the split is that a future bare-process preserver can replace the
+ * on-core scheduler without this file changing.
+ *
+ * Every op is mandatory; cpu_preserved_register_client() rejects a partial
+ * table.  All of them are called from process context.
+ *
+ * @attach:    @cpu has just been preserved on behalf of @session.  Returning
+ *             an error aborts the preservation.
+ * @detach:    @cpu is being handed back to the host, whether because the live
+ *             update was cancelled, completed, or failed part way through.
+ *             Must tolerate a CPU that was never successfully attached.
+ * @serialize: Return the physical address of the client's own preserved state
+ *             for @session, or 0 if it has none.  The value is opaque to CPU
+ *             preservation, which only stores and returns it.
+ * @restore:   Hand @client_ser_pa, the value @serialize produced in the
+ *             previous kernel, back to the client after kexec.
+ */
+struct cpu_preserved_client {
+	int  (*attach)(struct liveupdate_session *session, int cpu);
+	void (*detach)(struct liveupdate_session *session, int cpu);
+	phys_addr_t (*serialize)(struct liveupdate_session *session);
+	void (*restore)(struct liveupdate_session *session,
+			phys_addr_t client_ser_pa);
+};
+
+int cpu_preserved_register_client(const struct cpu_preserved_client *client);
+
 /**
  * cpu_preserved_report_dead - Park preserved CPU when reporting dead in hotplug
  *
