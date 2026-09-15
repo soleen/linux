@@ -1280,6 +1280,7 @@ static int cpu_preserved_flb_retrieve(struct liveupdate_flb_op_args *argp)
 {
 	struct cpu_preserved_global_ser *ser;
 	u64 nr_bits;
+	int cpu;
 
 	if (!argp->data)
 		return -EINVAL;
@@ -1312,6 +1313,8 @@ static int cpu_preserved_flb_retrieve(struct liveupdate_flb_op_args *argp)
 		cpu_preserved_clean(&cpu_preserved_pcpus_pa);
 	}
 	cpu_preserved_clean(&cpu_preserved_mask);
+	for_each_cpu(cpu, &cpu_preserved_mask)
+		set_cpu_present(cpu, false);
 	mutex_unlock(&cpu_preserved_lock);
 
 	argp->obj = ser;
@@ -1342,3 +1345,337 @@ static struct liveupdate_flb cpu_preserved_flb = {
 	.compatible = CPU_PRESERVED_LUO_FLB_COMPATIBLE,
 };
 
+/*
+ * LUO File Handler Callbacks for /sys/devices/system/cpu/cpu<N>/preserve
+ */
+static int file_to_cpu(struct file *file, unsigned int *cpup)
+{
+	struct dentry *dentry, *parent;
+	unsigned int cpu;
+
+	if (!file || !file->f_path.dentry)
+		return -EINVAL;
+
+	if (file_inode(file)->i_sb->s_magic != SYSFS_MAGIC)
+		return -EINVAL;
+
+	dentry = file->f_path.dentry;
+	if (strcmp(dentry->d_name.name, "preserve"))
+		return -EINVAL;
+
+	parent = dentry->d_parent;
+	if (!parent || sscanf(parent->d_name.name, "cpu%u", &cpu) != 1)
+		return -EINVAL;
+
+	if (cpu >= nr_cpu_ids || !cpu_possible(cpu) ||
+	    !cpu_is_hotpluggable(cpu)) {
+		return -EINVAL;
+	}
+
+	*cpup = cpu;
+	return 0;
+}
+
+static bool cpu_preserve_can_preserve(struct liveupdate_file_handler *handler,
+				     struct file *file)
+{
+	unsigned int cpu;
+
+	return file_to_cpu(file, &cpu) == 0;
+}
+
+static int cpu_preserve_preserve(struct liveupdate_file_op_args *args)
+{
+	struct cpu_preserved_file_ser *fser;
+	struct cpu_preserved_pcpu *pcpu;
+	unsigned int cpu;
+	int ret;
+
+	ret = file_to_cpu(args->file, &cpu);
+	if (ret)
+		return ret;
+
+	ret = cpu_preserve(cpu);
+	if (ret)
+		return ret;
+
+	fser = kho_alloc_preserve(sizeof(*fser));
+	if (IS_ERR(fser)) {
+		cpu_unpreserve(cpu);
+		return PTR_ERR(fser);
+	}
+
+	memset(fser, 0, sizeof(*fser));
+	fser->magic = CPU_PRESERVED_FILE_MAGIC;
+	fser->cpu = cpu;
+
+	scoped_guard(mutex, &cpu_preserved_lock) {
+		const char *sname = liveupdate_session_name(args->session);
+
+		pcpu = &cpu_preserved_outgoing.pcpus[cpu];
+
+		if (sname && sname[0]) {
+			strscpy(pcpu->state.session, sname,
+				sizeof(pcpu->state.session));
+		}
+
+		fser->stack_pa = pcpu->state.stack_pa;
+		fser->stack_order = pcpu->state.stack_order;
+		fser->pcpu_pa = virt_to_phys(pcpu);
+	}
+
+	args->serialized_data = virt_to_phys(fser);
+	return 0;
+}
+
+static void cpu_preserve_unpreserve(struct liveupdate_file_op_args *args)
+{
+	struct cpu_preserved_file_ser *fser;
+	unsigned int cpu;
+
+	if (!args->serialized_data)
+		return;
+
+	fser = phys_to_virt(args->serialized_data);
+	if (fser->magic != CPU_PRESERVED_FILE_MAGIC)
+		return;
+
+	cpu = fser->cpu;
+
+	cpu_unpreserve(cpu);
+
+	kho_unpreserve_free(fser);
+}
+
+static int cpu_preserve_retrieve(struct liveupdate_file_op_args *args)
+{
+	struct cpu_preserved_file_ser *fser;
+	struct file *file;
+	unsigned int cpu;
+	char path[64];
+
+	if (!args->serialized_data)
+		return -EINVAL;
+
+	fser = phys_to_virt(args->serialized_data);
+	if (fser->magic != CPU_PRESERVED_FILE_MAGIC)
+		return -EINVAL;
+
+	cpu = fser->cpu;
+
+	snprintf(path, sizeof(path),
+		 "/sys/devices/system/cpu/cpu%u/preserve", cpu);
+	file = filp_open(path, O_RDONLY, 0);
+	if (IS_ERR(file))
+		return PTR_ERR(file);
+
+	args->file = file;
+
+	/* Restore CPU stack pages and connect incoming pcpu */
+	mutex_lock(&cpu_preserved_lock);
+	cpumask_set_cpu(cpu, &cpu_preserved_incoming.mask);
+	cpumask_set_cpu(cpu, &cpu_preserved_mask);
+
+	if (fser->pcpu_pa) {
+		struct cpu_preserved_pcpu *pcpu;
+
+		if (!cpu_preserved_incoming.pcpus) {
+			/*
+			 * Fallback: connect incoming->pcpus base using the preserved pcpu_pa
+			 * offset if global SER did not provide pcpus_runtime_pa.
+			 */
+			cpu_preserved_incoming.pcpus =
+				phys_to_virt(fser->pcpu_pa - cpu * sizeof(*pcpu));
+			WRITE_ONCE(cpu_preserved_pcpus_pa,
+				   fser->pcpu_pa - cpu * sizeof(*pcpu));
+			cpu_preserved_clean(&cpu_preserved_pcpus_pa);
+		}
+
+		pcpu = &cpu_preserved_incoming.pcpus[cpu];
+		pcpu->state.cpu = cpu;
+		pcpu->state.stack_pa = fser->stack_pa;
+		pcpu->state.stack_order = fser->stack_order;
+		if (fser->stack_pa) {
+			struct page *page;
+
+			page = kho_restore_pages(fser->stack_pa,
+						 1 << fser->stack_order);
+			if (page)
+				pcpu->stack = page_address(page);
+			else
+				pcpu->stack = phys_to_virt(fser->stack_pa);
+		}
+		cpu_preserved_clean(pcpu);
+	}
+	cpu_preserved_clean(&cpu_preserved_mask);
+	mutex_unlock(&cpu_preserved_lock);
+
+	return 0;
+}
+
+static void cpu_preserve_finish(struct liveupdate_file_op_args *args)
+{
+	struct cpu_preserved_file_ser *fser;
+	unsigned int cpu;
+
+	if (!args->serialized_data)
+		return;
+
+	fser = phys_to_virt(args->serialized_data);
+	if (fser->magic != CPU_PRESERVED_FILE_MAGIC)
+		return;
+
+	cpu = fser->cpu;
+
+	cpu_unpreserve(cpu);
+
+	kho_restore_free(fser);
+}
+
+static const struct liveupdate_file_ops cpu_preserve_file_ops = {
+	.can_preserve = cpu_preserve_can_preserve,
+	.preserve     = cpu_preserve_preserve,
+	.retrieve     = cpu_preserve_retrieve,
+	.unpreserve   = cpu_preserve_unpreserve,
+	.finish       = cpu_preserve_finish,
+	.owner        = THIS_MODULE,
+};
+
+static struct liveupdate_file_handler cpu_preserve_handler = {
+	.ops        = &cpu_preserve_file_ops,
+	.compatible = CPU_PRESERVED_LUO_FH_COMPATIBLE,
+};
+
+static int cpu_preserve_reboot_notify(struct notifier_block *nb,
+				      unsigned long action, void *data)
+{
+	struct cpu_preserved_incoming *incoming = &cpu_preserved_incoming;
+	int cpu;
+
+	mutex_lock(&cpu_preserved_lock);
+	for_each_cpu(cpu, &cpu_preserved_mask) {
+		struct page *stack_page;
+		unsigned int stack_order;
+		bool is_incoming;
+
+		/*
+		 * If this CPU is not being preserved across an outgoing live
+		 * update, signal it to exit the park loop and offline it.
+		 */
+		is_incoming = cpumask_test_cpu(cpu, &incoming->mask);
+		if (kexec_in_progress && liveupdate_enabled() && !is_incoming)
+			continue;
+
+		cpu_signal_exit(cpu);
+		arch_cpu_preserved_kick(cpu);
+		if (cpu_wait_dead(cpu))
+			continue;
+
+		stack_page = __cpu_unpreserve_locked(cpu, &stack_order);
+		cpu_preserved_free_stack(stack_page, stack_order, is_incoming);
+	}
+	mutex_unlock(&cpu_preserved_lock);
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block cpu_preserve_reboot_nb = {
+	.notifier_call = cpu_preserve_reboot_notify,
+	.priority = 0,
+};
+
+/**
+ * cpu_preserve_early_init - Early boot registration & retrieval of CPUs
+ *
+ * Registers the preserved CPU file handler and FLB with LUO, retrieves incoming
+ * preserved CPU state prior to secondary SMP bringup, and registers the reboot
+ * notifier.
+ *
+ * Return: 0 on success, or negative error code on failure.
+ */
+static int __init cpu_preserve_early_init(void)
+{
+	void *obj;
+	int err;
+
+	if (!liveupdate_enabled())
+		cpumask_clear(&cpu_preserved_mask);
+	cpumask_clear(&cpu_preserved_outgoing.mask);
+	cpumask_clear(&cpu_preserved_incoming.mask);
+	cpu_preserved_outgoing.pcpus = NULL;
+	cpu_preserved_incoming.pcpus = NULL;
+	cpu_preserved_global_ser = NULL;
+
+	err = liveupdate_register_file_handler(&cpu_preserve_handler);
+	if (err && err != -EOPNOTSUPP) {
+		pr_err("Could not register cpu_preserve file handler: %pe\n",
+		       ERR_PTR(err));
+		return err;
+	}
+
+	err = liveupdate_register_flb(&cpu_preserve_handler,
+				      &cpu_preserved_flb);
+	if (err && err != -EOPNOTSUPP) {
+		pr_err("Could not register cpu_preserved FLB: %pe\n",
+		       ERR_PTR(err));
+		return err;
+	}
+
+	/* Retrieve incoming preserved CPUs before secondary CPU bringup */
+	if (liveupdate_enabled())
+		liveupdate_flb_get_incoming(&cpu_preserved_flb, &obj);
+
+	register_reboot_notifier(&cpu_preserve_reboot_nb);
+
+	return 0;
+}
+early_initcall(cpu_preserve_early_init);
+static ssize_t preserved_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%*pbl\n",
+			  cpumask_pr_args(cpu_get_preserved_mask()));
+}
+static DEVICE_ATTR_RO(preserved);
+
+static ssize_t preserve_show(struct device *dev,
+			     struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%d\n", cpu_is_preserved(dev->id));
+}
+static DEVICE_ATTR_RO(preserve);
+
+static int __init cpu_preserve_sysfs_init(void)
+{
+	struct device *dev_root = bus_get_dev_root(&cpu_subsys);
+	int cpu, ret;
+
+	if (dev_root) {
+		ret = sysfs_create_file(&dev_root->kobj, &dev_attr_preserved.attr);
+		put_device(dev_root);
+		if (ret)
+			pr_warn("Failed to create cpu preserved sysfs attribute: %d\n", ret);
+	}
+
+	for_each_possible_cpu(cpu) {
+		struct device *dev = get_cpu_device(cpu);
+
+		if (!dev && cpu_is_preserved(cpu)) {
+			set_cpu_present(cpu, true);
+			arch_register_cpu(cpu);
+			dev = get_cpu_device(cpu);
+		}
+
+		if (dev) {
+			ret = sysfs_create_file(&dev->kobj, &dev_attr_preserve.attr);
+			if (ret)
+				pr_warn("Failed to create cpu%d preserve sysfs attribute: %d\n",
+					cpu, ret);
+		}
+
+		if (cpu_is_preserved(cpu))
+			set_cpu_present(cpu, false);
+	}
+	return 0;
+}
+late_initcall(cpu_preserve_sysfs_init);
