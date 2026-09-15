@@ -298,3 +298,300 @@ kvm_caretaker_vcpu_run(struct kvm_caretaker_vcpu *cvcpu, u64 deadline_ticks)
 			if (!kvm_caretaker_should_exit(cvcpu)) {
 				cpu_relax();
 				enter_res = ops->enter_guest(arch_data);
+			}
+			if (enter_res != 0)
+				break;
+		}
+
+		if (ops->decode_exit)
+			ops->decode_exit(arch_data, &exit);
+
+		if (kvm_caretaker_should_exit(cvcpu))
+			break;
+
+		handled = kvm_caretaker_dispatch_exit(cvcpu, &exit);
+
+		if (ops->advance_rip)
+			ops->advance_rip(arch_data, exit.rip);
+		else
+			cvcpu->last_exit_rip = exit.rip;
+
+		if (!handled) {
+			if (exit.type == KVM_CARETAKER_EXIT_IDLE)
+				reason = ONCORE_EXIT_YIELD_IDLE;
+			break;
+		}
+
+		if (deadline_ticks && arch_oncore_read_counter() >= deadline_ticks)
+			break;
+	}
+
+	if (ops->disarm_timer)
+		ops->disarm_timer(arch_data);
+
+	if (ops->post_run)
+		ops->post_run(arch_data);
+
+	if (kvm_caretaker_should_exit(cvcpu))
+		return ONCORE_EXIT_ATTACH_SIGNALED;
+
+	if (enter_res != 0)
+		return ONCORE_EXIT_ERROR;
+
+	return reason;
+}
+
+int kvm_caretaker_wait_for_attach(struct kvm_caretaker_cb *cb, int pcpu,
+				  void (*arch_kick)(int pcpu))
+{
+	struct kvm_caretaker_vcpu *cvcpu;
+	int i;
+
+	if (!cb)
+		return 0;
+
+	cvcpu = container_of(cb, struct kvm_caretaker_vcpu, cb);
+
+	cpu_preserved_inval(cb);
+
+	if (READ_ONCE(cb->attachment_state) == KVM_CARETAKER_ATTACHED)
+		return 0;
+
+	/*
+	 * If vCPU is not currently running on physical silicon, its
+	 * register state is already completely saved in memory.
+	 */
+	if (!READ_ONCE(cvcpu->running)) {
+		WRITE_ONCE(cb->attachment_state, KVM_CARETAKER_ATTACHED);
+		cpu_preserved_clean(cb);
+		/* Ensure attachment state update is visible across CPUs */
+		smp_wmb();
+		return 0;
+	}
+
+	if (pcpu < 0 || pcpu >= nr_cpu_ids ||
+	    pcpu == raw_smp_processor_id() ||
+	    cpu_online(pcpu)) {
+		WRITE_ONCE(cb->attachment_state, KVM_CARETAKER_ATTACHED);
+		cpu_preserved_clean(cb);
+		/* Ensure attachment state update is visible across CPUs */
+		smp_wmb();
+		return 0;
+	}
+
+	WRITE_ONCE(cb->attachment_state, KVM_CARETAKER_ATTACHING);
+	cpu_preserved_clean(cb);
+	/* Ensure attaching state is committed before issuing kick */
+	smp_wmb();
+
+	/* Send kick to target preserved physical CPU */
+	if (arch_kick)
+		arch_kick(pcpu);
+	else
+		arch_cpu_preserved_kick(pcpu);
+
+	/* Deterministic spin-wait for Caretaker CPU to exit guest and save context */
+	for (i = 0; i < KVM_CARETAKER_ATTACH_TIMEOUT_US / KVM_CARETAKER_ATTACH_STEP_US; i++) {
+		cpu_preserved_inval(cb);
+		if (READ_ONCE(cb->attachment_state) == KVM_CARETAKER_ATTACHED ||
+		    !READ_ONCE(cvcpu->running)) {
+			WRITE_ONCE(cb->attachment_state, KVM_CARETAKER_ATTACHED);
+			cpu_preserved_clean(cb);
+			break;
+		}
+		if ((i % 100) == 0 && i > 0) {
+			if (arch_kick)
+				arch_kick(pcpu);
+			else
+				arch_cpu_preserved_kick(pcpu);
+		}
+		udelay(KVM_CARETAKER_ATTACH_STEP_US);
+	}
+
+	if (READ_ONCE(cb->attachment_state) != KVM_CARETAKER_ATTACHED) {
+		pr_warn("kvm: caretaker attach handshake timed out for pCPU %d\n", pcpu);
+		return -ETIMEDOUT;
+	}
+
+	return 0;
+}
+STACK_FRAME_NON_STANDARD(kvm_caretaker_wait_for_attach);
+
+void kvm_caretaker_post_attach_vcpu(struct kvm_vcpu *vcpu,
+				    struct kvm_caretaker_vcpu *cvcpu)
+{
+	int pcpu = -1;
+
+	if (!vcpu)
+		return;
+
+	if (cvcpu)
+		pcpu = cvcpu->cb.pcpu_id;
+	else if (vcpu->caretaker.cb.pcpu_id != KVM_CARETAKER_INVALID_PCPU)
+		pcpu = vcpu->caretaker.cb.pcpu_id;
+
+	if (pcpu >= 0 && pcpu < CONFIG_NR_CPUS)
+		vcpu->caretaker.cb.pcpu_id = pcpu;
+
+	vcpu->caretaker.cb.runtime_pa = 0;
+	vcpu->caretaker.cb.runtime_size = 0;
+	/* Ensure vCPU mode update is globally visible before clearing cpu */
+	smp_store_mb(vcpu->mode, EXITING_GUEST_MODE);
+	vcpu->cpu = -1;
+
+	if (pcpu >= 0)
+		kvm_caretaker_vcpu_attach(vcpu);
+}
+
+int kvm_caretaker_vcpu_pre_preserve(struct kvm_vcpu *vcpu,
+				    struct liveupdate_session *session,
+				    struct kvm_vcpu_luo_ser *ser)
+{
+	char name[LIVEUPDATE_SESSION_NAME_LENGTH];
+	struct task_struct *task = NULL;
+	struct oncore_job *job;
+	int target_cpu = -1;
+
+	read_lock(&vcpu->pid_lock);
+	task = vcpu->pid ? pid_task(vcpu->pid, PIDTYPE_PID) : NULL;
+	if (task)
+		get_task_struct(task);
+	read_unlock(&vcpu->pid_lock);
+
+	if (task) {
+		if (task->nr_cpus_allowed == 1) {
+			int cpu = cpumask_first(task->cpus_ptr);
+
+			if (cpu >= 0 && cpu < nr_cpu_ids)
+				target_cpu = cpu;
+		}
+		put_task_struct(task);
+	}
+
+	if (target_cpu < 0 && vcpu->caretaker.cb.pcpu_id < nr_cpu_ids)
+		target_cpu = vcpu->caretaker.cb.pcpu_id;
+
+	snprintf(name, sizeof(name), "vcpu%d", vcpu->vcpu_id);
+
+	/*
+	 * Submit with no data: the run callback's argument is the caretaker
+	 * control block, which does not exist until the architecture's
+	 * kvm_arch_vcpu_luo_preserve() has allocated it.  It is installed with
+	 * oncore_job_set_data() from _post_preserve(), before activation.
+	 */
+	job = oncore_session_submit_job(session, name, target_cpu,
+					kvm_arch_vcpu_caretaker_run, NULL);
+	if (IS_ERR(job))
+		return PTR_ERR(job);
+
+	vcpu->caretaker.job = job;
+	target_cpu = job->assigned_cpu;
+
+	/*
+	 * The architecture hook keys off this flag to decide whether to
+	 * allocate a control block at all, so it has to be set before the hook
+	 * runs -- which is the whole reason preserve is split in two.
+	 */
+	if (target_cpu >= 0) {
+		ser->flags |= KVM_VCPU_LUO_FLAG_CARETAKER;
+		vcpu->caretaker.cb.pcpu_id = target_cpu;
+	} else {
+		vcpu->caretaker.cb.pcpu_id = KVM_CARETAKER_INVALID_PCPU;
+	}
+
+	return 0;
+}
+
+int kvm_caretaker_vcpu_post_preserve(struct kvm_vcpu *vcpu,
+				     struct liveupdate_session *session,
+				     struct kvm_vcpu_luo_ser *ser,
+				     int arch_err)
+{
+	struct oncore_job *job = vcpu->caretaker.job;
+	struct kvm_caretaker_cb *cb;
+	int err;
+
+	if (arch_err) {
+		oncore_session_cancel_job(session, job);
+		vcpu->caretaker.job = NULL;
+		return arch_err;
+	}
+
+	if (!(ser->flags & KVM_VCPU_LUO_FLAG_CARETAKER))
+		return 0;
+
+	cb = kvm_arch_vcpu_caretaker_data(vcpu);
+	oncore_job_set_data(job, cb);
+	if (!cb)
+		return 0;
+
+	cb->pcpu_id = job->assigned_cpu;
+	if (cb->runtime_size && cb->runtime_pa) {
+		cpu_preserved_map_range(cb->runtime_pa,
+					(unsigned long)phys_to_virt(cb->runtime_pa),
+					cb->runtime_size, PAGE_KERNEL);
+	}
+
+	/*
+	 * Two control blocks, two address spaces, one transition.  The host
+	 * copy is what kvm_vcpu_ioctl(KVM_RUN) consults to refuse to run a
+	 * detached vCPU; the preserved copy is what the orphaned core reads
+	 * once it is running without us.  Both must flip, and they cannot flip
+	 * atomically -- see struct kvm_vcpu_caretaker.
+	 */
+	kvm_caretaker_vcpu_detach(vcpu);
+	kvm_caretaker_detach(cb);
+	cpu_preserved_clean(cb);
+
+	err = oncore_session_activate_job(session, job);
+	if (err) {
+		oncore_session_cancel_job(session, job);
+		vcpu->caretaker.job = NULL;
+		kvm_caretaker_vcpu_attach(vcpu);
+		kvm_caretaker_attach(cb);
+		return err;
+	}
+
+	return 0;
+}
+
+void kvm_caretaker_vcpu_pre_retrieve(struct kvm_vcpu *vcpu,
+				     struct kvm_vcpu_luo_ser *ser)
+{
+	kvm_arch_vcpu_luo_pre_retrieve_caretaker(vcpu, ser);
+}
+
+void kvm_caretaker_vcpu_retrieve(struct kvm_vcpu *vcpu,
+				 struct kvm_vcpu_luo_ser *ser)
+{
+	kvm_arch_vcpu_luo_attach_caretaker(vcpu, ser);
+	vcpu->caretaker.cb.vcpu_id = ser->vcpu_id;
+}
+
+void kvm_caretaker_vcpu_unpreserve(struct kvm_vcpu *vcpu,
+				   struct liveupdate_session *session,
+				   struct kvm_vcpu_luo_ser *ser)
+{
+	if (!vcpu)
+		return;
+
+	kvm_arch_vcpu_luo_pre_retrieve_caretaker(vcpu, ser);
+	kvm_arch_vcpu_luo_retrieve(vcpu, ser);
+	kvm_arch_vcpu_luo_attach_caretaker(vcpu, ser);
+	if (vcpu->caretaker.job) {
+		oncore_session_cancel_job(session, vcpu->caretaker.job);
+		vcpu->caretaker.job = NULL;
+	}
+	vcpu->caretaker.cb.pcpu_id = KVM_CARETAKER_INVALID_PCPU;
+}
+
+void kvm_caretaker_vcpu_finish(struct kvm_vcpu *vcpu,
+			       struct liveupdate_session *session)
+{
+	if (vcpu && vcpu->caretaker.job) {
+		oncore_session_cancel_job(session, vcpu->caretaker.job);
+		vcpu->caretaker.job = NULL;
+	}
+	if (vcpu)
+		vcpu->caretaker.cb.pcpu_id = KVM_CARETAKER_INVALID_PCPU;
+}

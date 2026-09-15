@@ -21,6 +21,7 @@
 #include <linux/miscdevice.h>
 #include <linux/vmalloc.h>
 #include <linux/reboot.h>
+#include <linux/cpu_preserve.h>
 #include <linux/debugfs.h>
 #include <linux/highmem.h>
 #include <linux/file.h>
@@ -448,6 +449,7 @@ static void kvm_vcpu_init(struct kvm_vcpu *vcpu, struct kvm *kvm, unsigned id)
 	rcuwait_init(&vcpu->wait);
 #endif
 	kvm_async_pf_vcpu_init(vcpu);
+	kvm_caretaker_vcpu_init(vcpu, id);
 
 	kvm_vcpu_set_in_spin_loop(vcpu, false);
 	kvm_vcpu_set_dy_eligible(vcpu, false);
@@ -4521,6 +4523,11 @@ static long kvm_vcpu_ioctl(struct file *filp,
 
 			put_pid(oldpid);
 		}
+
+		if (!kvm_caretaker_vcpu_is_attached(vcpu)) {
+			r = -EBUSY;
+			break;
+		}
 		vcpu->wants_to_run = !READ_ONCE(vcpu->run->immediate_exit__unsafe);
 		r = kvm_arch_vcpu_ioctl_run(vcpu);
 		vcpu->wants_to_run = false;
@@ -4989,6 +4996,8 @@ static int kvm_vm_ioctl_check_extension_generic(struct kvm *kvm, long arg)
 #endif
 	case KVM_CAP_VCPU_PRESERVE:
 		return IS_ENABLED(CONFIG_HAVE_KVM_ARCH_VCPU_PRESERVE);
+	case KVM_CAP_CARETAKER:
+		return IS_ENABLED(CONFIG_KVM_CARETAKER);
 	default:
 		break;
 	}
@@ -5698,6 +5707,7 @@ static int kvm_online_cpu(unsigned int cpu)
 	 * be enabled. Otherwise running VMs would encounter unrecoverable
 	 * errors when scheduled to this CPU.
 	 */
+	__this_cpu_write(virtualization_enabled, false);
 	return kvm_enable_virtualization_cpu();
 }
 
@@ -5707,6 +5717,9 @@ static void kvm_disable_virtualization_cpu(void *ign)
 		return;
 
 	kvm_arch_disable_virtualization_cpu();
+
+	if (cpu_is_preserved(raw_smp_processor_id()))
+		return;
 
 	__this_cpu_write(virtualization_enabled, false);
 }
