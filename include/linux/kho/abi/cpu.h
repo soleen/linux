@@ -96,6 +96,44 @@ static_assert(offsetof(struct cpu_preserved_global_ser,
 		       cpu_preserved_bitmap) % sizeof(u64) == 0,
 	      "cpu_preserved_bitmap must be 64-bit aligned");
 
+#define CPU_PRESERVED_AS_MAX_PGTABLE_PAGES	1024
+
+/**
+ * struct cpu_preserved_as_ser - Serialized preserved address space metadata
+ * @nr_pgtable_pages: Number of valid entries in @pgtable_pages.
+ * @reserved:         Must be zero.
+ * @pgtable_pages:    Physical addresses of all page table pages (root PGD is at index 0).
+ */
+struct cpu_preserved_as_ser {
+	u32 nr_pgtable_pages;
+	u32 reserved;
+	u64 pgtable_pages[CPU_PRESERVED_AS_MAX_PGTABLE_PAGES];
+} __packed;
+
+static_assert(offsetof(struct cpu_preserved_as_ser, pgtable_pages) == 8);
+
+/**
+ * struct oncore_session_ser - Serialized on-core session metadata
+ * @session_name:  LUO session name.
+ * @sess_pa:       Opaque physical address of preserved struct oncore_session
+ *                 (retained for freeing across kexec, never dereferenced).
+ * @as:            Preservation pointer to struct cpu_preserved_as_ser.
+ * @nr_cpu_words:  Number of 64-bit words in @cpus_bitmap.
+ * @reserved:      Must be zero.
+ * @cpus_bitmap:   Bitmap of physical CPUs assigned to this on-core session.
+ */
+struct oncore_session_ser {
+	char session_name[LIVEUPDATE_SESSION_NAME_LENGTH];
+	u64 sess_pa;
+	DECLARE_KHOSER_PTR(as, struct cpu_preserved_as_ser *);
+	u32 nr_cpu_words;
+	u32 reserved;
+	u64 cpus_bitmap[];
+} __packed;
+
+static_assert(offsetof(struct oncore_session_ser, cpus_bitmap) % sizeof(u64) == 0,
+	      "cpus_bitmap must be 64-bit aligned");
+
 /**
  * struct cpu_preserved_file_ser - Per-file serialized state for preserved CPU fd
  * @cpu:      Logical CPU identifier.
