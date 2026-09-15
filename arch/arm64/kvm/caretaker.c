@@ -397,3 +397,383 @@ __caretaker_text static void caretaker_gic_drain_iar(void)
 		write_sysreg_s(iar, SYS_ICC_DIR_EL1);
 	}
 }
+
+/*
+ * Put EL2 back into host (VHE) configuration.  Both vector bases are pointed
+ * at the caretaker's own hyp vectors: while a preserved core is running a
+ * guest the caretaker owns EL2, and the kernel that installed kvm_hyp_vector
+ * may no longer exist.
+ */
+__caretaker_text static void caretaker_restore_host_el2(void)
+{
+	write_sysreg_hcr(HCR_HOST_VHE_FLAGS);
+	write_sysreg((unsigned long)caretaker_hyp_vector, vbar_el1);
+	write_sysreg_s((unsigned long)caretaker_hyp_vector, SYS_VBAR_EL2);
+	dsb(sy);
+	isb();
+}
+
+__caretaker_text static void caretaker_vgic_v3_restore(struct caretaker_arm64_page *cap)
+{
+	struct vgic_v3_cpu_if *cpu_if = &cap->ctx.vgic_v3;
+	unsigned int used_lrs = cpu_if->used_lrs;
+	u64 vtr = read_sysreg_s(SYS_ICH_VTR_EL2);
+	unsigned int max_lrs = FIELD_GET(ICH_VTR_EL2_ListRegs, vtr) + 1;
+	u32 nr_pre_bits = FIELD_GET(ICH_VTR_EL2_PREbits, vtr) + 1;
+	unsigned int i;
+
+	/* Drain any pending software-generated SGIs into empty LRs */
+	if (cap->ctx.pending_sgis) {
+		for (i = 0; i < max_lrs && cap->ctx.pending_sgis; i++) {
+			if (i >= used_lrs || (cpu_if->vgic_lr[i] & ICH_LR_STATE) == 0) {
+				int sgi = __ffs(cap->ctx.pending_sgis);
+
+				cap->ctx.pending_sgis &= ~BIT(sgi);
+				cpu_if->vgic_lr[i] = ((u64)sgi & 0xf) |
+						     ICH_LR_PENDING_BIT |
+						     ICH_LR_GROUP |
+						     ((u64)GIC_DEFAULT_SGI_PRIO <<
+						      ICH_LR_PRIORITY_SHIFT);
+				if (i >= used_lrs)
+					used_lrs = i + 1;
+			}
+		}
+		cpu_if->used_lrs = used_lrs;
+	}
+
+	write_sysreg_s(cpu_if->vgic_vmcr, SYS_ICH_VMCR_EL2);
+
+	caretaker_vgic_v3_apr(restore, 0, cpu_if->vgic_ap0r, nr_pre_bits);
+	caretaker_vgic_v3_apr(restore, 1, cpu_if->vgic_ap1r, nr_pre_bits);
+
+	write_sysreg_s(cpu_if->vgic_hcr | ICH_HCR_EL2_En, SYS_ICH_HCR_EL2);
+
+	used_lrs = min3(used_lrs, max_lrs, (unsigned int)VGIC_V3_MAX_LRS);
+
+	for (i = 0; i < used_lrs; i++)
+		__gic_v3_set_lr(cpu_if->vgic_lr[i], i);
+	isb();
+}
+
+__caretaker_text static void caretaker_vgic_v3_save(struct vgic_v3_cpu_if *cpu_if)
+{
+	u64 vtr = read_sysreg_s(SYS_ICH_VTR_EL2);
+	unsigned int max_lrs = FIELD_GET(ICH_VTR_EL2_ListRegs, vtr) + 1;
+	u32 nr_pre_bits = FIELD_GET(ICH_VTR_EL2_PREbits, vtr) + 1;
+	unsigned int used_lrs = cpu_if->used_lrs;
+	unsigned int i;
+
+	used_lrs = min3(used_lrs, max_lrs, (unsigned int)VGIC_V3_MAX_LRS);
+
+	for (i = 0; i < used_lrs; i++) {
+		cpu_if->vgic_lr[i] = __gic_v3_get_lr(i);
+		__gic_v3_set_lr(0, i);
+	}
+
+	cpu_if->vgic_vmcr = read_sysreg_s(SYS_ICH_VMCR_EL2);
+
+	caretaker_vgic_v3_apr(save, 0, cpu_if->vgic_ap0r, nr_pre_bits);
+	caretaker_vgic_v3_apr(save, 1, cpu_if->vgic_ap1r, nr_pre_bits);
+
+	write_sysreg_s(0, SYS_ICH_HCR_EL2);
+	isb();
+}
+
+__caretaker_text static void
+caretaker_arm64_inject_sgi(struct caretaker_arm64_page *target_cap, u32 sgi)
+{
+	int slot = -1;
+	int i;
+
+	if (!target_cap)
+		return;
+
+	cpu_preserved_inval(target_cap);
+
+	/* Check if the SGI is already pending or active */
+	for (i = 0; i < target_cap->ctx.vgic_v3.used_lrs; i++) {
+		u64 lr = target_cap->ctx.vgic_v3.vgic_lr[i];
+
+		if ((lr & ICH_LR_VIRTUAL_ID_MASK) == (sgi & 0xf) && (lr & ICH_LR_STATE))
+			return;
+		if ((lr & ICH_LR_STATE) == 0 && slot < 0)
+			slot = i;
+	}
+
+	if (slot < 0 && target_cap->ctx.vgic_v3.used_lrs < VGIC_V3_MAX_LRS) {
+		slot = target_cap->ctx.vgic_v3.used_lrs;
+		target_cap->ctx.vgic_v3.used_lrs++;
+	}
+
+	if (slot >= 0) {
+		target_cap->ctx.vgic_v3.vgic_lr[slot] =
+			((u64)sgi & 0xf) |
+			ICH_LR_PENDING_BIT |
+			ICH_LR_GROUP |
+			(GIC_DEFAULT_SGI_PRIO << ICH_LR_PRIORITY_SHIFT);
+	} else {
+		target_cap->ctx.pending_sgis |= BIT(sgi & 0xf);
+	}
+
+	cpu_preserved_clean(target_cap);
+
+	/* If target vCPU is running on a remote physical CPU, kick it */
+	if (target_cap->cb.pcpu_id >= 0 &&
+	    target_cap->cb.pcpu_id != arm64_caretaker_get_pcpu()) {
+		arch_cpu_preserved_kick(target_cap->cb.pcpu_id);
+	}
+}
+
+__caretaker_text static void
+caretaker_arm64_handle_sgi(struct caretaker_arm64_page *src_cap, u64 reg)
+{
+	struct caretaker_arm64_vm *vm = src_cap ? src_cap->vm : NULL;
+	u32 sgi = FIELD_GET(ICC_SGI1R_SGI_ID_MASK, reg);
+	unsigned int i, j;
+
+	if (!vm)
+		return;
+
+	cpu_preserved_inval_sz(vm, struct_size(vm, vcpus, vm->max_vcpus));
+
+	if (reg & BIT_ULL(ICC_SGI1R_IRQ_ROUTING_MODE_BIT)) {
+		/* Broadcast to all other vCPUs */
+		for (i = 0; i < vm->nr_vcpus; i++) {
+			struct caretaker_arm64_page *target = vm->vcpus[i];
+
+			if (target && target != src_cap)
+				caretaker_arm64_inject_sgi(target, sgi);
+		}
+	} else {
+		u64 aff3 = FIELD_GET(ICC_SGI1R_AFFINITY_3_MASK, reg);
+		u64 aff2 = FIELD_GET(ICC_SGI1R_AFFINITY_2_MASK, reg);
+		u64 aff1 = FIELD_GET(ICC_SGI1R_AFFINITY_1_MASK, reg);
+		u64 rs = FIELD_GET(ICC_SGI1R_RS_MASK, reg);
+		u64 cluster_mpidr = (aff3 << MPIDR_LEVEL_SHIFT(3)) |
+				    (aff2 << MPIDR_LEVEL_SHIFT(2)) |
+				    (aff1 << MPIDR_LEVEL_SHIFT(1));
+		u64 target_list = FIELD_GET(ICC_SGI1R_TARGET_LIST_MASK, reg);
+
+		for (i = 0; i < 16; i++) {
+			u64 target_mpidr;
+
+			if (!(target_list & BIT(i)))
+				continue;
+
+			target_mpidr = cluster_mpidr |
+				       ((rs * 16 + i) << MPIDR_LEVEL_SHIFT(0));
+
+			for (j = 0; j < vm->nr_vcpus; j++) {
+				struct caretaker_arm64_page *target = vm->vcpus[j];
+
+				if (!target)
+					continue;
+
+				if ((ctxt_sys_reg(&target->ctx.ctxt, MPIDR_EL1) &
+				     MPIDR_HWID_BITMASK) == target_mpidr) {
+					caretaker_arm64_inject_sgi(target, sgi);
+					break;
+				}
+			}
+		}
+	}
+}
+
+static __caretaker_text int arm64_caretaker_op_enter(void *data)
+{
+	struct caretaker_arm64_page *cap = data;
+	u64 guest_hcr;
+
+	gicv3_caretaker_clear_active_priorities();
+	write_sysreg_s(ICC_PMR_EL1_MASK, SYS_ICC_PMR_EL1);
+	write_sysreg_s(ICC_CTLR_EL1_EOImode_drop, SYS_ICC_CTLR_EL1);
+	write_sysreg_s(ICC_IGRPEN1_EL1_MASK, SYS_ICC_IGRPEN1_EL1);
+	pmr_sync();
+
+	guest_hcr = (cap->ctx.hcr_el2 | HCR_AMO | HCR_IMO | HCR_FMO | HCR_E2H) & ~HCR_TGE;
+	write_sysreg_hcr(guest_hcr);
+	isb();
+
+	cap->last_ret = caretaker_guest_enter(&cap->ctx);
+
+	write_sysreg_hcr(HCR_HOST_VHE_FLAGS);
+	isb();
+
+
+	return 0;
+}
+
+static __caretaker_text void
+arm64_caretaker_op_arm_timer(void *data, u64 deadline_ticks)
+{
+	if (deadline_ticks) {
+		write_sysreg_s(deadline_ticks, SYS_CNTHP_CVAL_EL2);
+		isb();
+		write_sysreg_s(1, SYS_CNTHP_CTL_EL2);
+	} else {
+		write_sysreg_s(0, SYS_CNTHP_CTL_EL2);
+	}
+	isb();
+}
+
+static __caretaker_text void
+arm64_caretaker_op_disarm_timer(void *data)
+{
+	write_sysreg_s(0, SYS_CNTHP_CTL_EL2);
+	isb();
+}
+
+static __caretaker_text void
+arm64_caretaker_op_decode_exit(void *data, struct kvm_caretaker_exit *exit)
+{
+	struct caretaker_arm64_page *cap = data;
+	u64 ret = cap->last_ret;
+
+	exit->rip = cap->ctx.ctxt.regs.pc;
+	exit->insn_len = 0;
+	exit->type = KVM_CARETAKER_EXIT_UNKNOWN;
+
+	if (ARM_EXCEPTION_CODE(ret) == ARM_EXCEPTION_IRQ) {
+		caretaker_gic_drain_iar();
+		gicv3_caretaker_clear_active_priorities();
+		dsb(sy);
+		isb();
+
+		exit->type = KVM_CARETAKER_EXIT_PREEMPT_TIMER;
+		return;
+	}
+
+	if (ARM_EXCEPTION_IS_TRAP(ret)) {
+		u64 esr = cap->ctx.fault.esr_el2;
+		u8 ec = ESR_ELx_EC(esr);
+
+		exit->insn_len = 4;
+
+		if (ec == ESR_ELx_EC_WFx) {
+			exit->type = KVM_CARETAKER_EXIT_IDLE;
+			return;
+		}
+
+		if (ec == ESR_ELx_EC_SYS64) {
+			u32 iss = ESR_ELx_ISS(esr);
+			u32 sys_op = iss & ESR_ELx_SYS64_ISS_SYS_OP_MASK;
+
+			if (sys_op == ESR_ELx_SYS64_ISS_SYS_ICC_SGI1R_EL1 ||
+			    sys_op == ESR_ELx_SYS64_ISS_SYS_ICC_ASGI1R_EL1 ||
+			    sys_op == ESR_ELx_SYS64_ISS_SYS_ICC_SGI0R_EL1) {
+				u32 rt = ESR_ELx_SYS64_ISS_RT(esr);
+				u64 val = (rt < 31) ? cap->ctx.ctxt.regs.regs[rt] : 0;
+
+				exit->type = KVM_CARETAKER_EXIT_CROSS_VCPU;
+				exit->sgi.sgi_id = FIELD_GET(ICC_SGI1R_SGI_ID_MASK, val);
+				exit->sgi.target_mask = val;
+				return;
+			}
+		}
+
+		if (ec == ESR_ELx_EC_DABT_LOW || ec == ESR_ELx_EC_IABT_LOW) {
+			/*
+			 * Stage-2 abort on a non-RAM IPA (e.g. MMIO device).
+			 * Do not advance PC: yield this vCPU out of guest mode
+			 * so the incoming kernel's real KVM + VMM handles the
+			 * fault on re-attachment.
+			 */
+			exit->type = KVM_CARETAKER_EXIT_IDLE;
+			exit->insn_len = 0;
+			return;
+		}
+
+		exit->type = KVM_CARETAKER_EXIT_ARCH;
+		exit->raw_reason = esr;
+		return;
+	}
+
+	exit->type = KVM_CARETAKER_EXIT_ARCH;
+}
+
+static __caretaker_text void
+arm64_caretaker_op_advance_rip(void *data, u64 next_rip)
+{
+	struct caretaker_arm64_page *cap = data;
+
+	cap->ctx.ctxt.regs.pc = next_rip;
+	cap->vcpu.last_exit_rip = next_rip;
+}
+
+static __caretaker_text bool
+arm64_caretaker_op_handle_exit(void *data, struct kvm_caretaker_exit *exit)
+{
+	struct caretaker_arm64_page *cap = data;
+
+	if (exit->type == KVM_CARETAKER_EXIT_CROSS_VCPU) {
+		caretaker_arm64_handle_sgi(cap, exit->sgi.target_mask);
+		exit->rip += exit->insn_len;
+		return true;
+	}
+
+	if (exit->type == KVM_CARETAKER_EXIT_ARCH && exit->insn_len) {
+		exit->rip += exit->insn_len;
+		return true;
+	}
+
+	return false;
+}
+
+static __caretaker_text inline u64 arm64_sysreg_to_uapi_id(u32 reg)
+{
+	if (reg == SYS_CNTV_CVAL_EL0)
+		return KVM_REG_ARM_TIMER_CVAL;
+	return (KVM_REG_ARM64 | KVM_REG_SIZE_U64 |
+		KVM_REG_ARM64_SYSREG |
+		((u64)sys_reg_Op0(reg) << KVM_REG_ARM64_SYSREG_OP0_SHIFT) |
+		((u64)sys_reg_Op1(reg) << KVM_REG_ARM64_SYSREG_OP1_SHIFT) |
+		((u64)sys_reg_CRn(reg) << KVM_REG_ARM64_SYSREG_CRN_SHIFT) |
+		((u64)sys_reg_CRm(reg) << KVM_REG_ARM64_SYSREG_CRM_SHIFT) |
+		((u64)sys_reg_Op2(reg) << KVM_REG_ARM64_SYSREG_OP2_SHIFT));
+}
+
+static __caretaker_text void
+arm64_caretaker_update_sysreg(struct kvm_vcpu_arch_luo_state *state,
+			      u32 reg, u64 val)
+{
+	u64 id = arm64_sysreg_to_uapi_id(reg);
+	u32 i;
+
+	for (i = 0; i < state->num_sysregs; i++) {
+		if (state->sysregs[i].id == id) {
+			state->sysregs[i].addr = val;
+			return;
+		}
+	}
+}
+
+static __caretaker_text void
+arm64_caretaker_detach_serialize(struct caretaker_arm64_page *cap)
+{
+	cap->abi.vgic_initialized = cap->ctx.vgic_initialized ? 1 : 0;
+	cap->abi.cntvoff_el2 = cap->ctx.cntvoff_el2;
+	cap->abi.hcr_el2 = cap->ctx.hcr_el2;
+	cap->abi.mdcr_el2 = cap->ctx.mdcr_el2;
+	cap->abi.cflags = (u32)cap->ctx.cflags;
+	if (cap->ctx.vgic_initialized) {
+		int i;
+
+		cap->abi.used_lrs = cap->ctx.vgic_v3.used_lrs;
+		cap->abi.vgic_hcr = cap->ctx.vgic_v3.vgic_hcr;
+		cap->abi.vgic_vmcr = cap->ctx.vgic_v3.vgic_vmcr;
+		for (i = 0; i < 4; i++) {
+			cap->abi.vgic_ap0r[i] = cap->ctx.vgic_v3.vgic_ap0r[i];
+			cap->abi.vgic_ap1r[i] = cap->ctx.vgic_v3.vgic_ap1r[i];
+		}
+		for (i = 0; i < 16; i++)
+			cap->abi.vgic_lr[i] = cap->ctx.vgic_v3.vgic_lr[i];
+	}
+
+	if (cap->arch_state && cap->abi.arch_state_size) {
+		struct kvm_vcpu_arch_luo_state *state = cap->arch_state;
+
+		oncore_memcpy(&state->regs.regs, &cap->ctx.ctxt.regs,
+			      sizeof(state->regs.regs));
+		state->regs.sp_el1 = ctxt_sys_reg(&cap->ctx.ctxt, SP_EL1);
+		state->regs.elr_el1 = ctxt_sys_reg(&cap->ctx.ctxt, ELR_EL1);
+		state->regs.spsr[KVM_SPSR_EL1] = ctxt_sys_reg(&cap->ctx.ctxt, SPSR_EL1);
