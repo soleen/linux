@@ -178,6 +178,7 @@
 #include <linux/liveupdate.h>
 #include <linux/mm.h>
 #include <linux/objtool.h>
+#include <linux/oncore.h>
 #include <linux/reboot.h>
 
 #include <asm/sections.h>
@@ -1552,14 +1553,22 @@ static int cpu_preserve_preserve(struct liveupdate_file_op_args *args)
 	if (ret)
 		return ret;
 
+	ret = oncore_session_add_cpu(args->session, cpu);
+	if (ret) {
+		cpu_unpreserve(cpu);
+		return ret;
+	}
+
 	fser = kho_alloc_preserve(sizeof(*fser));
 	if (IS_ERR(fser)) {
 		cpu_unpreserve(cpu);
+		oncore_session_remove_cpu(args->session, cpu);
 		return PTR_ERR(fser);
 	}
 
 	memset(fser, 0, sizeof(*fser));
 	fser->cpu = cpu;
+	KHOSER_STORE_PTR(fser->oncore, oncore_session_get_ser(args->session));
 
 	scoped_guard(mutex, &cpu_preserved_lock)
 		fser->stack_pa = cpu_preserved_outgoing.pcpus[cpu].stack_pa;
@@ -1580,6 +1589,7 @@ static void cpu_preserve_unpreserve(struct liveupdate_file_op_args *args)
 	cpu = fser->cpu;
 
 	cpu_unpreserve(cpu);
+	oncore_session_remove_cpu(args->session, cpu);
 
 	kho_unpreserve_free(fser);
 }
@@ -1587,7 +1597,11 @@ static void cpu_preserve_unpreserve(struct liveupdate_file_op_args *args)
 static void cpu_preserve_restore_incoming_cpu(struct liveupdate_session *session,
 					      struct cpu_preserved_file_ser *fser)
 {
+	struct oncore_session_ser *oncore = KHOSER_LOAD_PTR(fser->oncore);
 	unsigned int cpu = fser->cpu;
+
+	if (oncore)
+		oncore_session_restore(session, oncore);
 
 	scoped_guard(mutex, &cpu_preserved_lock) {
 		cpumask_set_cpu(cpu, &cpu_preserved_incoming.mask);
@@ -1646,6 +1660,7 @@ static void cpu_preserve_finish(struct liveupdate_file_op_args *args)
 		cpu_preserve_restore_incoming_cpu(args->session, fser);
 
 	cpu_unpreserve(fser->cpu);
+	oncore_session_remove_cpu(args->session, fser->cpu);
 
 	kho_restore_free(fser);
 }
