@@ -135,6 +135,7 @@ struct cpu_preserved_ser {
 	u32 state;
 	DECLARE_KHOSER_PTR(as, struct cpu_preserved_as_ser *);
 	u64 stack_pa;
+	DECLARE_KHOSER_PTR(oncore, struct oncore_session_ser *);
 } __packed;
 
 #endif /* _LINUX_KHO_ABI_CPU_H */
