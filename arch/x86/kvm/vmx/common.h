@@ -55,7 +55,7 @@ struct vcpu_vt {
 #endif
 };
 
-#ifdef CONFIG_KVM_INTEL_TDX
+#if defined(CONFIG_KVM_INTEL_TDX) && !defined(__CPU_PRESERVED_RUNTIME__)
 
 static __always_inline bool is_td(struct kvm *kvm)
 {

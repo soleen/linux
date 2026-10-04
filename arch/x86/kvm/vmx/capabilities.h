@@ -9,6 +9,12 @@
 #include "../pmu.h"
 #include "../cpuid.h"
 
+#ifdef __CPU_PRESERVED_RUNTIME__
+#define enable_ept true
+#define enable_unrestricted_guest true
+#define enable_apicv true
+#define pt_mode PT_MODE_SYSTEM
+#else
 extern bool __read_mostly enable_vpid;
 extern bool __read_mostly flexpriority_enabled;
 extern bool __read_mostly enable_ept;
@@ -18,6 +24,7 @@ extern bool __read_mostly enable_cet;
 extern bool __read_mostly enable_pml;
 extern bool __read_mostly enable_mbec;
 extern int __read_mostly pt_mode;
+#endif
 
 #define PT_MODE_SYSTEM		0
 #define PT_MODE_HOST_GUEST	1

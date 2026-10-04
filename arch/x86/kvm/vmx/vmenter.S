@@ -211,9 +211,11 @@ SYM_INNER_LABEL_ALIGN(vmx_vmexit, SYM_L_GLOBAL)
 	RET
 
 .Lfixup:
+#ifndef __CPU_PRESERVED_RUNTIME__
 	cmpb $0, _ASM_RIP(virt_rebooting)
 	jne .Lvmfail
 	ud2
+#endif
 .Lvmfail:
 	/* VM-Fail: set return value to 1 */
 	mov $1, %_ASM_BX

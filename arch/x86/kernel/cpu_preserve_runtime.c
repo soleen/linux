@@ -33,6 +33,7 @@ struct desc_ptr x86_preserved_idt_desc __ro_after_init;
 bool x86_preserved_mwait __ro_after_init;
 u64 x86_preserved_sme_mask __ro_after_init;
 bool x86_preserved_has_svm __ro_after_init;
+u16 x86_verw_sel = __KERNEL_DS;
 
 static bool x86_preserved_fixup_exception(struct pt_regs *regs, int trapnr)
 {

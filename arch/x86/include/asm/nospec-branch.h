@@ -58,7 +58,7 @@
 #define RET_DEPTH_INIT_FROM_CALL	0xfc00000000000000ULL
 #define RET_DEPTH_CREDIT		0xffffffffffffffffULL
 
-#ifdef CONFIG_CALL_THUNKS_DEBUG
+#if defined(CONFIG_CALL_THUNKS_DEBUG) && !defined(__CPU_PRESERVED_RUNTIME__)
 # define CALL_THUNKS_DEBUG_INC_CALLS				\
 	incq	PER_CPU_VAR(__x86_call_count);
 # define CALL_THUNKS_DEBUG_INC_RETS				\
@@ -74,7 +74,7 @@
 # define CALL_THUNKS_DEBUG_INC_CTXSW
 #endif
 
-#if defined(CONFIG_MITIGATION_CALL_DEPTH_TRACKING) && !defined(COMPILE_OFFSETS)
+#if defined(CONFIG_MITIGATION_CALL_DEPTH_TRACKING) && !defined(COMPILE_OFFSETS) && !defined(__CPU_PRESERVED_RUNTIME__)
 
 #include <asm/asm-offsets.h>
 
@@ -383,7 +383,7 @@
 #define CLEAR_CPU_BUFFERS \
 	ALTERNATIVE "", __CLEAR_CPU_BUFFERS, X86_FEATURE_CLEAR_CPU_BUF
 
-#ifdef CONFIG_X86_64
+#if defined(CONFIG_X86_64) && !defined(__CPU_PRESERVED_RUNTIME__)
 .macro CLEAR_BRANCH_HISTORY
 	ALTERNATIVE "", "call clear_bhb_loop", X86_FEATURE_CLEAR_BHB_LOOP
 .endm

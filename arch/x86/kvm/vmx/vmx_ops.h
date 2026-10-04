@@ -10,12 +10,21 @@
 #include "vmcs.h"
 #include "../x86.h"
 
+#ifdef __CPU_PRESERVED_RUNTIME__
+static inline void vmread_error(unsigned long field) {}
+static inline void vmwrite_error(unsigned long field, unsigned long value) {}
+static inline void vmclear_error(struct vmcs *vmcs, u64 phys_addr) {}
+static inline void vmptrld_error(struct vmcs *vmcs, u64 phys_addr) {}
+static inline void invvpid_error(unsigned long ext, u16 vpid, gva_t gva) {}
+static inline void invept_error(unsigned long ext, u64 eptp) {}
+#else
 void vmread_error(unsigned long field);
 void vmwrite_error(unsigned long field, unsigned long value);
 void vmclear_error(struct vmcs *vmcs, u64 phys_addr);
 void vmptrld_error(struct vmcs *vmcs, u64 phys_addr);
 void invvpid_error(unsigned long ext, u16 vpid, gva_t gva);
 void invept_error(unsigned long ext, u64 eptp);
+#endif
 
 #ifndef CONFIG_CC_HAS_ASM_GOTO_OUTPUT
 /*
@@ -283,11 +292,24 @@ static __always_inline void vmcs_set_bits(unsigned long field, u32 mask)
 	__vmcs_writel(field, __vmcs_readl(field) | mask);
 }
 
+static inline void vmcs_clear_pa(u64 phys_addr)
+{
+	vmx_asm1(vmclear, "m"(phys_addr), NULL, phys_addr);
+}
+
 static inline void vmcs_clear(struct vmcs *vmcs)
 {
 	u64 phys_addr = __pa(vmcs);
 
 	vmx_asm1(vmclear, "m"(phys_addr), vmcs, phys_addr);
+}
+
+static inline void vmcs_load_pa(u64 phys_addr)
+{
+	if (kvm_is_using_evmcs())
+		return evmcs_load(phys_addr);
+
+	vmx_asm1(vmptrld, "m"(phys_addr), NULL, phys_addr);
 }
 
 static inline void vmcs_load(struct vmcs *vmcs)
