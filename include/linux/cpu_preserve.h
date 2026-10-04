@@ -87,7 +87,9 @@ cpu_preserved_get_stack_context(void)
 extern char __cpu_preserved_text_start[], __cpu_preserved_text_end[];
 extern char __cpu_preserved_data_start[], __cpu_preserved_data_end[];
 bool cpu_is_preserved(int cpu) __cpu_preserved_sym_asm(cpu_is_preserved);
+bool cpu_preserved_should_exit(void) __cpu_preserved_sym_asm(cpu_preserved_should_exit);
 void cpu_preserved_set_dead(void) __cpu_preserved_sym_asm(cpu_preserved_set_dead);
+void cpu_preserved_park(int cpu);
 void cpu_preserved_park_loop(int cpu) __cpu_preserved_sym_asm(cpu_preserved_park_loop);
 
 void arch_cpu_preserved_park_wait(void);
@@ -97,6 +99,53 @@ void arch_cpu_preserved_dcache_inval(unsigned long start, unsigned long end);
 
 const struct cpumask *cpu_get_preserved_mask(void);
 struct cpu_preserved_stack_context *cpu_preserved_get_sctx(int cpu);
+
+/**
+ * cpu_preserved_report_dead - Park preserved CPU when reporting dead in hotplug
+ *
+ * Invoked by cpuhp_ap_report_dead() after CPU hotplug offline synchronization
+ * is complete. If the calling CPU is marked for preservation across live update,
+ * transition it into the preserved parking loop instead of powering down.
+ */
+static inline void cpu_preserved_report_dead(void)
+{
+	if (cpu_is_preserved(raw_smp_processor_id()))
+		cpu_preserved_park(raw_smp_processor_id());
+}
+
+/**
+ * arch_cpu_preserved_kick - Signal or wake up a preserved physical CPU
+ * @cpu: Logical CPU identifier.
+ *
+ * Architecture backend hook to wake a preserved CPU from arch_cpu_preserved_park_wait().
+ *
+ * Executed in normal text context.
+ */
+void arch_cpu_preserved_kick(int cpu);
+
+void arch_cpu_preserved_park_finish(int cpu) __cpu_preserved_sym_asm(arch_cpu_preserved_park_finish);
+
+/**
+ * arch_cpu_preserved_park_on_stack - Switch stack and enter park loop
+ * @cpu: Logical CPU identifier.
+ * @stack_top: Top of the dedicated preserved stack.
+ *
+ * Architecture backend hook to switch to the preserved CPU stack and
+ * invoke cpu_preserved_park_loop(). Does not return.
+ *
+ * Executed in normal text context during CPU teardown.
+ */
+void arch_cpu_preserved_park_on_stack(int cpu, unsigned long stack_top);
+
+/**
+ * arch_cpu_preserved_wait_dead - Wait for CPU to reach dead state
+ * @cpu: Logical CPU identifier.
+ *
+ * Architecture backend hook to wait for a CPU to be fully stopped.
+ *
+ * Executed in normal text context during CPU teardown.
+ */
+void arch_cpu_preserved_wait_dead(int cpu);
 
 struct page;
 struct liveupdate_session;
@@ -183,13 +232,19 @@ void arch_cpu_preserved_as_flush_tlb(void);
 struct cpu_preserved_as_ser;
 
 static inline bool cpu_is_preserved(int cpu) { return false; }
+static inline bool cpu_preserved_should_exit(void) { return true; }
+static inline void cpu_preserved_park(int cpu) {}
+static inline void cpu_preserved_report_dead(void) {}
 static inline void cpu_preserved_set_dead(void) {}
 static inline void arch_cpu_preserved_park_wait(void) {}
 static inline void arch_cpu_preserved_park_init(int cpu) {}
 static inline void arch_cpu_preserved_dcache_clean(unsigned long start,
 						   unsigned long end) {}
+static inline void arch_cpu_preserved_kick(int cpu) {}
+static inline void arch_cpu_preserved_park_finish(int cpu) {}
 static inline void arch_cpu_preserved_dcache_inval(unsigned long start,
 						   unsigned long end) {}
+static inline void arch_cpu_preserved_wait_dead(int cpu) {}
 static inline const struct cpumask *cpu_get_preserved_mask(void)
 {
 	return cpu_none_mask;

@@ -720,6 +720,192 @@ const struct cpumask *cpu_get_preserved_mask(void)
 	return &cpu_preserved_mask;
 }
 
+static void cpu_signal_exit(int cpu)
+{
+	struct cpu_preserved_ser *ser = cpu_preserved_get_ser(cpu);
+
+	if (ser) {
+		u32 old;
+
+		cpu_preserved_inval(ser);
+		old = READ_ONCE(ser->state);
+		while (old != CPU_PRESERVED_DEAD &&
+		       old != CPU_PRESERVED_EXITING) {
+			if (try_cmpxchg(&ser->state, &old,
+					CPU_PRESERVED_EXITING)) {
+				cpu_preserved_clean(ser);
+				break;
+			}
+		}
+	}
+}
+
+#define CPU_WAIT_PARKED_TIMEOUT_US	5000000
+#define CPU_WAIT_PARKED_STEP_US		50
+
+static int cpu_wait_parked(int cpu)
+{
+	struct cpu_preserved_ser *ser = cpu_preserved_get_ser(cpu);
+	int i;
+
+	if (!ser)
+		return -ENODEV;
+
+	for (i = 0; i < CPU_WAIT_PARKED_TIMEOUT_US / CPU_WAIT_PARKED_STEP_US; i++) {
+		cpu_preserved_inval(ser);
+		if (smp_load_acquire(&ser->state) == CPU_PRESERVED_PARKED)
+			return 0;
+		udelay(CPU_WAIT_PARKED_STEP_US);
+	}
+
+	pr_err("Timed out waiting for preserved cpu %d to park (state=%u)\n",
+	       cpu, READ_ONCE(ser->state));
+	return -ETIMEDOUT;
+}
+
+#define CPU_WAIT_DEAD_TIMEOUT_US	20000000
+#define CPU_WAIT_DEAD_STEP_US		100
+#define CPU_WAIT_DEAD_KICK_STEPS	50
+
+static int cpu_wait_dead(int cpu)
+{
+	struct cpu_preserved_stack_context *sctx = cpu_preserved_stack_va(cpu);
+	struct cpu_preserved_ser *ser = cpu_preserved_get_ser(cpu);
+	int i;
+
+	if (!sctx || !ser)
+		return -ENODEV;
+
+	for (i = 0; i < CPU_WAIT_DEAD_TIMEOUT_US / CPU_WAIT_DEAD_STEP_US; i++) {
+		cpu_preserved_inval(ser);
+		if (READ_ONCE(ser->state) == CPU_PRESERVED_DEAD) {
+			arch_cpu_preserved_wait_dead(cpu);
+			return 0;
+		}
+		if (i && (i % CPU_WAIT_DEAD_KICK_STEPS) == 0)
+			arch_cpu_preserved_kick(cpu);
+		udelay(CPU_WAIT_DEAD_STEP_US);
+	}
+
+	pr_err("Timed out waiting for preserved cpu %d to stop (state=%u)\n",
+	       cpu, READ_ONCE(ser->state));
+	return -ETIMEDOUT;
+}
+
+/**
+ * cpu_preserved_park - Main execution and parking loop for a preserved CPU
+ * @cpu: Logical CPU identifier of the calling core.
+ */
+void cpu_preserved_park(int cpu)
+{
+	struct cpu_preserved_stack_context *sctx = cpu_preserved_stack_va(cpu);
+
+	if (WARN_ON_ONCE(!sctx || sctx->magic != CPU_PRESERVED_STACK_MAGIC ||
+			 !sctx->session_pgd_pa)) {
+		arch_cpu_preserved_park_finish(cpu);
+		if (sctx && sctx->ser) {
+			WRITE_ONCE(sctx->ser->state, CPU_PRESERVED_DEAD);
+			cpu_preserved_clean(sctx->ser);
+		}
+		return;
+	}
+
+	arch_cpu_preserved_park_on_stack(cpu, (unsigned long)sctx +
+		CPU_PRESERVED_STACK_SIZE - CPU_PRESERVED_STACK_HEADROOM);
+}
+STACK_FRAME_NON_STANDARD(cpu_preserved_park);
+
+static void cpu_preserved_free_stack(phys_addr_t stack_pa, bool is_incoming)
+{
+	if (stack_pa)
+		cpu_preserved_free_kho(phys_to_virt(stack_pa), is_incoming);
+}
+
+static void cpu_preserved_state_cleanup(struct cpu_preserved_state *st,
+					bool is_incoming)
+{
+	if (!cpumask_empty(&st->mask))
+		return;
+
+	kfree(st->cpus);
+	st->cpus = NULL;
+}
+
+/*
+ * Drop @cpu out of the preserved state, free its preserved stack, and
+ * republish the globals a parked core may still be reading.  The caller holds
+ * cpu_preserved_lock and has already made the core leave the park loop.
+ */
+static void __cpu_unpreserve_locked(unsigned int cpu)
+{
+	struct cpu_preserved_state *incoming = &cpu_preserved_incoming;
+	struct cpu_preserved_state *outgoing = &cpu_preserved_outgoing;
+	bool is_incoming = cpu_preserved_is_incoming(cpu);
+	struct cpu_preserved_as_ser *as = NULL;
+	struct cpu_preserved_ser *ser = NULL;
+	phys_addr_t stack_pa = 0;
+
+	lockdep_assert_held(&cpu_preserved_lock);
+
+	if (is_incoming && incoming->cpus)
+		ser = incoming->cpus[cpu];
+	else if (outgoing->cpus)
+		ser = outgoing->cpus[cpu];
+
+	if (incoming->cpus)
+		incoming->cpus[cpu] = NULL;
+	if (outgoing->cpus)
+		outgoing->cpus[cpu] = NULL;
+
+	cpumask_clear_cpu(cpu, &outgoing->mask);
+	cpumask_clear_cpu(cpu, &incoming->mask);
+	cpumask_clear_cpu(cpu, &cpu_preserved_mask);
+	cpu_preserved_clean(&cpu_preserved_mask);
+	set_cpu_present(cpu, true);
+
+	if (ser) {
+		struct cpu_preserved_session_ser *sser =
+			KHOSER_LOAD_PTR(ser->session);
+
+		as = sser ? KHOSER_LOAD_PTR(sser->as) : NULL;
+		WRITE_ONCE(ser->state, 0);
+		stack_pa = ser->stack_pa;
+		ser->stack_pa = 0;
+		cpu_preserved_clean(ser);
+	}
+
+	if (stack_pa && as)
+		cpu_preserved_as_unmap(as, (unsigned long)phys_to_virt(stack_pa),
+				       CPU_PRESERVED_STACK_SIZE);
+
+	cpu_preserved_sync_global_ser();
+	cpu_preserved_free_stack(stack_pa, is_incoming);
+	cpu_preserved_state_cleanup(outgoing, false);
+	cpu_preserved_state_cleanup(incoming, true);
+}
+
+static int cpu_preserved_init_outgoing(void)
+{
+	struct cpu_preserved_state *outgoing = &cpu_preserved_outgoing;
+	int ret;
+
+	lockdep_assert_held(&cpu_preserved_lock);
+
+	if (outgoing->cpus)
+		return 0;
+
+	ret = cpu_preserved_init_runtime_buffer_locked();
+	if (ret)
+		return ret;
+
+	outgoing->cpus = kcalloc(nr_cpu_ids, sizeof(*outgoing->cpus),
+				  GFP_KERNEL);
+	if (!outgoing->cpus)
+		return -ENOMEM;
+
+	return 0;
+}
+
 struct cpu_preserved_session {
 	struct list_head node;
 	refcount_t ref;
@@ -939,4 +1125,194 @@ static void cpu_preserved_session_remove_cpu(struct liveupdate_session *s,
 		return;
 
 	cpu_preserved_session_put(ps);
+}
+
+static int cpu_unpreserve(unsigned int cpu);
+
+static int cpu_preserve(unsigned int cpu, struct liveupdate_session *session)
+{
+	struct cpu_preserved_state *outgoing = &cpu_preserved_outgoing;
+	struct cpu_preserved_stack_context *sctx;
+	struct cpu_preserved_session *ps;
+	struct cpu_preserved_as_ser *as;
+	struct cpu_preserved_ser *ser;
+	void *stack;
+	int ret;
+
+	cpu_maps_update_begin();
+	if (!cpu_online(cpu)) {
+		cpu_maps_update_done();
+		return -EBUSY;
+	}
+	cpu_maps_update_done();
+
+	ps = cpu_preserved_session_get(session);
+	if (IS_ERR(ps))
+		return PTR_ERR(ps);
+
+	as = cpu_preserved_session_as(ps);
+	if (!as || !as->pgd_pa) {
+		cpu_preserved_session_put(ps);
+		return -EINVAL;
+	}
+
+	stack = kho_alloc_preserve(CPU_PRESERVED_STACK_SIZE);
+	if (IS_ERR(stack)) {
+		cpu_preserved_session_put(ps);
+		return PTR_ERR(stack);
+	}
+
+	ser = kho_alloc_preserve(sizeof(*ser));
+	if (IS_ERR(ser)) {
+		kho_unpreserve_free(stack);
+		cpu_preserved_session_put(ps);
+		return PTR_ERR(ser);
+	}
+	memset(ser, 0, sizeof(*ser));
+	ser->cpu = cpu;
+	ser->state = CPU_PRESERVED_PARKING;
+	ser->stack_pa = virt_to_phys(stack);
+	KHOSER_STORE_PTR(ser->session, ps->ser);
+	cpu_preserved_clean(ser);
+
+	ret = cpu_preserved_as_map(as, virt_to_phys(stack),
+				   (unsigned long)stack, CPU_PRESERVED_STACK_SIZE,
+				   PAGE_KERNEL);
+	if (ret) {
+		kho_unpreserve_free(ser);
+		kho_unpreserve_free(stack);
+		cpu_preserved_session_put(ps);
+		return ret;
+	}
+
+	ret = cpu_preserved_as_map(as, virt_to_phys(ser),
+				   (unsigned long)ser, sizeof(*ser),
+				   PAGE_KERNEL);
+	if (ret) {
+		cpu_preserved_as_unmap(as, (unsigned long)stack,
+				       CPU_PRESERVED_STACK_SIZE);
+		kho_unpreserve_free(ser);
+		kho_unpreserve_free(stack);
+		cpu_preserved_session_put(ps);
+		return ret;
+	}
+
+	sctx = stack;
+	sctx->magic = CPU_PRESERVED_STACK_MAGIC;
+	sctx->cpu = cpu;
+	sctx->session_pgd_pa = as->pgd_pa;
+	sctx->ser = ser;
+	cpu_preserved_clean(sctx);
+
+	scoped_guard(mutex, &cpu_preserved_lock) {
+		if (cpu_is_preserved(cpu)) {
+			cpu_preserved_as_unmap(as, (unsigned long)ser, sizeof(*ser));
+			cpu_preserved_as_unmap(as, (unsigned long)stack,
+					       CPU_PRESERVED_STACK_SIZE);
+			kho_unpreserve_free(ser);
+			kho_unpreserve_free(stack);
+			cpu_preserved_session_put(ps);
+			return -EBUSY;
+		}
+
+		ret = cpu_preserved_init_outgoing();
+		if (ret) {
+			cpu_preserved_as_unmap(as, (unsigned long)ser, sizeof(*ser));
+			cpu_preserved_as_unmap(as, (unsigned long)stack,
+					       CPU_PRESERVED_STACK_SIZE);
+			kho_unpreserve_free(ser);
+			kho_unpreserve_free(stack);
+			cpu_preserved_session_put(ps);
+			return ret;
+		}
+
+		cpumask_set_cpu(cpu, &outgoing->mask);
+		cpumask_set_cpu(cpu, &cpu_preserved_mask);
+		cpu_preserved_clean(&cpu_preserved_mask);
+
+		outgoing->cpus[cpu] = ser;
+		cpu_preserved_sync_global_ser();
+	}
+
+	ret = remove_cpu(cpu);
+	if (ret != 0) {
+		if (ret > 0)
+			ret = -EBUSY;
+		pr_err("Failed to offline preserved cpu %u: %d\n",
+		       cpu, ret);
+		scoped_guard(mutex, &cpu_preserved_lock)
+			__cpu_unpreserve_locked(cpu);
+		cpu_preserved_as_unmap(as, (unsigned long)ser, sizeof(*ser));
+		cpu_preserved_session_put(ps);
+		cpu_preserved_free_kho(ser, false);
+		return ret;
+	}
+
+	ret = cpu_wait_parked(cpu);
+	if (ret) {
+		if (!cpu_unpreserve(cpu)) {
+			cpu_preserved_as_unmap(as, (unsigned long)ser, sizeof(*ser));
+			cpu_preserved_session_put(ps);
+			cpu_preserved_free_kho(ser, false);
+		}
+		return ret;
+	}
+
+	set_cpu_present(cpu, false);
+
+	scoped_guard(mutex, &cpu_preserved_sessions_lock) {
+		cpumask_set_cpu(cpu,
+				to_cpumask((unsigned long *)ps->ser->cpus_bitmap));
+		cpu_preserved_clean_sz(ps->ser,
+				       struct_size(ps->ser, cpus_bitmap,
+						   ps->ser->nr_cpu_words));
+	}
+	return 0;
+}
+
+/**
+ * cpu_unpreserve - Unpreserve a physical CPU and restore it to online state
+ * @cpu: Logical CPU identifier.
+ *
+ * Signals the CPU to exit the parking loop, cleans up preserved stack memory,
+ * and restores the core to host scheduling via standard add_cpu().
+ *
+ * Return: 0 on success, or negative errno if the CPU failed to stop and was
+ *         quarantined.
+ */
+static int cpu_unpreserve(unsigned int cpu)
+{
+	int ret;
+
+	scoped_guard(mutex, &cpu_preserved_lock) {
+		if (!cpu_is_preserved(cpu))
+			return 0;
+
+		cpu_signal_exit(cpu);
+		arch_cpu_preserved_kick(cpu);
+	}
+
+	/*
+	 * cpu_wait_dead() busy-polls for up to 20 seconds.  Do not hold
+	 * cpu_preserved_lock across it: the poll only reads pcpu->state, which
+	 * stays valid for as long as the CPU is preserved, and holding the lock
+	 * here would stall every other preservation operation and every sysfs
+	 * reader for the entire window.
+	 */
+	ret = cpu_wait_dead(cpu);
+	if (WARN_ON_ONCE(ret))
+		return ret;
+
+	scoped_guard(mutex, &cpu_preserved_lock) {
+		if (!cpu_is_preserved(cpu))
+			return 0;
+
+		__cpu_unpreserve_locked(cpu);
+	}
+
+	ret = add_cpu(cpu);
+	if (ret < 0)
+		pr_err("Failed to bring unpreserved cpu %u back online: %d\n",
+		       cpu, ret);
+	return 0;
 }
