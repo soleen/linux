@@ -46,6 +46,7 @@
 #include "cpuid.h"
 #include "hyperv.h"
 #include "smm.h"
+#include "switch.h"
 
 #ifndef CONFIG_X86_64
 #define mod_64(x, y) ((x) - (y) * div64_u64(x, y))
@@ -105,6 +106,16 @@ static __always_inline void kvm_lapic_set_reg64(struct kvm_lapic *apic,
 						int reg, u64 val)
 {
 	apic_set_reg64(apic->regs, reg, val);
+}
+
+static inline int apic_lvtt_oneshot(struct kvm_lapic *apic)
+{
+	return apic->lapic_timer.timer_mode == APIC_LVT_TIMER_ONESHOT;
+}
+
+static inline int apic_lvtt_period(struct kvm_lapic *apic)
+{
+	return apic->lapic_timer.timer_mode == APIC_LVT_TIMER_PERIODIC;
 }
 
 bool kvm_apic_pending_eoi(struct kvm_vcpu *vcpu, int vector)
@@ -581,16 +592,6 @@ static inline int apic_lvt_enabled(struct kvm_lapic *apic, int lvt_type)
 	return !(kvm_lapic_get_reg(apic, lvt_type) & APIC_LVT_MASKED);
 }
 
-static inline int apic_lvtt_oneshot(struct kvm_lapic *apic)
-{
-	return apic->lapic_timer.timer_mode == APIC_LVT_TIMER_ONESHOT;
-}
-
-static inline int apic_lvtt_period(struct kvm_lapic *apic)
-{
-	return apic->lapic_timer.timer_mode == APIC_LVT_TIMER_PERIODIC;
-}
-
 static inline int apic_lvtt_tscdeadline(struct kvm_lapic *apic)
 {
 	return apic->lapic_timer.timer_mode == APIC_LVT_TIMER_TSCDEADLINE;
@@ -673,71 +674,15 @@ static u8 count_vectors(void *bitmap)
 
 bool __kvm_apic_update_irr(unsigned long *pir, void *regs, int *max_irr)
 {
-	unsigned long pir_vals[NR_PIR_WORDS];
-	u32 *__pir = (void *)pir_vals;
-	u32 i, vec;
-	u32 irr_val, prev_irr_val;
-	int max_new_irr;
-
-	if (!pi_harvest_pir(pir, pir_vals)) {
-		*max_irr = apic_find_highest_vector(regs + APIC_IRR);
-		return false;
-	}
-
-	max_new_irr = -1;
-	*max_irr = -1;
-
-	for (i = vec = 0; i <= 7; i++, vec += 32) {
-		u32 *p_irr = (u32 *)(regs + APIC_IRR + i * 0x10);
-
-		irr_val = READ_ONCE(*p_irr);
-
-		if (__pir[i]) {
-			prev_irr_val = irr_val;
-			do {
-				irr_val = prev_irr_val | __pir[i];
-			} while (prev_irr_val != irr_val &&
-				 !try_cmpxchg(p_irr, &prev_irr_val, irr_val));
-
-			if (prev_irr_val != irr_val)
-				max_new_irr = __fls(irr_val ^ prev_irr_val) + vec;
-		}
-		if (irr_val)
-			*max_irr = __fls(irr_val) + vec;
-	}
-
-	return max_new_irr != -1 && max_new_irr == *max_irr;
+	return ____kvm_apic_update_irr(pir, regs, max_irr);
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(__kvm_apic_update_irr);
 
 bool kvm_apic_update_irr(struct kvm_vcpu *vcpu, unsigned long *pir, int *max_irr)
 {
-	struct kvm_lapic *apic = vcpu->arch.apic;
-	bool max_irr_is_from_pir;
-
-	max_irr_is_from_pir = __kvm_apic_update_irr(pir, apic->regs, max_irr);
-	if (unlikely(!apic->apicv_active && max_irr_is_from_pir))
-		apic->irr_pending = true;
-	return max_irr_is_from_pir;
+	return __kvm_apic_update_irr_vcpu(vcpu, pir, max_irr);
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_apic_update_irr);
-
-static inline int apic_search_irr(struct kvm_lapic *apic)
-{
-	return apic_find_highest_vector(apic->regs + APIC_IRR);
-}
-
-static inline int apic_find_highest_irr(struct kvm_lapic *apic)
-{
-	/*
-	 * Note that irr_pending is just a hint. It will be always
-	 * true with virtual interrupt delivery enabled.
-	 */
-	if (!apic->irr_pending)
-		return -1;
-
-	return apic_search_irr(apic);
-}
 
 static inline void apic_clear_irr(int vec, struct kvm_lapic *apic)
 {
@@ -825,11 +770,6 @@ static inline void apic_clear_isr(int vec, struct kvm_lapic *apic)
 
 int kvm_lapic_find_highest_irr(struct kvm_vcpu *vcpu)
 {
-	/* This may race with setting of irr in __apic_accept_irq() and
-	 * value returned may be wrong, but kvm_vcpu_kick() in __apic_accept_irq
-	 * will cause vmexit immediately and the value will be recalculated
-	 * on the next vmentry.
-	 */
 	return apic_find_highest_irr(vcpu->arch.apic);
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_lapic_find_highest_irr);
