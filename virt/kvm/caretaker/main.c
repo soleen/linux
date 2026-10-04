@@ -348,6 +348,13 @@ int kvm_caretaker_init_common_vcpu(struct kvm_caretaker_vcpu *cvcpu,
 #define KVM_CARETAKER_ATTACH_STEP_US		10
 #define KVM_CARETAKER_ATTACH_KICK_STEPS		100
 
+static atomic_t kvm_caretaker_quarantined_vcpus = ATOMIC_INIT(0);
+
+bool kvm_caretaker_has_quarantined_vcpu(void)
+{
+	return atomic_read(&kvm_caretaker_quarantined_vcpus) > 0;
+}
+
 static int kvm_caretaker_try_stop(struct kvm_caretaker_cb_ser *cb)
 {
 	u32 st;
@@ -438,6 +445,9 @@ int kvm_caretaker_wait_for_attach(struct kvm_caretaker_cb_ser *cb, int pcpu)
 	}
 
 	WARN_ON_ONCE(1);
+	atomic_inc(&kvm_caretaker_quarantined_vcpus);
+	pr_warn("kvm: caretaker attach handshake timed out for pCPU %d; quarantining vCPU %u\n",
+		pcpu, cb->vcpu_id);
 	return -ETIMEDOUT;
 }
 

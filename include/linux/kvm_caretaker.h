@@ -209,6 +209,7 @@ int kvm_arch_vcpu_luo_pre_retrieve_caretaker(struct kvm_vcpu *vcpu,
 void kvm_arch_vcpu_luo_attach_caretaker(struct kvm_vcpu *vcpu,
 					struct kvm_vcpu_ser *ser);
 
+bool kvm_caretaker_has_quarantined_vcpu(void);
 void kvm_caretaker_vm_pre_retrieve(void);
 int kvm_caretaker_vcpu_pre_preserve(struct kvm_vcpu *vcpu,
 				    struct liveupdate_session *session,
@@ -245,6 +246,11 @@ static inline void kvm_kho_folios_finish(struct kvm_kho_folios_ser *folios) {}
 static inline bool kvm_caretaker_vcpu_is_attached(struct kvm_vcpu *vcpu)
 {
 	return true;
+}
+
+static inline bool kvm_caretaker_has_quarantined_vcpu(void)
+{
+	return false;
 }
 
 static inline void kvm_caretaker_vm_pre_retrieve(void) {}
