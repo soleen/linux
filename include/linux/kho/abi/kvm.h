@@ -30,10 +30,12 @@
 
 /**
  * struct kvm_luo_ser - Main serialization structure for a KVM VM.
- * @type:         The type of VM.
+ * @type:       The type of VM.
+ * @kho_folios: Preservation pointer to VM-wide KHO-preserved folios.
  */
 struct kvm_luo_ser {
 	u64 type;
+	DECLARE_KHOSER_PTR(kho_folios, struct kvm_kho_folios_ser *);
 } __packed;
 
 /* The compatibility string for KVM VM file handler */
@@ -97,6 +99,16 @@ enum kvm_caretaker_state {
 	KVM_CARETAKER_STOPPED = 3,
 	KVM_CARETAKER_FAILED = 4,
 };
+
+/**
+ * struct kvm_kho_folios_ser - Serialized list of KHO-preserved folios for a VM
+ * @nr_folios: Number of physical folio addresses in @folios_pa.
+ * @folios_pa: Physical addresses of folios preserved via kho_preserve_folio().
+ */
+struct kvm_kho_folios_ser {
+	u64 nr_folios;
+	u64 folios_pa[];
+} __packed;
 
 /**
  * struct kvm_caretaker_cb_ser - KVM Caretaker Control Block

@@ -21,6 +21,13 @@ struct page;
 enum oncore_exit_reason;
 struct kvm_caretaker_vcpu;
 
+struct kvm_kho_pages {
+	struct page **pages;
+	unsigned long nr;
+	unsigned long capacity;
+	bool overflow;
+};
+
 /**
  * struct kvm_caretaker_ops - Architecture operations vector for Caretaker vCPU execution
  * @vcpu_run:     Perform hardware guest entry and fastpath VM-exit handling.
@@ -55,6 +62,14 @@ struct kvm_caretaker_vcpu {
 };
 
 #ifdef CONFIG_KVM_CARETAKER
+
+struct kvm_kho_folios_ser *kvm_kho_folios_alloc(unsigned int max_folios);
+void kvm_kho_folios_unpreserve(struct kvm_kho_folios_ser *folios);
+void kvm_kho_folios_finish(struct kvm_kho_folios_ser *folios);
+void kvm_kho_pages_add(struct kvm_kho_pages *acc, struct page *page);
+int kvm_kho_preserve_vm_pages(struct kvm *kvm, struct kvm_luo_ser *ser,
+			      int (*collect)(struct kvm *kvm,
+					     struct kvm_kho_pages *acc));
 
 #include <linux/cpu_preserve.h>
 #include <linux/oncore.h>
@@ -223,6 +238,9 @@ static inline void kvm_caretaker_telemetry_free(struct kvm_vcpu_ser *ser,
 						bool is_incoming) {}
 
 #else /* !CONFIG_KVM_CARETAKER */
+
+static inline void kvm_kho_folios_unpreserve(struct kvm_kho_folios_ser *folios) {}
+static inline void kvm_kho_folios_finish(struct kvm_kho_folios_ser *folios) {}
 
 static inline bool kvm_caretaker_vcpu_is_attached(struct kvm_vcpu *vcpu)
 {

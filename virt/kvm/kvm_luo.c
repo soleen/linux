@@ -79,6 +79,7 @@ static int kvm_luo_preserve(struct liveupdate_file_op_args *args)
 	 * only the architecture knows how to spell it.
 	 */
 	ser->type = 0;
+	ser->kho_folios.phys = 0;
 	err = kvm_arch_vm_luo_preserve(kvm, ser);
 	if (err) {
 		kho_unpreserve_free(ser);
@@ -116,20 +117,20 @@ static int kvm_luo_retrieve(struct liveupdate_file_op_args *args)
 	}
 
 	kvm = file->private_data;
-
 	args->file = file;
-	kho_restore_free(ser);
 
 	kvm_uevent_notify_vm_create(kvm);
 	return 0;
 
 err_free_ser:
+	kvm_kho_folios_finish(KHOSER_LOAD_PTR(ser->kho_folios));
 	kho_restore_free(ser);
 	return err;
 }
 
 static void kvm_luo_unpreserve(struct liveupdate_file_op_args *args)
 {
+	struct kvm *kvm = args->file ? args->file->private_data : NULL;
 	struct kvm_luo_ser *ser;
 
 	/*
@@ -142,7 +143,9 @@ static void kvm_luo_unpreserve(struct liveupdate_file_op_args *args)
 		return;
 
 	ser = phys_to_virt(args->serialized_data);
-
+	if (kvm)
+		kvm->kho_folios = NULL;
+	kvm_kho_folios_unpreserve(KHOSER_LOAD_PTR(ser->kho_folios));
 	kho_unpreserve_free(ser);
 }
 
@@ -150,24 +153,33 @@ static void kvm_luo_finish(struct liveupdate_file_op_args *args)
 {
 	struct kvm_luo_ser *ser;
 
-	/*
-	 * If retrieve_status is true or set to error, nothing to do here.
-	 * Already cleaned up in kvm_luo_retrieve().
-	 */
-	if (args->retrieve_status)
+	if (args->retrieve_status < 0)
 		return;
 
 	if (!args->serialized_data)
 		return;
 
 	ser = phys_to_virt(args->serialized_data);
-
+	kvm_kho_folios_finish(KHOSER_LOAD_PTR(ser->kho_folios));
 	kho_restore_free(ser);
+}
+
+static int kvm_luo_freeze(struct liveupdate_file_op_args *args)
+{
+	struct kvm *kvm = args->file->private_data;
+	struct kvm_luo_ser *ser;
+
+	if (WARN_ON_ONCE(!args->serialized_data))
+		return -EINVAL;
+
+	ser = phys_to_virt(args->serialized_data);
+	return kvm_arch_vm_luo_freeze(kvm, ser);
 }
 
 static const struct liveupdate_file_ops kvm_luo_file_ops = {
 	.can_preserve = kvm_luo_can_preserve,
 	.preserve = kvm_luo_preserve,
+	.freeze = kvm_luo_freeze,
 	.retrieve = kvm_luo_retrieve,
 	.unpreserve = kvm_luo_unpreserve,
 	.finish = kvm_luo_finish,
