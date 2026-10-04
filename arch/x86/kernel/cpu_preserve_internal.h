@@ -10,6 +10,9 @@
 extern const char x86_preserved_exc_handler_array[NUM_EXCEPTION_VECTORS][EARLY_IDT_HANDLER_SIZE]
 	__cpu_preserved_sym_asm(x86_preserved_exc_handler_array);
 
+void x86_preserved_apic_eoi_stub(void)
+	__cpu_preserved_sym_asm(x86_preserved_apic_eoi_stub);
+
 extern bool x86_preserved_mwait __cpu_preserved_sym_asm(x86_preserved_mwait);
 extern u64 x86_preserved_sme_mask
 	__cpu_preserved_sym_asm(x86_preserved_sme_mask);

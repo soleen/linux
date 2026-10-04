@@ -28,7 +28,7 @@
 #include "cpu_preserve_internal.h"
 
 /*
- * Initialize the preserved IDT with exception handlers.
+ * Initialize the preserved IDT with exception and interrupt handlers.
  *
  * Vectors 0..31 are x86 architecture exceptions/traps.  They enter
  * x86_preserved_exc_handler_array[v] and x86_preserved_handle_exception():
@@ -40,10 +40,10 @@
  * - #DF, NMI and #MC run on IST stacks, so they work even when the current
  *   stack does not.
  *
- * Vectors >= FIRST_EXTERNAL_VECTOR (32) are external interrupts, which are not
- * delivered: the runtime keeps interrupts disabled, and the local APIC stays
- * software-disabled.  Their gates are not present, so that one would raise #NP
- * and stop the CPU.
+ * Vectors >= FIRST_EXTERNAL_VECTOR (32) are external interrupts.  The park
+ * loop keeps interrupts disabled and the local APIC software-disabled, but a
+ * workload may enable both.  Their entry, x86_preserved_apic_eoi_stub, only
+ * writes the x2APIC EOI register and returns.
  */
 static void init_preserved_idt(void)
 {
@@ -63,6 +63,10 @@ static void init_preserved_idt(void)
 		pack_gate(&x86_preserved_idt[v], GATE_INTERRUPT, handler, 0,
 			  ist, __KERNEL_CS);
 	}
+	for (v = FIRST_EXTERNAL_VECTOR; v < IDT_ENTRIES; v++)
+		pack_gate(&x86_preserved_idt[v], GATE_INTERRUPT,
+			  (unsigned long)x86_preserved_apic_eoi_stub, 0, 0,
+			  __KERNEL_CS);
 	x86_preserved_idt_desc.size = sizeof(x86_preserved_idt) - 1;
 	x86_preserved_idt_desc.address = (unsigned long)&x86_preserved_idt[0];
 	cpu_preserved_clean(&x86_preserved_idt);

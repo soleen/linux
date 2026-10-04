@@ -111,6 +111,23 @@ SYM_INNER_LABEL(x86_preserved_idle_end, SYM_L_GLOBAL)
 	RET
 SYM_FUNC_END(x86_preserved_idle)
 
+SYM_CODE_START(x86_preserved_apic_eoi_stub)
+	UNWIND_HINT_IRET_REGS
+	ENDBR
+	pushq	%rax
+	pushq	%rcx
+	pushq	%rdx
+	/* x2APIC mode: MSR 0x80b (APIC_EOI) = 0 */
+	movl	$0x80b, %ecx
+	xorl	%eax, %eax
+	xorl	%edx, %edx
+	wrmsr
+	popq	%rdx
+	popq	%rcx
+	popq	%rax
+	iretq
+SYM_CODE_END(x86_preserved_apic_eoi_stub)
+
 /*
  * arch_cpu_preserved_call_on_stack - Switch stack and call function
  * @cpu: CPU ID (%rdi)
