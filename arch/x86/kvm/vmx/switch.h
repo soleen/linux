@@ -613,6 +613,8 @@ static inline void vmx_write_guest_kernel_gs_base(struct vcpu_vmx *vmx, u64 data
 static int (*const kvm_vmx_exit_handlers[])(struct kvm_vcpu *vcpu) = {
 	[EXIT_REASON_EXCEPTION_NMI]           = handle_exception_nmi,
 	[EXIT_REASON_EXTERNAL_INTERRUPT]      = handle_external_interrupt,
+	[EXIT_REASON_HLT]                     = kvm_emulate_halt,
+	[EXIT_REASON_PAUSE_INSTRUCTION]       = handle_pause,
 };
 static const int kvm_vmx_max_exit_handlers =
 	ARRAY_SIZE(kvm_vmx_exit_handlers);

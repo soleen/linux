@@ -112,6 +112,12 @@ static int vmx_caretaker_handle_exit(struct caretaker_x86_page *cxp,
 	if (ret <= 0)
 		return -1;
 
+	if (exit_reason == EXIT_REASON_HLT ||
+	    exit_reason == EXIT_REASON_PAUSE_INSTRUCTION) {
+		*reason = ONCORE_EXIT_YIELD_IDLE;
+		return 0;
+	}
+
 	if (exit_reason == EXIT_REASON_EXTERNAL_INTERRUPT ||
 	    exit_reason == EXIT_REASON_EXCEPTION_NMI)
 		return 0;
