@@ -226,6 +226,7 @@
 #include <linux/reboot.h>
 #include <linux/refcount.h>
 #include <linux/string.h>
+#include <linux/suspend.h>
 
 #include <asm/sections.h>
 
@@ -1902,6 +1903,69 @@ static struct liveupdate_file_handler cpu_preserve_handler = {
 	.compatible = CPU_PRESERVED_LUO_FH_COMPATIBLE,
 };
 
+static int cpu_preserve_reboot_notify(struct notifier_block *nb,
+				      unsigned long action, void *data)
+{
+	bool handover = kexec_in_progress && liveupdate_enabled();
+	const struct cpumask *outgoing = &cpu_preserved_outgoing.mask;
+	ktime_t deadline;
+	int cpu;
+
+	/*
+	 * Only the CPUs preserved by this kernel are handed over to the next
+	 * one.  Stop every other preserved CPU, including incoming CPUs that no
+	 * session finished, as their memory is not preserved again.  Stopping
+	 * is all that is done: no owner unpreserved, retrieved or finished
+	 * them, so neither does this.  They halt like any offline CPU across
+	 * kexec, and the next kernel brings them up as usual.
+	 */
+	guard(mutex)(&cpu_preserved_lock);
+	for_each_cpu(cpu, &cpu_preserved_mask) {
+		if (handover && cpumask_test_cpu(cpu, outgoing))
+			continue;
+
+		cpu_signal_exit(cpu);
+		arch_cpu_preserved_kick(cpu);
+	}
+
+	deadline = ktime_add_us(ktime_get(), CPU_WAIT_DEAD_TIMEOUT_US);
+	for_each_cpu(cpu, &cpu_preserved_mask) {
+		s64 left;
+
+		if (handover && cpumask_test_cpu(cpu, outgoing))
+			continue;
+
+		left = max(ktime_us_delta(deadline, ktime_get()), 1);
+		if (!cpu_wait_dead_timeout(cpu, left))
+			cpumask_clear_cpu(cpu, &cpu_preserved_mask);
+	}
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block cpu_preserve_reboot_nb = {
+	.notifier_call = cpu_preserve_reboot_notify,
+	.priority = 0,
+};
+
+static int cpu_preserve_pm_notify(struct notifier_block *nb,
+				  unsigned long action, void *data)
+{
+	if (action != PM_SUSPEND_PREPARE && action != PM_HIBERNATION_PREPARE)
+		return NOTIFY_DONE;
+
+	/* Sleep states reset the CPUs, parked ones included. */
+	if (!cpumask_empty(&cpu_preserved_mask)) {
+		pr_err("Cannot suspend or hibernate while CPUs are preserved\n");
+		return notifier_from_errno(-EBUSY);
+	}
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block cpu_preserve_pm_nb = {
+	.notifier_call = cpu_preserve_pm_notify,
+};
+
 static int __init cpu_preserve_early_init(void)
 {
 	void *obj;
@@ -1928,6 +1992,9 @@ static int __init cpu_preserve_early_init(void)
 	if (liveupdate_enabled() &&
 	    !liveupdate_flb_get_incoming(&cpu_preserved_flb, &obj))
 		liveupdate_flb_put_incoming(&cpu_preserved_flb);
+
+	register_reboot_notifier(&cpu_preserve_reboot_nb);
+	register_pm_notifier(&cpu_preserve_pm_nb);
 
 	return 0;
 }
