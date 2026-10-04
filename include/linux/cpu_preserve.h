@@ -50,6 +50,8 @@ struct cpu_preserved_ser;
  * @cpu:              Logical CPU identifier of the preserved physical core.
  * @session_pgd_pa:   Session root page table physical address, or 0.
  * @ser:              Preserved CPU descriptor in isolated address space.
+ * @fault:            Faults and machine checks taken by the preserved CPU (x86).
+ * @x86:              Descriptor tables and exception stacks (x86).
  *
  * This structure lives at the base of a preserved CPU's dedicated stack and is
  * accessed by the preserved CPU during parking. It is private to the preserved
@@ -60,6 +62,10 @@ struct cpu_preserved_stack_context {
 	u32 cpu;
 	u64 session_pgd_pa;
 	struct cpu_preserved_ser *ser;
+#ifdef CONFIG_X86_64
+	struct x86_preserved_fault fault;
+	struct x86_preserved_cpu x86;
+#endif
 };
 
 static_assert(offsetof(struct cpu_preserved_stack_context, magic) == 0,
@@ -241,6 +247,11 @@ void cpu_preserved_session_put(struct cpu_preserved_session *ps);
 struct cpu_preserved_as_ser *cpu_preserved_session_as(struct cpu_preserved_session *ps);
 const struct cpumask *cpu_preserved_session_cpus(struct cpu_preserved_session *ps);
 
+bool arch_cpu_preserved_is_active(void)
+	__cpu_preserved_sym_asm(arch_cpu_preserved_is_active);
+void arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa)
+	__cpu_preserved_sym_asm(arch_cpu_preserved_switch_pgd);
+
 /**
  * arch_cpu_preserved_as_map - Add one range to a preserved address space
  * @as: Address space to map into; its root PGD is at @as->pgd_pa.
@@ -334,6 +345,8 @@ static inline int arch_cpu_preserved_setup_buffer(struct page *text_page,
 	return 0;
 }
 
+static inline bool arch_cpu_preserved_is_active(void) { return false; }
+static inline void arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa) {}
 static __always_inline struct cpu_preserved_stack_context *
 cpu_preserved_get_stack_context(void)
 {
