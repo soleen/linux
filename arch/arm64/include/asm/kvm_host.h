@@ -1359,6 +1359,8 @@ int __init kvm_arm_vmid_alloc_init(void);
 void __init kvm_arm_vmid_alloc_free(void);
 void kvm_arm_vmid_update(struct kvm_vmid *kvm_vmid);
 void kvm_arm_vmid_clear_active(void);
+int kvm_arm_vmid_pin(struct kvm_vmid *kvm_vmid, u32 *vmid_idx);
+void kvm_arm_vmid_unpin(u32 vmid_idx);
 
 static inline void kvm_arm_pvtime_vcpu_init(struct kvm_vcpu_arch *vcpu_arch)
 {
