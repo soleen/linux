@@ -99,15 +99,36 @@ struct cpu_preserved_as_ser {
 } __packed;
 
 /**
+ * struct cpu_preserved_session_ser - Serialized preserved CPU session metadata
+ * @session_name:  LUO session name.
+ * @as:            Preservation pointer to struct cpu_preserved_as_ser.
+ * @nr_cpu_words:  Number of 64-bit words in @cpus_bitmap.
+ * @reserved:      Must be zero.
+ * @cpus_bitmap:   Bitmap of physical CPUs assigned to this session.
+ */
+struct cpu_preserved_session_ser {
+	char session_name[LIVEUPDATE_SESSION_NAME_LENGTH];
+	DECLARE_KHOSER_PTR(as, struct cpu_preserved_as_ser *);
+	u32 nr_cpu_words;
+	u32 reserved;
+	u64 cpus_bitmap[];
+} __packed;
+
+static_assert(offsetof(struct cpu_preserved_session_ser, cpus_bitmap) % sizeof(u64) == 0,
+	      "cpus_bitmap must be 64-bit aligned");
+
+/**
  * struct cpu_preserved_ser - Serialized state for preserved CPU
  * @cpu:      Logical CPU identifier.
  * @state:    Preserved workload state (enum cpu_preserved_workload).
  * @stack_pa: Physical address of this CPU's preserved stack.
+ * @session:  Preservation pointer to preserved CPU session serialized metadata.
  */
 struct cpu_preserved_ser {
 	u32 cpu;
 	u32 state;
 	u64 stack_pa;
+	DECLARE_KHOSER_PTR(session, struct cpu_preserved_session_ser *);
 } __packed;
 
 #endif /* _LINUX_KHO_ABI_CPU_H */

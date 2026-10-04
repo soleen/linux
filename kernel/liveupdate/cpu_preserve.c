@@ -720,3 +720,223 @@ const struct cpumask *cpu_get_preserved_mask(void)
 	return &cpu_preserved_mask;
 }
 
+struct cpu_preserved_session {
+	struct list_head node;
+	refcount_t ref;
+	struct cpu_preserved_session_ser *ser;
+	struct cpu_preserved_as_ser *as;
+	bool incoming;
+};
+
+static DEFINE_MUTEX(cpu_preserved_sessions_lock);
+static LIST_HEAD(cpu_preserved_sessions);
+
+static struct cpu_preserved_session *
+cpu_preserved_session_find_locked(const char *sname)
+{
+	struct cpu_preserved_session *ps;
+
+	if (!sname || !sname[0])
+		return NULL;
+
+	list_for_each_entry(ps, &cpu_preserved_sessions, node) {
+		if (strcmp(ps->ser->session_name, sname) == 0)
+			return ps;
+	}
+
+	return NULL;
+}
+
+static void cpu_preserved_session_release(struct cpu_preserved_session *ps)
+{
+	if (ps->incoming) {
+		cpu_preserved_as_restore_free(ps->as);
+		if (ps->ser)
+			kho_restore_free(ps->ser);
+	} else {
+		cpu_preserved_as_unpreserve(ps->as);
+		if (ps->ser)
+			kho_unpreserve_free(ps->ser);
+	}
+
+	kfree(ps);
+}
+
+/**
+ * cpu_preserved_session_get - Find or create a preserved CPU session for @s
+ * @s: Live Update session handle.
+ *
+ * Looks up the preserved CPU session matching @s by name and increments its
+ * reference count, or allocates a new session with an isolated address space
+ * (&struct cpu_preserved_as_ser) and KHO-preserved metadata
+ * (&struct cpu_preserved_session_ser) initialized to a reference count of 1.
+ *
+ * Return: Pointer to the &struct cpu_preserved_session, or an ERR_PTR() on
+ *         failure.
+ */
+struct cpu_preserved_session *
+cpu_preserved_session_get(struct liveupdate_session *s)
+{
+	unsigned int nr_words = BITS_TO_U64(nr_cpu_ids);
+	const char *sname = liveupdate_session_name(s);
+	struct cpu_preserved_session *ps;
+	size_t ser_sz;
+
+	if (!sname || !sname[0])
+		return ERR_PTR(-EINVAL);
+
+	guard(mutex)(&cpu_preserved_sessions_lock);
+
+	ps = cpu_preserved_session_find_locked(sname);
+	if (ps) {
+		refcount_inc(&ps->ref);
+		return ps;
+	}
+
+	ps = kzalloc_obj(*ps);
+	if (!ps)
+		return ERR_PTR(-ENOMEM);
+
+	ps->as = cpu_preserved_as_create();
+	if (IS_ERR(ps->as)) {
+		int err = PTR_ERR(ps->as);
+
+		kfree(ps);
+		return ERR_PTR(err);
+	}
+
+	ser_sz = struct_size(ps->ser, cpus_bitmap, nr_words);
+	ps->ser = kho_alloc_preserve(ser_sz);
+	if (IS_ERR(ps->ser)) {
+		int err = PTR_ERR(ps->ser);
+
+		cpu_preserved_as_unpreserve(ps->as);
+		kfree(ps);
+		return ERR_PTR(err);
+	}
+
+	memset(ps->ser, 0, ser_sz);
+	ps->ser->nr_cpu_words = nr_words;
+	strscpy(ps->ser->session_name, sname, sizeof(ps->ser->session_name));
+	KHOSER_STORE_PTR(ps->ser->as, ps->as);
+	cpu_preserved_clean_sz(ps->ser, ser_sz);
+
+	refcount_set(&ps->ref, 1);
+	list_add_tail(&ps->node, &cpu_preserved_sessions);
+	return ps;
+}
+
+/**
+ * cpu_preserved_session_put - Drop a reference to a preserved CPU session
+ * @ps: Preserved CPU session (may be %NULL or an ERR_PTR()).
+ *
+ * Decrements @ps's reference count and, when the last reference is dropped,
+ * releases any attached workload state, frees the isolated address space, and
+ * unpreserves or restores the KHO session metadata.
+ */
+void cpu_preserved_session_put(struct cpu_preserved_session *ps)
+{
+	if (!ps || IS_ERR(ps))
+		return;
+
+	if (!refcount_dec_and_mutex_lock(&ps->ref, &cpu_preserved_sessions_lock))
+		return;
+
+	list_del_init(&ps->node);
+	mutex_unlock(&cpu_preserved_sessions_lock);
+
+	cpu_preserved_session_release(ps);
+}
+
+/**
+ * cpu_preserved_session_as - Return the isolated address space of a session
+ * @ps: Preserved CPU session.
+ *
+ * Return: Pointer to @ps's &struct cpu_preserved_as_ser, or %NULL if @ps is
+ *         %NULL or an ERR_PTR().
+ */
+struct cpu_preserved_as_ser *
+cpu_preserved_session_as(struct cpu_preserved_session *ps)
+{
+	return (!ps || IS_ERR(ps)) ? NULL : ps->as;
+}
+
+/**
+ * cpu_preserved_session_cpus - Return the cpumask of preserved CPUs in @ps
+ * @ps: Preserved CPU session.
+ *
+ * Return: Read-only cpumask of physical CPUs currently preserved in @ps, or
+ *         %cpu_none_mask if @ps is %NULL or has no serialized metadata.
+ */
+const struct cpumask *
+cpu_preserved_session_cpus(struct cpu_preserved_session *ps)
+{
+	if (!ps || IS_ERR(ps) || !ps->ser)
+		return cpu_none_mask;
+
+	return to_cpumask((unsigned long *)ps->ser->cpus_bitmap);
+}
+
+static void cpu_preserved_session_restore(struct liveupdate_session *s,
+					  struct cpu_preserved_session_ser *sser)
+{
+	struct cpu_preserved_as_ser *as;
+	struct cpu_preserved_session *ps;
+	const struct cpumask *cpus;
+	unsigned int nr_cpus;
+	const char *sname;
+
+	if (!sser)
+		return;
+
+	sname = liveupdate_session_name(s);
+	if (!sname || !sname[0])
+		sname = sser->session_name;
+
+	as = KHOSER_LOAD_PTR(sser->as);
+	if (as)
+		cpu_preserved_as_adopt(as);
+
+	guard(mutex)(&cpu_preserved_sessions_lock);
+
+	if (cpu_preserved_session_find_locked(sname))
+		return;
+
+	ps = kzalloc_obj(*ps);
+	if (!ps)
+		return;
+
+	ps->incoming = true;
+	ps->ser = sser;
+	ps->as = as;
+	cpus = to_cpumask((unsigned long *)sser->cpus_bitmap);
+	nr_cpus = cpumask_weight(cpus);
+	refcount_set(&ps->ref, max(1U, nr_cpus));
+	list_add_tail(&ps->node, &cpu_preserved_sessions);
+}
+
+static void cpu_preserved_session_remove_cpu(struct liveupdate_session *s,
+					     unsigned int cpu)
+{
+	const char *sname = liveupdate_session_name(s);
+	struct cpu_preserved_session *ps;
+	bool had_cpu = false;
+
+	if (cpu >= nr_cpu_ids)
+		return;
+
+	scoped_guard(mutex, &cpu_preserved_sessions_lock) {
+		struct cpumask *cpus;
+
+		ps = cpu_preserved_session_find_locked(sname);
+		if (!ps || !ps->ser)
+			return;
+		cpus = to_cpumask((unsigned long *)ps->ser->cpus_bitmap);
+		had_cpu = cpumask_test_and_clear_cpu(cpu, cpus);
+	}
+
+	if (!had_cpu)
+		return;
+
+	cpu_preserved_session_put(ps);
+}
