@@ -151,6 +151,32 @@ void arch_cpu_preserved_kick(int cpu);
  */
 u64 arch_cpu_preserved_hwid(unsigned int cpu);
 
+/**
+ * arch_cpu_preserved_early_init - Initialize the arch data of the runtime
+ *
+ * Architecture backend hook that initializes the data the preserved runtime
+ * reads, such as the x86 preserved IDT.  Called once at boot, before the
+ * runtime is copied: preserved CPUs run on the copy, which later writes to
+ * the sections do not reach.
+ */
+void arch_cpu_preserved_early_init(void);
+
+#ifndef arch_cpu_preserved_mode
+/**
+ * arch_cpu_preserved_mode - Modes of the kernel that preserved CPUs depend on
+ *
+ * Optional architecture backend hook.  The outgoing kernel records its value
+ * in the handover data, and the incoming kernel refuses the handover unless
+ * it returns the same value, such as the same x86 APIC mode.
+ *
+ * Return: A mask of architecture-defined bits, 0 if the hook is not provided.
+ */
+static inline u64 arch_cpu_preserved_mode(void)
+{
+	return 0;
+}
+#endif
+
 void arch_cpu_preserved_park_finish(int cpu)
 	__cpu_preserved_sym_asm(arch_cpu_preserved_park_finish);
 
@@ -271,6 +297,7 @@ static inline void arch_cpu_preserved_park_init(int cpu) {}
 static inline void arch_cpu_preserved_dcache_clean(unsigned long start,
 						   unsigned long end) {}
 static inline void arch_cpu_preserved_kick(int cpu) {}
+static inline void arch_cpu_preserved_early_init(void) {}
 static inline void arch_cpu_preserved_park_finish(int cpu) {}
 static inline void arch_cpu_preserved_dcache_inval(unsigned long start,
 						   unsigned long end) {}
