@@ -71,6 +71,7 @@
 #include "vmx.h"
 #include "x86.h"
 #include "x86_ops.h"
+#include "switch.h"
 #include "smm.h"
 #include "tss.h"
 #include "vmx_onhyperv.h"
@@ -172,8 +173,6 @@ module_param(enable_mediated_pmu, bool, 0444);
 #define KVM_VM_CR4_ALWAYS_ON_UNRESTRICTED_GUEST X86_CR4_VMXE
 #define KVM_PMODE_VM_CR4_ALWAYS_ON (X86_CR4_PAE | X86_CR4_VMXE)
 #define KVM_RMODE_VM_CR4_ALWAYS_ON (X86_CR4_VME | X86_CR4_PAE | X86_CR4_VMXE)
-
-#define RMODE_GUEST_OWNED_EFLAGS_BITS (~(X86_EFLAGS_IOPL | X86_EFLAGS_VM))
 
 #define MSR_IA32_RTIT_STATUS_MASK (~(RTIT_STATUS_FILTEREN | \
 	RTIT_STATUS_CONTEXTEN | RTIT_STATUS_TRIGGEREN | \
@@ -604,31 +603,6 @@ static DEFINE_SPINLOCK(vmx_vpid_lock);
 struct vmcs_config vmcs_config __ro_after_init;
 struct vmx_capability vmx_capability __ro_after_init;
 
-#define VMX_SEGMENT_FIELD(seg)					\
-	[VCPU_SREG_##seg] = {                                   \
-		.selector = GUEST_##seg##_SELECTOR,		\
-		.base = GUEST_##seg##_BASE,		   	\
-		.limit = GUEST_##seg##_LIMIT,		   	\
-		.ar_bytes = GUEST_##seg##_AR_BYTES,	   	\
-	}
-
-static const struct kvm_vmx_segment_field {
-	unsigned selector;
-	unsigned base;
-	unsigned limit;
-	unsigned ar_bytes;
-} kvm_vmx_segment_fields[] = {
-	VMX_SEGMENT_FIELD(CS),
-	VMX_SEGMENT_FIELD(DS),
-	VMX_SEGMENT_FIELD(ES),
-	VMX_SEGMENT_FIELD(FS),
-	VMX_SEGMENT_FIELD(GS),
-	VMX_SEGMENT_FIELD(SS),
-	VMX_SEGMENT_FIELD(TR),
-	VMX_SEGMENT_FIELD(LDTR),
-};
-
-
 static unsigned long host_idt_base;
 
 #if IS_ENABLED(CONFIG_HYPERV)
@@ -846,57 +820,6 @@ static void loaded_vmcs_clear(struct loaded_vmcs *loaded_vmcs)
 	if (cpu != -1)
 		smp_call_function_single(cpu,
 			 __loaded_vmcs_clear, loaded_vmcs, 1);
-}
-
-static bool vmx_segment_cache_test_set(struct vcpu_vmx *vmx, unsigned seg,
-				       unsigned field)
-{
-	bool ret;
-	u32 mask = 1 << (seg * SEG_FIELD_NR + field);
-
-	if (!kvm_register_is_available(&vmx->vcpu, VCPU_REG_SEGMENTS)) {
-		kvm_register_mark_available(&vmx->vcpu, VCPU_REG_SEGMENTS);
-		vmx->segment_cache.bitmask = 0;
-	}
-	ret = vmx->segment_cache.bitmask & mask;
-	vmx->segment_cache.bitmask |= mask;
-	return ret;
-}
-
-static u16 vmx_read_guest_seg_selector(struct vcpu_vmx *vmx, unsigned seg)
-{
-	u16 *p = &vmx->segment_cache.seg[seg].selector;
-
-	if (!vmx_segment_cache_test_set(vmx, seg, SEG_FIELD_SEL))
-		*p = vmcs_read16(kvm_vmx_segment_fields[seg].selector);
-	return *p;
-}
-
-static ulong vmx_read_guest_seg_base(struct vcpu_vmx *vmx, unsigned seg)
-{
-	ulong *p = &vmx->segment_cache.seg[seg].base;
-
-	if (!vmx_segment_cache_test_set(vmx, seg, SEG_FIELD_BASE))
-		*p = vmcs_readl(kvm_vmx_segment_fields[seg].base);
-	return *p;
-}
-
-static u32 vmx_read_guest_seg_limit(struct vcpu_vmx *vmx, unsigned seg)
-{
-	u32 *p = &vmx->segment_cache.seg[seg].limit;
-
-	if (!vmx_segment_cache_test_set(vmx, seg, SEG_FIELD_LIMIT))
-		*p = vmcs_read32(kvm_vmx_segment_fields[seg].limit);
-	return *p;
-}
-
-static u32 vmx_read_guest_seg_ar(struct vcpu_vmx *vmx, unsigned seg)
-{
-	u32 *p = &vmx->segment_cache.seg[seg].ar;
-
-	if (!vmx_segment_cache_test_set(vmx, seg, SEG_FIELD_AR))
-		*p = vmcs_read32(kvm_vmx_segment_fields[seg].ar_bytes);
-	return *p;
 }
 
 void vmx_update_exception_bitmap(struct kvm_vcpu *vcpu)
@@ -3647,38 +3570,7 @@ void vmx_set_cr4(struct kvm_vcpu *vcpu, unsigned long cr4)
 
 void vmx_get_segment(struct kvm_vcpu *vcpu, struct kvm_segment *var, int seg)
 {
-	struct vcpu_vmx *vmx = to_vmx(vcpu);
-	u32 ar;
-
-	if (vmx->rmode.vm86_active && seg != VCPU_SREG_LDTR) {
-		*var = vmx->rmode.segs[seg];
-		if (seg == VCPU_SREG_TR
-		    || var->selector == vmx_read_guest_seg_selector(vmx, seg))
-			return;
-		var->base = vmx_read_guest_seg_base(vmx, seg);
-		var->selector = vmx_read_guest_seg_selector(vmx, seg);
-		return;
-	}
-	var->base = vmx_read_guest_seg_base(vmx, seg);
-	var->limit = vmx_read_guest_seg_limit(vmx, seg);
-	var->selector = vmx_read_guest_seg_selector(vmx, seg);
-	ar = vmx_read_guest_seg_ar(vmx, seg);
-	var->unusable = (ar >> 16) & 1;
-	var->type = ar & 15;
-	var->s = (ar >> 4) & 1;
-	var->dpl = (ar >> 5) & 3;
-	/*
-	 * Some userspaces do not preserve unusable property. Since usable
-	 * segment has to be present according to VMX spec we can use present
-	 * property to amend userspace bug by making unusable segment always
-	 * nonpresent. vmx_segment_access_rights() already marks nonpresent
-	 * segment as unusable.
-	 */
-	var->present = !var->unusable;
-	var->avl = (ar >> 12) & 1;
-	var->l = (ar >> 13) & 1;
-	var->db = (ar >> 14) & 1;
-	var->g = (ar >> 15) & 1;
+	__vmx_get_segment(vcpu, var, seg);
 }
 
 u64 vmx_get_segment_base(struct kvm_vcpu *vcpu, int seg)
@@ -3691,21 +3583,6 @@ u64 vmx_get_segment_base(struct kvm_vcpu *vcpu, int seg)
 		return s.base;
 	}
 	return vmx_read_guest_seg_base(vmx, seg);
-}
-
-static int __vmx_get_cpl(struct kvm_vcpu *vcpu, bool no_cache)
-{
-	struct vcpu_vmx *vmx = to_vmx(vcpu);
-	int ar;
-
-	if (unlikely(vmx->rmode.vm86_active))
-		return 0;
-
-	if (no_cache)
-		ar = vmcs_read32(GUEST_SS_AR_BYTES);
-	else
-		ar = vmx_read_guest_seg_ar(vmx, VCPU_SREG_SS);
-	return VMX_AR_DPL(ar);
 }
 
 int vmx_get_cpl(struct kvm_vcpu *vcpu)
@@ -3781,16 +3658,12 @@ void vmx_set_segment(struct kvm_vcpu *vcpu, struct kvm_segment *var, int seg)
 
 void vmx_get_cs_db_l_bits(struct kvm_vcpu *vcpu, int *db, int *l)
 {
-	u32 ar = vmx_read_guest_seg_ar(to_vmx(vcpu), VCPU_SREG_CS);
-
-	*db = (ar >> 14) & 1;
-	*l = (ar >> 13) & 1;
+	__vmx_get_cs_db_l_bits(vcpu, db, l);
 }
 
 void vmx_get_idt(struct kvm_vcpu *vcpu, struct desc_ptr *dt)
 {
-	dt->size = vmcs_read32(GUEST_IDTR_LIMIT);
-	dt->address = vmcs_readl(GUEST_IDTR_BASE);
+	__vmx_get_idt(vcpu, dt);
 }
 
 void vmx_set_idt(struct kvm_vcpu *vcpu, struct desc_ptr *dt)
@@ -3801,8 +3674,7 @@ void vmx_set_idt(struct kvm_vcpu *vcpu, struct desc_ptr *dt)
 
 void vmx_get_gdt(struct kvm_vcpu *vcpu, struct desc_ptr *dt)
 {
-	dt->size = vmcs_read32(GUEST_GDTR_LIMIT);
-	dt->address = vmcs_readl(GUEST_GDTR_BASE);
+	__vmx_get_gdt(vcpu, dt);
 }
 
 void vmx_set_gdt(struct kvm_vcpu *vcpu, struct desc_ptr *dt)
