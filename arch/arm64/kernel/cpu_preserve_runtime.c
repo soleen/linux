@@ -216,6 +216,32 @@ void arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa)
 	}
 }
 
+asmlinkage void arm64_preserved_handle_exception(unsigned long kind)
+{
+	struct cpu_preserved_stack_context *sctx;
+	struct arm64_preserved_fault *f;
+	int cpu = 0;
+
+	local_daif_mask();
+
+	sctx = cpu_preserved_get_stack_context();
+	if (sctx) {
+		cpu = sctx->cpu;
+		f = &sctx->fault;
+		f->kind = kind;
+		f->esr = read_sysreg(esr_el1);
+		f->elr = read_sysreg(elr_el1);
+		f->far = read_sysreg(far_el1);
+		f->spsr = read_sysreg(spsr_el1);
+		f->count++;
+		cpu_preserved_clean(f);
+	}
+
+	cpu_preserved_park_loop(cpu);
+
+	arch_cpu_preserved_park_finish(cpu);
+}
+
 /*
  * Masks DAIF interrupts and enables GIC CPU interface for WFx wakeups.
  */
@@ -232,6 +258,9 @@ void arch_cpu_preserved_park_init(int cpu)
 
 	if (read_sysreg(ttbr1_el1) != sctx->session_pgd_pa)
 		gicv3_cpu_preserved_enable_sgi();
+
+	write_sysreg((unsigned long)arm64_preserved_vectors, vbar_el1);
+	isb();
 
 	write_sysreg(0, ttbr0_el1);
 	write_sysreg(sctx->session_pgd_pa, ttbr1_el1);

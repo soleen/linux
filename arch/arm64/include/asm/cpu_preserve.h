@@ -48,6 +48,20 @@ static inline void arm64_flush_host_tlb_all(void)
 }
 
 #ifdef CONFIG_LIVEUPDATE_CPU
+struct arm64_preserved_fault {
+	unsigned long count;
+	unsigned long kind;	/* vector entry, 0..15 */
+	unsigned long esr;
+	unsigned long elr;
+	unsigned long far;
+	unsigned long spsr;
+};
+
+extern char arm64_preserved_vectors[]
+	__cpu_preserved_sym_asm(arm64_preserved_vectors);
+asmlinkage void arm64_preserved_handle_exception(unsigned long kind)
+	__cpu_preserved_sym_asm(arm64_preserved_handle_exception);
+
 void gicv3_cpu_preserved_clear_active_priorities(void)
 	__cpu_preserved_sym_asm(gicv3_cpu_preserved_clear_active_priorities);
 void gicv3_cpu_preserved_enable_sgi(void)
