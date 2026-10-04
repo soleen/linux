@@ -18,11 +18,11 @@ source "$test_dir/../kselftest/ktap_helpers.sh"
 function get_arch_conf() {
 	local arch=$1
 	if [[ "$arch" == "arm64" ]]; then
-		QEMU_CMD="qemu-system-aarch64 -M virt -cpu max"
+		QEMU_CMD="qemu-system-aarch64 -M virt,gic-version=3 -cpu max"
 		KERNEL_IMAGE="Image"
 		KERNEL_CMDLINE="console=ttyAMA0"
 	elif [[ "$arch" == "x86" ]]; then
-		QEMU_CMD="qemu-system-x86_64"
+		QEMU_CMD="qemu-system-x86_64 -M q35 -cpu max -device intel-iommu,intremap=on,eim=on"
 		KERNEL_IMAGE="bzImage"
 		KERNEL_CMDLINE="console=ttyS0"
 	else
@@ -145,6 +145,7 @@ function mkinitrd() {
 	cat > "$workspace_dir/cpio_list_inner" <<EOF
 dir /dev 0755 0 0
 dir /proc 0755 0 0
+dir /sys 0755 0 0
 dir /debugfs 0755 0 0
 nod /dev/console 0600 0 0 c 5 1
 file /init $workspace_dir/init 0755 0 0
@@ -157,6 +158,7 @@ EOF
 	cat > "$workspace_dir/cpio_list" <<EOF
 dir /dev 0755 0 0
 dir /proc 0755 0 0
+dir /sys 0755 0 0
 dir /debugfs 0755 0 0
 nod /dev/console 0600 0 0 c 5 1
 file /init $workspace_dir/init 0755 0 0
@@ -179,7 +181,7 @@ function run_qemu() {
 
 	echo "# Serial Log: $serial"
 	timeout 30s \
-	$qemu_cmd -m 1G -smp 2 -no-reboot -nographic -nodefaults \
+	$qemu_cmd -m 1G -smp 4 -no-reboot -nographic -nodefaults \
 		  -accel tcg -accel hvf -accel kvm \
 		  -serial file:"$serial" \
 		  -append "$cmdline" \
