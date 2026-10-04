@@ -512,9 +512,11 @@ static int (*const svm_exit_handlers[])(struct kvm_vcpu *vcpu) = {
 	[SVM_EXIT_SMI]				= smi_interception,
 	[SVM_EXIT_RDTSC]			= kvm_emulate_rdtsc,
 	[SVM_EXIT_CPUID]			= kvm_emulate_cpuid,
+	[SVM_EXIT_INVD]				= kvm_emulate_invd,
 	[SVM_EXIT_PAUSE]			= pause_interception,
 	[SVM_EXIT_HLT]				= kvm_emulate_halt,
 	[SVM_EXIT_MSR]				= msr_interception,
+	[SVM_EXIT_WBINVD]			= kvm_emulate_wbinvd,
 	[SVM_EXIT_IDLE_HLT]			= kvm_emulate_halt,
 };
 #endif /* __CPU_PRESERVED_RUNTIME__ */
