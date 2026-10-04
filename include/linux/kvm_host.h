@@ -938,6 +938,14 @@ static inline void kvm_vm_bugged(struct kvm *kvm)
 }
 
 
+#ifdef __CPU_PRESERVED_RUNTIME__
+static inline bool __kvm_preserved_bug(bool cond)
+{
+	return unlikely(cond);
+}
+#define KVM_BUG(cond, kvm, fmt...)	__kvm_preserved_bug(!!(cond))
+#define KVM_BUG_ON(cond, kvm)		__kvm_preserved_bug(!!(cond))
+#else
 #define KVM_BUG(cond, kvm, fmt...)				\
 ({								\
 	bool __ret = !!(cond);					\
@@ -955,6 +963,7 @@ static inline void kvm_vm_bugged(struct kvm *kvm)
 		kvm_vm_bugged(kvm);				\
 	unlikely(__ret);					\
 })
+#endif
 
 /*
  * Note, "data corruption" refers to corruption of host kernel data structures,

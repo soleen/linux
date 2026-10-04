@@ -134,6 +134,9 @@ int kvm_caretaker_init_common_vcpu(struct kvm_caretaker_vcpu *cvcpu,
 				   const struct kvm_caretaker_ops *ops,
 				   void *arch_data);
 int kvm_caretaker_wait_for_attach(struct kvm_caretaker_cb_ser *cb, int pcpu);
+bool cpu_preserved_sym(kvm_caretaker_should_exit)(struct kvm_caretaker_vcpu *cvcpu);
+enum oncore_exit_reason
+cpu_preserved_sym(kvm_caretaker_vcpu_run)(struct kvm_caretaker_vcpu *cvcpu, u64 deadline_ticks);
 void kvm_caretaker_post_attach_vcpu(struct kvm_vcpu *vcpu);
 
 /**
@@ -158,6 +161,8 @@ enum oncore_exit_reason
 cpu_preserved_sym(kvm_arch_vcpu_caretaker_run)(void *data, u64 deadline_ticks);
 
 #ifndef __CPU_PRESERVED_RUNTIME__
+#define kvm_caretaker_should_exit	__cpu_preserved_kvm_caretaker_should_exit
+#define kvm_caretaker_vcpu_run		__cpu_preserved_kvm_caretaker_vcpu_run
 #define kvm_arch_vcpu_caretaker_run	__cpu_preserved_kvm_arch_vcpu_caretaker_run
 #endif
 
