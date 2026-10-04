@@ -892,6 +892,9 @@ struct kvm {
 	 */
 	struct file __rcu *vm_file;
 #endif
+#ifdef CONFIG_LIVEUPDATE
+	struct kvm_kho_folios_ser *kho_folios;
+#endif
 #ifdef CONFIG_KVM_CARETAKER
 	void *caretaker_vm;
 #endif
@@ -2683,6 +2686,16 @@ struct kvm_luo_ser;
 struct kvm_vcpu_ser;
 
 int kvm_arch_vm_luo_preserve(struct kvm *kvm, struct kvm_luo_ser *ser);
+
+#ifdef CONFIG_KVM_CARETAKER
+int kvm_arch_vm_luo_freeze(struct kvm *kvm, struct kvm_luo_ser *ser);
+#else
+static inline int kvm_arch_vm_luo_freeze(struct kvm *kvm,
+					 struct kvm_luo_ser *ser)
+{
+	return 0;
+}
+#endif
 
 #ifdef CONFIG_HAVE_KVM_ARCH_VCPU_PRESERVE
 int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_ser *ser);

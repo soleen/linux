@@ -122,7 +122,167 @@
 #include <linux/liveupdate.h>
 #include <linux/mm.h>
 #include <linux/oncore.h>
+#include <linux/sort.h>
 #include <linux/string.h>
+
+struct kvm_kho_folios_ser *kvm_kho_folios_alloc(unsigned int max_folios)
+{
+	struct kvm_kho_folios_ser *kp;
+	size_t sz = struct_size(kp, folios_pa, max_folios);
+
+	kp = kho_alloc_preserve(sz);
+	if (IS_ERR(kp))
+		return kp;
+
+	kp->nr_folios = 0;
+	return kp;
+}
+
+void kvm_kho_folios_unpreserve(struct kvm_kho_folios_ser *kp)
+{
+	unsigned int i;
+
+	if (!kp)
+		return;
+
+	for (i = 0; i < kp->nr_folios; i++)
+		kho_unpreserve_folio(page_folio(phys_to_page(kp->folios_pa[i])));
+
+	kho_unpreserve_free(kp);
+}
+
+void kvm_kho_folios_finish(struct kvm_kho_folios_ser *kp)
+{
+	unsigned int i;
+
+	if (!kp)
+		return;
+
+	for (i = 0; i < kp->nr_folios; i++)
+		kho_restore_free(phys_to_virt(kp->folios_pa[i]));
+
+	kho_restore_free(kp);
+}
+
+static int cmp_pages(const void *a, const void *b)
+{
+	const struct page *pa = *(const struct page **)a;
+	const struct page *pb = *(const struct page **)b;
+
+	if (pa < pb)
+		return -1;
+	if (pa > pb)
+		return 1;
+	return 0;
+}
+
+/*
+ * Page-pointer accumulator.
+ *
+ * kho_preserve_folio() cannot be called while holding kvm->mmu_lock: it is a
+ * rwlock_t, so the section is atomic, whereas kho_radix_add_key() below it
+ * calls might_sleep(), takes a mutex and allocates with GFP_KERNEL.  So the
+ * walk runs in two phases -- collect the pages under the lock, preserve them
+ * after dropping it.
+ *
+ * A NULL @pages simply counts, which is how the caller sizes the array.
+ */
+void kvm_kho_pages_add(struct kvm_kho_pages *acc, struct page *page)
+{
+	if (!acc->pages) {
+		acc->nr++;
+		return;
+	}
+
+	if (acc->nr >= acc->capacity) {
+		acc->overflow = true;
+		return;
+	}
+
+	acc->pages[acc->nr++] = page;
+}
+
+int kvm_kho_preserve_vm_pages(struct kvm *kvm, struct kvm_luo_ser *ser,
+			      int (*collect)(struct kvm *kvm,
+					     struct kvm_kho_pages *acc))
+{
+	struct kvm_kho_pages acc = {};
+	struct kvm_kho_folios_ser *kp;
+	unsigned long i, unique_nr = 0;
+	int ret = 0, attempt;
+
+	/*
+	 * Size the array, then fill it.  The guest can fault in new page
+	 * tables between the two passes, so re-check for overflow and retry
+	 * with a larger array; the slack makes repeated growth unlikely.
+	 */
+	for (attempt = 0; attempt < 5; attempt++) {
+		write_lock(&kvm->mmu_lock);
+		acc.nr = 0;
+		acc.overflow = false;
+		ret = collect(kvm, &acc);
+		write_unlock(&kvm->mmu_lock);
+
+		if (ret)
+			goto out;
+
+		if (acc.pages && !acc.overflow)
+			break;
+
+		acc.capacity = acc.nr + (acc.nr >> 2) + 16;
+		kvfree(acc.pages);
+		acc.pages = kvmalloc_array(acc.capacity, sizeof(*acc.pages),
+					   GFP_KERNEL);
+		if (!acc.pages)
+			return -ENOMEM;
+	}
+
+	if (acc.overflow) {
+		ret = -EAGAIN;
+		goto out;
+	}
+
+	if (!acc.nr)
+		goto out;
+
+	sort(acc.pages, acc.nr, sizeof(*acc.pages), cmp_pages, NULL);
+	for (i = 0; i < acc.nr; i++) {
+		if (i == 0 || acc.pages[i] != acc.pages[i - 1])
+			acc.pages[unique_nr++] = acc.pages[i];
+	}
+	acc.nr = unique_nr;
+
+	kp = kvm_kho_folios_alloc(acc.nr);
+	if (IS_ERR(kp)) {
+		ret = PTR_ERR(kp);
+		goto out;
+	}
+
+	for (i = 0; i < acc.nr; i++) {
+		ret = kho_preserve_folio(page_folio(acc.pages[i]));
+		if (ret) {
+			/*
+			 * Undo the partial preservation: leaving pages marked
+			 * would pin them in the incoming kernel forever with
+			 * nothing owning them.
+			 */
+			while (i--)
+				kho_unpreserve_folio(page_folio(acc.pages[i]));
+			kho_unpreserve_free(kp);
+			goto out;
+		}
+		kp->folios_pa[i] = page_to_phys(acc.pages[i]);
+	}
+
+	kp->nr_folios = acc.nr;
+	kvm->kho_folios = kp;
+	if (ser)
+		KHOSER_STORE_PTR(ser->kho_folios, kp);
+
+out:
+	kvfree(acc.pages);
+	return ret;
+}
 
 /**
  * kvm_caretaker_vcpu_is_attached - Check whether a vCPU is currently attached to host KVM
