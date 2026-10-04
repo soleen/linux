@@ -4992,6 +4992,8 @@ static int kvm_vm_ioctl_check_extension_generic(struct kvm *kvm, long arg)
 	case KVM_CAP_GUEST_MEMFD_FLAGS:
 		return kvm_gmem_get_supported_flags(kvm);
 #endif
+	case KVM_CAP_CARETAKER:
+		return IS_ENABLED(CONFIG_KVM_CARETAKER);
 	default:
 		break;
 	}
