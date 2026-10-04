@@ -361,4 +361,162 @@ static inline int msr_interception(struct kvm_vcpu *vcpu)
 		return kvm_emulate_rdmsr(vcpu);
 }
 
+#ifdef __CPU_PRESERVED_RUNTIME__
+static inline int __svm_skip_emulated_insn(struct kvm_vcpu *vcpu)
+{
+	return __svm_skip_emulated_instruction(vcpu, EMULTYPE_SKIP, true);
+}
+
+static inline int svm_get_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+{
+	struct vcpu_svm *svm = to_svm(vcpu);
+
+	switch (msr_info->index) {
+	case MSR_AMD64_TSC_RATIO:
+		if (!msr_info->host_initiated &&
+		    !guest_cpu_cap_has(vcpu, X86_FEATURE_TSCRATEMSR))
+			return 1;
+		msr_info->data = svm->tsc_ratio_msr;
+		break;
+	case MSR_STAR:
+		msr_info->data = svm->vmcb01.ptr->save.star;
+		break;
+#ifdef CONFIG_X86_64
+	case MSR_LSTAR:
+		msr_info->data = svm->vmcb01.ptr->save.lstar;
+		break;
+	case MSR_CSTAR:
+		msr_info->data = svm->vmcb01.ptr->save.cstar;
+		break;
+	case MSR_GS_BASE:
+		msr_info->data = svm->vmcb01.ptr->save.gs.base;
+		break;
+	case MSR_FS_BASE:
+		msr_info->data = svm->vmcb01.ptr->save.fs.base;
+		break;
+	case MSR_KERNEL_GS_BASE:
+		msr_info->data = svm->vmcb01.ptr->save.kernel_gs_base;
+		break;
+	case MSR_SYSCALL_MASK:
+		msr_info->data = svm->vmcb01.ptr->save.sfmask;
+		break;
+#endif
+	case MSR_IA32_SYSENTER_CS:
+		msr_info->data = svm->vmcb01.ptr->save.sysenter_cs;
+		break;
+	case MSR_IA32_SYSENTER_EIP:
+		msr_info->data = (u32)svm->vmcb01.ptr->save.sysenter_eip;
+		if (guest_cpuid_is_intel_compatible(vcpu))
+			msr_info->data |= (u64)svm->sysenter_eip_hi << 32;
+		break;
+	case MSR_IA32_SYSENTER_ESP:
+		msr_info->data = svm->vmcb01.ptr->save.sysenter_esp;
+		if (guest_cpuid_is_intel_compatible(vcpu))
+			msr_info->data |= (u64)svm->sysenter_esp_hi << 32;
+		break;
+	case MSR_IA32_S_CET:
+		msr_info->data = svm->vmcb->save.s_cet;
+		break;
+	case MSR_IA32_INT_SSP_TAB:
+		msr_info->data = svm->vmcb->save.isst_addr;
+		break;
+	case MSR_KVM_INTERNAL_GUEST_SSP:
+		msr_info->data = svm->vmcb->save.ssp;
+		break;
+	case MSR_TSC_AUX:
+		msr_info->data = svm->tsc_aux;
+		break;
+	case MSR_VM_HSAVE_PA:
+		msr_info->data = svm->nested.hsave_msr;
+		break;
+	case MSR_VM_CR:
+		msr_info->data = svm->nested.vm_cr_msr;
+		break;
+	case MSR_AMD64_VIRT_SPEC_CTRL:
+		if (!msr_info->host_initiated &&
+		    !guest_cpu_cap_has(vcpu, X86_FEATURE_VIRT_SSBD))
+			return 1;
+		msr_info->data = svm->virt_spec_ctrl;
+		break;
+	case MSR_AMD64_DE_CFG:
+		msr_info->data = svm->msr_decfg;
+		break;
+	default:
+		return kvm_get_msr_common(vcpu, msr_info);
+	}
+	return 0;
+}
+
+static inline int svm_set_msr(struct kvm_vcpu *vcpu, struct msr_data *msr)
+{
+	struct vcpu_svm *svm = to_svm(vcpu);
+	u32 ecx = msr->index;
+	u64 data = msr->data;
+
+	switch (ecx) {
+	case MSR_STAR:
+		svm->vmcb01.ptr->save.star = data;
+		break;
+#ifdef CONFIG_X86_64
+	case MSR_LSTAR:
+		svm->vmcb01.ptr->save.lstar = data;
+		break;
+	case MSR_CSTAR:
+		svm->vmcb01.ptr->save.cstar = data;
+		break;
+	case MSR_GS_BASE:
+		svm->vmcb01.ptr->save.gs.base = data;
+		break;
+	case MSR_FS_BASE:
+		svm->vmcb01.ptr->save.fs.base = data;
+		break;
+	case MSR_KERNEL_GS_BASE:
+		svm->vmcb01.ptr->save.kernel_gs_base = data;
+		break;
+	case MSR_SYSCALL_MASK:
+		svm->vmcb01.ptr->save.sfmask = data;
+		break;
+#endif
+	case MSR_IA32_SYSENTER_CS:
+		svm->vmcb01.ptr->save.sysenter_cs = data;
+		break;
+	case MSR_IA32_SYSENTER_EIP:
+		svm->vmcb01.ptr->save.sysenter_eip = (u32)data;
+		svm->sysenter_eip_hi = guest_cpuid_is_intel_compatible(vcpu) ? (data >> 32) : 0;
+		break;
+	case MSR_IA32_SYSENTER_ESP:
+		svm->vmcb01.ptr->save.sysenter_esp = (u32)data;
+		svm->sysenter_esp_hi = guest_cpuid_is_intel_compatible(vcpu) ? (data >> 32) : 0;
+		break;
+	case MSR_IA32_S_CET:
+		svm->vmcb->save.s_cet = data;
+		vmcb_mark_dirty(svm->vmcb01.ptr, VMCB_CET);
+		break;
+	case MSR_IA32_INT_SSP_TAB:
+		svm->vmcb->save.isst_addr = data;
+		vmcb_mark_dirty(svm->vmcb01.ptr, VMCB_CET);
+		break;
+	case MSR_KVM_INTERNAL_GUEST_SSP:
+		svm->vmcb->save.ssp = data;
+		vmcb_mark_dirty(svm->vmcb01.ptr, VMCB_CET);
+		break;
+	default:
+		return kvm_set_msr_common(vcpu, msr);
+	}
+	return 0;
+}
+
+static int (*const svm_exit_handlers[])(struct kvm_vcpu *vcpu) = {
+	[SVM_EXIT_INTR]				= intr_interception,
+	[SVM_EXIT_NMI]				= nmi_interception,
+	[SVM_EXIT_SMI]				= smi_interception,
+	[SVM_EXIT_RDTSC]			= kvm_emulate_rdtsc,
+	[SVM_EXIT_CPUID]			= kvm_emulate_cpuid,
+	[SVM_EXIT_PAUSE]			= pause_interception,
+	[SVM_EXIT_HLT]				= kvm_emulate_halt,
+	[SVM_EXIT_MSR]				= msr_interception,
+	[SVM_EXIT_IDLE_HLT]			= kvm_emulate_halt,
+};
+#endif /* __CPU_PRESERVED_RUNTIME__ */
+
 #endif /* __KVM_X86_SVM_SWITCH_H */
