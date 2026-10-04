@@ -1992,22 +1992,6 @@ static int io_interception(struct kvm_vcpu *vcpu)
 	return kvm_fast_pio(vcpu, size, port, in);
 }
 
-static int nmi_interception(struct kvm_vcpu *vcpu)
-{
-	return 1;
-}
-
-static int smi_interception(struct kvm_vcpu *vcpu)
-{
-	return 1;
-}
-
-static int intr_interception(struct kvm_vcpu *vcpu)
-{
-	++vcpu->stat.irq_exits;
-	return 1;
-}
-
 static int vmload_vmsave_interception(struct kvm_vcpu *vcpu, bool vmload)
 {
 	u64 vmcb12_gpa = kvm_rax_read(vcpu);
@@ -3006,14 +2990,6 @@ static int svm_set_msr(struct kvm_vcpu *vcpu, struct msr_data *msr)
 	return ret;
 }
 
-static int msr_interception(struct kvm_vcpu *vcpu)
-{
-	if (to_svm(vcpu)->vmcb->control.exit_info_1)
-		return kvm_emulate_wrmsr(vcpu);
-	else
-		return kvm_emulate_rdmsr(vcpu);
-}
-
 static int interrupt_window_interception(struct kvm_vcpu *vcpu)
 {
 	kvm_make_request(KVM_REQ_EVENT, vcpu);
@@ -3021,22 +2997,6 @@ static int interrupt_window_interception(struct kvm_vcpu *vcpu)
 
 	++vcpu->stat.irq_window_exits;
 	return 1;
-}
-
-static int pause_interception(struct kvm_vcpu *vcpu)
-{
-	bool in_kernel;
-	/*
-	 * CPL is not made available for an SEV-ES guest, therefore
-	 * vcpu->arch.preempted_in_kernel can never be true.  Just
-	 * set in_kernel to false as well.
-	 */
-	in_kernel = !is_sev_es_guest(vcpu) && svm_get_cpl(vcpu) == 0;
-
-	grow_ple_window(vcpu);
-
-	kvm_vcpu_on_spin(vcpu, in_kernel);
-	return kvm_skip_emulated_instruction(vcpu);
 }
 
 static int invpcid_interception(struct kvm_vcpu *vcpu)
