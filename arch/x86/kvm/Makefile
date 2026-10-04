@@ -19,6 +19,12 @@ kvm-$(CONFIG_KVM_SMM)	+= smm.o
 
 kvm-intel-y		+= vmx/vmx.o vmx/vmenter.o vmx/pmu_intel.o vmx/vmcs12.o \
 			   vmx/nested.o vmx/posted_intr.o vmx/main.o
+ifeq ($(CONFIG_KVM_INTEL),y)
+kvm-intel-preserved-$(CONFIG_KVM_CARETAKER) := caretaker/vmx_switch.preserved.o \
+					       vmx/vmenter.preserved.o
+kvm-intel-$(CONFIG_KVM_CARETAKER) += caretaker/vmx.o $(kvm-intel-preserved-y)
+preserved-obj-$(CONFIG_KVM_CARETAKER) += $(kvm-intel-preserved-y)
+endif
 
 kvm-intel-$(CONFIG_X86_SGX_KVM)	+= vmx/sgx.o
 kvm-intel-$(CONFIG_KVM_HYPERV)	+= vmx/hyperv.o vmx/hyperv_evmcs.o
@@ -44,6 +50,9 @@ $(obj)/svm/vmenter.o: $(obj)/kvm-asm-offsets.h
 
 AFLAGS_vmx/vmenter.o    := -iquote $(obj)
 $(obj)/vmx/vmenter.o: $(obj)/kvm-asm-offsets.h
+
+AFLAGS_vmx/vmenter.preserved.raw.o := -iquote $(obj)
+$(obj)/vmx/vmenter.preserved.raw.o: $(obj)/kvm-asm-offsets.h
 
 include $(srctree)/scripts/Makefile.cpu_preserve
 
