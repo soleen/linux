@@ -54,11 +54,13 @@ struct kvm_caretaker_ops {
  * @cb:        Pointer to KHO-preserved Caretaker control block (&struct kvm_caretaker_cb_ser).
  * @ops:       Architecture operations vector (&struct kvm_caretaker_ops).
  * @arch_data: Architecture-specific runtime context passed to @ops callbacks.
+ * @telemetry: Pointer to KHO-preserved telemetry counters, or %NULL.
  */
 struct kvm_caretaker_vcpu {
 	struct kvm_caretaker_cb_ser *cb;
 	const struct kvm_caretaker_ops *ops;
 	void *arch_data;
+	struct kvm_caretaker_telemetry_ser *telemetry;
 };
 
 #ifdef CONFIG_KVM_CARETAKER
@@ -83,6 +85,7 @@ struct oncore_session;
  *                      while preserved, or %NULL when executing normally under
  *                      KVM.
  * @job:                On-Core scheduler job handle for this vCPU, or %NULL.
+ * @last_telemetry:     Snapshot of @cb->telemetry captured upon re-attachment.
  * @owned_by_caretaker: True while Caretaker owns the vCPU; cleared under
  *                      @vcpu->mutex only after state restore and sync_vcpu
  *                      complete.
@@ -93,6 +96,7 @@ struct oncore_session;
 struct kvm_vcpu_caretaker {
 	struct kvm_caretaker_cb_ser		*cb;
 	struct oncore_job			*job;
+	struct kvm_caretaker_telemetry_ser	last_telemetry;
 	bool					owned_by_caretaker;
 	bool					attached;
 };
@@ -148,10 +152,10 @@ int kvm_caretaker_init_common_vcpu(struct kvm_caretaker_vcpu *cvcpu,
 				   size_t runtime_size,
 				   const struct kvm_caretaker_ops *ops,
 				   void *arch_data);
-int kvm_caretaker_wait_for_attach(struct kvm_caretaker_cb_ser *cb, int pcpu);
 bool cpu_preserved_sym(kvm_caretaker_should_exit)(struct kvm_caretaker_vcpu *cvcpu);
 enum oncore_exit_reason
 cpu_preserved_sym(kvm_caretaker_vcpu_run)(struct kvm_caretaker_vcpu *cvcpu, u64 deadline_ticks);
+int kvm_caretaker_wait_for_attach(struct kvm_caretaker_cb_ser *cb, int pcpu);
 void kvm_caretaker_post_attach_vcpu(struct kvm_vcpu *vcpu);
 
 /**
@@ -229,6 +233,74 @@ int kvm_caretaker_vcpu_finish(struct kvm_vcpu *vcpu,
 			      struct liveupdate_session *session,
 			      struct kvm_vcpu_ser *ser);
 
+#ifdef CONFIG_KVM_CARETAKER_DEBUG
+void kvm_caretaker_telemetry_init(struct kvm_caretaker_vcpu *cvcpu,
+				  struct oncore_session *sess);
+void kvm_caretaker_telemetry_report(struct kvm_vcpu *vcpu,
+				    struct kvm_caretaker_cb_ser *cb);
+void kvm_caretaker_telemetry_free(struct kvm_vcpu_ser *ser, bool is_incoming);
+void kvm_caretaker_create_vcpu_debugfs(struct kvm_vcpu *vcpu,
+				       struct dentry *debugfs_dentry);
+
+/**
+ * kvm_caretaker_telemetry_run - Record a guest entry in Caretaker telemetry
+ * @cvcpu: Common Caretaker vCPU descriptor.
+ */
+static __always_inline void
+kvm_caretaker_telemetry_run(struct kvm_caretaker_vcpu *cvcpu)
+{
+	if (cvcpu->telemetry)
+		cvcpu->telemetry->total_runs++;
+}
+
+/**
+ * kvm_caretaker_telemetry_record_exit - Record a VM exit in Caretaker telemetry
+ * @cvcpu:  Common Caretaker vCPU descriptor.
+ * @reason: Raw hardware exit reason.
+ * @rip:    Guest instruction pointer at exit.
+ */
+static __always_inline void
+kvm_caretaker_telemetry_record_exit(struct kvm_caretaker_vcpu *cvcpu,
+				    u64 reason, u64 rip)
+{
+	if (cvcpu->telemetry) {
+		cvcpu->telemetry->total_exits++;
+		cvcpu->telemetry->last_exit_reason = reason;
+		cvcpu->telemetry->last_exit_rip = rip;
+	}
+}
+
+/**
+ * kvm_caretaker_telemetry_stall - Record an unhandled stall exit in Caretaker telemetry
+ * @cvcpu:  Common Caretaker vCPU descriptor.
+ * @reason: Raw hardware exit reason or entry failure code.
+ * @rip:    Guest instruction pointer at stall (0 if entry failure).
+ */
+static __always_inline void
+kvm_caretaker_telemetry_stall(struct kvm_caretaker_vcpu *cvcpu,
+			      u64 reason, u64 rip)
+{
+	if (cvcpu->telemetry) {
+		cvcpu->telemetry->stall_count++;
+		cvcpu->telemetry->last_exit_reason = reason;
+		cvcpu->telemetry->stall_exit_reason = reason;
+		if (rip)
+			cvcpu->telemetry->stall_exit_rip = rip;
+	}
+}
+
+/**
+ * kvm_caretaker_telemetry_flush - Clean Caretaker telemetry counters to PoC
+ * @cvcpu: Common Caretaker vCPU descriptor.
+ */
+static __always_inline void
+kvm_caretaker_telemetry_flush(struct kvm_caretaker_vcpu *cvcpu)
+{
+	if (cvcpu->telemetry)
+		cpu_preserved_clean_sz(cvcpu->telemetry,
+				       sizeof(*cvcpu->telemetry));
+}
+#else
 static inline void kvm_caretaker_telemetry_init(struct kvm_caretaker_vcpu *cvcpu,
 						struct oncore_session *sess) {}
 
@@ -238,10 +310,29 @@ static inline void kvm_caretaker_telemetry_report(struct kvm_vcpu *vcpu,
 static inline void kvm_caretaker_telemetry_free(struct kvm_vcpu_ser *ser,
 						bool is_incoming) {}
 
+static inline void kvm_caretaker_create_vcpu_debugfs(struct kvm_vcpu *vcpu,
+						     struct dentry *debugfs_dentry) {}
+static __always_inline void
+kvm_caretaker_telemetry_run(struct kvm_caretaker_vcpu *cvcpu) {}
+static __always_inline void
+kvm_caretaker_telemetry_record_exit(struct kvm_caretaker_vcpu *cvcpu,
+				    u64 reason, u64 rip) {}
+static __always_inline void
+kvm_caretaker_telemetry_stall(struct kvm_caretaker_vcpu *cvcpu,
+			      u64 reason, u64 rip) {}
+static __always_inline void
+kvm_caretaker_telemetry_flush(struct kvm_caretaker_vcpu *cvcpu) {}
+#endif
+
 #else /* !CONFIG_KVM_CARETAKER */
+
+struct dentry;
 
 static inline void kvm_kho_folios_unpreserve(struct kvm_kho_folios_ser *folios) {}
 static inline void kvm_kho_folios_finish(struct kvm_kho_folios_ser *folios) {}
+
+static inline void kvm_caretaker_create_vcpu_debugfs(struct kvm_vcpu *vcpu,
+						     struct dentry *debugfs_dentry) {}
 
 static inline bool kvm_caretaker_vcpu_is_attached(struct kvm_vcpu *vcpu)
 {
