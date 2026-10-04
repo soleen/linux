@@ -6,7 +6,6 @@
 #include <asm/fpu/xstate.h>
 #include <asm/mce.h>
 #include <asm/pvclock.h>
-#include "msrs.h"
 #include "mmu.h"
 #include "regs.h"
 #include "kvm_emulate.h"
@@ -17,7 +16,11 @@
 int kvm_x86_vendor_init(struct kvm_x86_init_ops *ops);
 void kvm_x86_vendor_exit(void);
 
+#ifdef __CPU_PRESERVED_RUNTIME__
+static inline void kvm_spurious_fault(void) {}
+#else
 void kvm_spurious_fault(void);
+#endif
 
 #define SIZE_OF_MEMSLOTS_HASHTABLE \
 	(sizeof(((struct kvm_memslots *)0)->id_hash) * 2 * KVM_MAX_NR_ADDRESS_SPACES)
@@ -469,18 +472,12 @@ void kvm_prepare_unexpected_reason_exit(struct kvm_vcpu *vcpu, u64 exit_reason);
 fastpath_t handle_fastpath_hlt(struct kvm_vcpu *vcpu);
 fastpath_t handle_fastpath_invd(struct kvm_vcpu *vcpu);
 
-int kvm_emulate_as_nop(struct kvm_vcpu *vcpu);
-int kvm_emulate_invd(struct kvm_vcpu *vcpu);
 int kvm_emulate_mwait(struct kvm_vcpu *vcpu);
 int kvm_handle_invalid_op(struct kvm_vcpu *vcpu);
 int kvm_emulate_monitor(struct kvm_vcpu *vcpu);
 
-int kvm_fast_pio(struct kvm_vcpu *vcpu, int size, unsigned short port, int in);
-int kvm_emulate_cpuid(struct kvm_vcpu *vcpu);
-int kvm_emulate_halt(struct kvm_vcpu *vcpu);
 int kvm_emulate_halt_noskip(struct kvm_vcpu *vcpu);
 int kvm_emulate_ap_reset_hold(struct kvm_vcpu *vcpu);
-int kvm_emulate_wbinvd(struct kvm_vcpu *vcpu);
 
 void kvm_vcpu_deliver_sipi_vector(struct kvm_vcpu *vcpu, u8 vector);
 
@@ -511,7 +508,16 @@ int kvm_vcpu_ioctl_x86_set_vcpu_events(struct kvm_vcpu *vcpu,
 int kvm_emulate_xsetbv(struct kvm_vcpu *vcpu);
 int kvm_emulate_rdpmc(struct kvm_vcpu *vcpu);
 
+#ifndef __CPU_PRESERVED_RUNTIME__
+int kvm_emulate_as_nop(struct kvm_vcpu *vcpu);
+int kvm_emulate_invd(struct kvm_vcpu *vcpu);
+int kvm_fast_pio(struct kvm_vcpu *vcpu, int size, unsigned short port, int in);
+int kvm_emulate_cpuid(struct kvm_vcpu *vcpu);
+int kvm_emulate_halt(struct kvm_vcpu *vcpu);
+int kvm_emulate_wbinvd(struct kvm_vcpu *vcpu);
 int kvm_skip_emulated_instruction(struct kvm_vcpu *vcpu);
+#endif
+
 int kvm_complete_insn_gp(struct kvm_vcpu *vcpu, int err);
 
 void kvm_queue_exception(struct kvm_vcpu *vcpu, unsigned nr);
@@ -915,5 +921,7 @@ int ____kvm_emulate_hypercall(struct kvm_vcpu *vcpu, int cpl,
 })
 
 int kvm_emulate_hypercall(struct kvm_vcpu *vcpu);
+
+#include "msrs.h"
 
 #endif
