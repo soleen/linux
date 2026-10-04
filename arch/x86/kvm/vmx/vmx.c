@@ -2560,45 +2560,7 @@ int vmx_set_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 
 void vmx_cache_reg(struct kvm_vcpu *vcpu, enum kvm_reg reg)
 {
-	unsigned long guest_owned_bits;
-
-	kvm_register_mark_available(vcpu, reg);
-
-	switch (reg) {
-	case VCPU_REGS_RSP:
-		vcpu->arch.regs[VCPU_REGS_RSP] = vmcs_readl(GUEST_RSP);
-		break;
-	case VCPU_REG_RIP:
-		vcpu->arch.rip = vmcs_readl(GUEST_RIP);
-		break;
-	case VCPU_REG_PDPTR:
-		if (enable_ept)
-			ept_save_pdptrs(vcpu);
-		break;
-	case VCPU_REG_CR0:
-		guest_owned_bits = vcpu->arch.cr0_guest_owned_bits;
-
-		vcpu->arch.cr0 &= ~guest_owned_bits;
-		vcpu->arch.cr0 |= vmcs_readl(GUEST_CR0) & guest_owned_bits;
-		break;
-	case VCPU_REG_CR3:
-		/*
-		 * When intercepting CR3 loads, e.g. for shadowing paging, KVM's
-		 * CR3 is loaded into hardware, not the guest's CR3.
-		 */
-		if (!(exec_controls_get(to_vmx(vcpu)) & CPU_BASED_CR3_LOAD_EXITING))
-			vcpu->arch.cr3 = vmcs_readl(GUEST_CR3);
-		break;
-	case VCPU_REG_CR4:
-		guest_owned_bits = vcpu->arch.cr4_guest_owned_bits;
-
-		vcpu->arch.cr4 &= ~guest_owned_bits;
-		vcpu->arch.cr4 |= vmcs_readl(GUEST_CR4) & guest_owned_bits;
-		break;
-	default:
-		KVM_BUG_ON(1, vcpu->kvm);
-		break;
-	}
+	__vmx_cache_reg(vcpu, reg);
 }
 
 /*
@@ -3338,15 +3300,7 @@ void vmx_ept_load_pdptrs(struct kvm_vcpu *vcpu)
 
 void ept_save_pdptrs(struct kvm_vcpu *vcpu)
 {
-	if (WARN_ON_ONCE(!is_pae_paging(vcpu)))
-		return;
-
-	vcpu->arch.pdptrs[0] = vmcs_read64(GUEST_PDPTR0);
-	vcpu->arch.pdptrs[1] = vmcs_read64(GUEST_PDPTR1);
-	vcpu->arch.pdptrs[2] = vmcs_read64(GUEST_PDPTR2);
-	vcpu->arch.pdptrs[3] = vmcs_read64(GUEST_PDPTR3);
-
-	kvm_register_mark_available(vcpu, VCPU_REG_PDPTR);
+	__ept_save_pdptrs(vcpu);
 }
 
 #define CR3_EXITING_BITS (CPU_BASED_CR3_LOAD_EXITING | \
