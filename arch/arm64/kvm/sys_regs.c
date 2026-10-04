@@ -5572,38 +5572,43 @@ static int demux_c15_set(struct kvm_vcpu *vcpu, u64 id, void __user *uaddr)
 	return set_ccsidr(vcpu, idx, newval);
 }
 
-static u64 kvm_one_reg_to_id(const struct kvm_one_reg *reg)
+static u64 kvm_one_reg_to_id(u64 reg_id)
 {
-	switch(reg->id) {
+	switch (reg_id) {
 	case KVM_REG_ARM_TIMER_CVAL:
 		return TO_ARM64_SYS_REG(CNTV_CVAL_EL0);
 	case KVM_REG_ARM_TIMER_CNT:
 		return TO_ARM64_SYS_REG(CNTVCT_EL0);
 	default:
-		return reg->id;
+		return reg_id;
 	}
+}
+
+static int __kvm_sys_reg_get(struct kvm_vcpu *vcpu, u64 reg_id, u64 *val,
+			     const struct sys_reg_desc table[], unsigned int num)
+{
+	const struct sys_reg_desc *r;
+	u64 id = kvm_one_reg_to_id(reg_id);
+
+	r = id_to_sys_reg_desc(vcpu, id, table, num);
+	if (!r || sysreg_hidden(vcpu, r))
+		return -ENOENT;
+
+	if (r->get_user)
+		return (r->get_user)(vcpu, r, val);
+
+	*val = __vcpu_sys_reg(vcpu, r->reg);
+	return 0;
 }
 
 int kvm_sys_reg_get_user(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg,
 			 const struct sys_reg_desc table[], unsigned int num)
 {
 	u64 __user *uaddr = (u64 __user *)(unsigned long)reg->addr;
-	const struct sys_reg_desc *r;
-	u64 id = kvm_one_reg_to_id(reg);
 	u64 val;
 	int ret;
 
-	r = id_to_sys_reg_desc(vcpu, id, table, num);
-	if (!r || sysreg_hidden(vcpu, r))
-		return -ENOENT;
-
-	if (r->get_user) {
-		ret = (r->get_user)(vcpu, r, &val);
-	} else {
-		val = __vcpu_sys_reg(vcpu, r->reg);
-		ret = 0;
-	}
-
+	ret = __kvm_sys_reg_get(vcpu, reg->id, &val, table, num);
 	if (!ret)
 		ret = put_user(val, uaddr);
 
@@ -5621,17 +5626,11 @@ int kvm_arm_sys_reg_get_reg(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg
 				    sys_reg_descs, ARRAY_SIZE(sys_reg_descs));
 }
 
-int kvm_sys_reg_set_user(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg,
-			 const struct sys_reg_desc table[], unsigned int num)
+static int __kvm_sys_reg_set(struct kvm_vcpu *vcpu, u64 reg_id, u64 val,
+			     const struct sys_reg_desc table[], unsigned int num)
 {
-	u64 __user *uaddr = (u64 __user *)(unsigned long)reg->addr;
 	const struct sys_reg_desc *r;
-	u64 id = kvm_one_reg_to_id(reg);
-	u64 val;
-	int ret;
-
-	if (get_user(val, uaddr))
-		return -EFAULT;
+	u64 id = kvm_one_reg_to_id(reg_id);
 
 	r = id_to_sys_reg_desc(vcpu, id, table, num);
 	if (!r || sysreg_hidden(vcpu, r))
@@ -5640,14 +5639,23 @@ int kvm_sys_reg_set_user(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg,
 	if (sysreg_user_write_ignore(vcpu, r))
 		return 0;
 
-	if (r->set_user) {
-		ret = (r->set_user)(vcpu, r, val);
-	} else {
-		__vcpu_assign_sys_reg(vcpu, r->reg, val);
-		ret = 0;
-	}
+	if (r->set_user)
+		return (r->set_user)(vcpu, r, val);
 
-	return ret;
+	__vcpu_assign_sys_reg(vcpu, r->reg, val);
+	return 0;
+}
+
+int kvm_sys_reg_set_user(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg,
+			 const struct sys_reg_desc table[], unsigned int num)
+{
+	u64 __user *uaddr = (u64 __user *)(unsigned long)reg->addr;
+	u64 val;
+
+	if (get_user(val, uaddr))
+		return -EFAULT;
+
+	return __kvm_sys_reg_set(vcpu, reg->id, val, table, num);
 }
 
 int kvm_arm_sys_reg_set_reg(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg)
@@ -5666,14 +5674,18 @@ static unsigned int num_demux_regs(void)
 	return CSSELR_MAX;
 }
 
+static u64 demux_reg_to_index(unsigned int i)
+{
+	return KVM_REG_ARM64 | KVM_REG_SIZE_U32 | KVM_REG_ARM_DEMUX |
+	       KVM_REG_ARM_DEMUX_ID_CCSIDR | i;
+}
+
 static int write_demux_regids(u64 __user *uindices)
 {
-	u64 val = KVM_REG_ARM64 | KVM_REG_SIZE_U32 | KVM_REG_ARM_DEMUX;
 	unsigned int i;
 
-	val |= KVM_REG_ARM_DEMUX_ID_CCSIDR;
-	for (i = 0; i < CSSELR_MAX; i++) {
-		if (put_user(val | i, uindices))
+	for (i = 0; i < num_demux_regs(); i++) {
+		if (put_user(demux_reg_to_index(i), uindices))
 			return -EFAULT;
 		uindices++;
 	}
@@ -5691,25 +5703,24 @@ static u64 sys_reg_to_index(const struct sys_reg_desc *reg)
 		(reg->Op2 << KVM_REG_ARM64_SYSREG_OP2_SHIFT));
 }
 
+static u64 reg_to_user_idx(const struct sys_reg_desc *reg)
+{
+	switch (reg_to_encoding(reg)) {
+	case SYS_CNTV_CVAL_EL0:
+		return KVM_REG_ARM_TIMER_CVAL;
+	case SYS_CNTVCT_EL0:
+		return KVM_REG_ARM_TIMER_CNT;
+	default:
+		return sys_reg_to_index(reg);
+	}
+}
+
 static bool copy_reg_to_user(const struct sys_reg_desc *reg, u64 __user **uind)
 {
-	u64 idx;
-
 	if (!*uind)
 		return true;
 
-	switch (reg_to_encoding(reg)) {
-	case SYS_CNTV_CVAL_EL0:
-		idx = KVM_REG_ARM_TIMER_CVAL;
-		break;
-	case SYS_CNTVCT_EL0:
-		idx = KVM_REG_ARM_TIMER_CNT;
-		break;
-	default:
-		idx = sys_reg_to_index(reg);
-	}
-
-	if (put_user(idx, *uind))
+	if (put_user(reg_to_user_idx(reg), *uind))
 		return false;
 
 	(*uind)++;
@@ -5718,7 +5729,7 @@ static bool copy_reg_to_user(const struct sys_reg_desc *reg, u64 __user **uind)
 
 static int walk_one_sys_reg(const struct kvm_vcpu *vcpu,
 			    const struct sys_reg_desc *rd,
-			    u64 __user **uind,
+			    u64 __user **uind, u64 **kind,
 			    unsigned int *total)
 {
 	/*
@@ -5731,29 +5742,38 @@ static int walk_one_sys_reg(const struct kvm_vcpu *vcpu,
 	if (sysreg_hidden(vcpu, rd))
 		return 0;
 
-	if (!copy_reg_to_user(rd, uind))
+	if (uind && !copy_reg_to_user(rd, uind))
 		return -EFAULT;
+
+	if (kind && *kind)
+		*(*kind)++ = reg_to_user_idx(rd);
 
 	(*total)++;
 	return 0;
 }
 
-/* Assumed ordered tables, see kvm_sys_reg_table_init. */
-static int walk_sys_regs(struct kvm_vcpu *vcpu, u64 __user *uind)
+static int walk_sys_reg_table(struct kvm_vcpu *vcpu,
+			      const struct sys_reg_desc *table,
+			      unsigned int num,
+			      u64 __user **uind, u64 **kind)
 {
-	const struct sys_reg_desc *i2, *end2;
+	const struct sys_reg_desc *i2 = table, *end2 = table + num;
 	unsigned int total = 0;
 	int err;
 
-	i2 = sys_reg_descs;
-	end2 = sys_reg_descs + ARRAY_SIZE(sys_reg_descs);
-
 	while (i2 != end2) {
-		err = walk_one_sys_reg(vcpu, i2++, &uind, &total);
+		err = walk_one_sys_reg(vcpu, i2++, uind, kind, &total);
 		if (err)
 			return err;
 	}
 	return total;
+}
+
+/* Assumed ordered tables, see kvm_sys_reg_table_init. */
+static int walk_sys_regs(struct kvm_vcpu *vcpu, u64 __user *uind)
+{
+	return walk_sys_reg_table(vcpu, sys_reg_descs,
+				  ARRAY_SIZE(sys_reg_descs), &uind, NULL);
 }
 
 unsigned long kvm_arm_num_sys_reg_descs(struct kvm_vcpu *vcpu)
@@ -5988,4 +6008,91 @@ int __init kvm_sys_reg_table_init(void)
 		ret = populate_sysreg_config(sys_insn_descs + i, i);
 
 	return ret;
+}
+
+/* The GICv3 CPU interface sysregs, or NULL if the in-kernel GICv3 is unused. */
+static const struct sys_reg_desc *vcpu_gic_sysreg_table(struct kvm_vcpu *vcpu,
+							unsigned int *num)
+{
+	if (!irqchip_in_kernel(vcpu->kvm) ||
+	    vcpu->kvm->arch.vgic.vgic_model != KVM_DEV_TYPE_ARM_VGIC_V3)
+		return NULL;
+
+	return vgic_v3_get_sysreg_table(num);
+}
+
+/*
+ * Enumerate every system register that kvm_arm_sys_reg_read() can return for
+ * @vcpu.  This is a superset of KVM_GET_REG_LIST: it also covers the GICv3 CPU
+ * interface table (exposed to userspace via KVM_DEV_ARM_VGIC_GRP_CPU_SYSREGS).
+ * Pass a NULL @indices to query the number of entries the array needs to hold.
+ */
+int kvm_arm_get_sys_reg_indices(struct kvm_vcpu *vcpu, u64 *indices)
+{
+	const struct sys_reg_desc *gic_regs;
+	unsigned int sz = 0, i;
+	int count;
+
+	count = walk_sys_reg_table(vcpu, sys_reg_descs,
+				   ARRAY_SIZE(sys_reg_descs), NULL, &indices);
+
+	gic_regs = vcpu_gic_sysreg_table(vcpu, &sz);
+	if (gic_regs)
+		count += walk_sys_reg_table(vcpu, gic_regs, sz, NULL, &indices);
+
+	for (i = 0; i < num_demux_regs(); i++) {
+		if (indices)
+			*indices++ = demux_reg_to_index(i);
+		count++;
+	}
+
+	return count;
+}
+
+int kvm_arm_sys_reg_read(struct kvm_vcpu *vcpu, u64 reg_id, u64 *val)
+{
+	const struct sys_reg_desc *gic_regs;
+	unsigned int sz = 0;
+	int ret;
+
+	if ((reg_id & KVM_REG_ARM_COPROC_MASK) == KVM_REG_ARM_DEMUX) {
+		u32 uval;
+
+		ret = demux_c15_get_val(vcpu, reg_id, &uval);
+		if (!ret)
+			*val = uval;
+		return ret;
+	}
+
+	ret = __kvm_sys_reg_get(vcpu, reg_id, val, sys_reg_descs,
+				ARRAY_SIZE(sys_reg_descs));
+	if (ret != -ENOENT)
+		return ret;
+
+	gic_regs = vcpu_gic_sysreg_table(vcpu, &sz);
+	if (!gic_regs)
+		return ret;
+
+	return __kvm_sys_reg_get(vcpu, reg_id, val, gic_regs, sz);
+}
+
+int kvm_arm_sys_reg_write(struct kvm_vcpu *vcpu, u64 reg_id, u64 val)
+{
+	const struct sys_reg_desc *gic_regs;
+	unsigned int sz = 0;
+	int ret;
+
+	if ((reg_id & KVM_REG_ARM_COPROC_MASK) == KVM_REG_ARM_DEMUX)
+		return demux_c15_set_val(vcpu, reg_id, (u32)val);
+
+	ret = __kvm_sys_reg_set(vcpu, reg_id, val, sys_reg_descs,
+				ARRAY_SIZE(sys_reg_descs));
+	if (ret != -ENOENT)
+		return ret;
+
+	gic_regs = vcpu_gic_sysreg_table(vcpu, &sz);
+	if (!gic_regs)
+		return ret;
+
+	return __kvm_sys_reg_set(vcpu, reg_id, val, gic_regs, sz);
 }
