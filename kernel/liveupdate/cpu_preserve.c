@@ -1317,6 +1317,145 @@ static int cpu_unpreserve(unsigned int cpu)
 	return 0;
 }
 
+static int cpu_preserved_flb_preserve(struct liveupdate_flb_op_args *argp)
+{
+	unsigned int nr_words = BITS_TO_U64(nr_cpu_ids);
+	struct cpu_preserved_global_ser *ser;
+	size_t ser_sz;
+	int ret;
+
+	ser_sz = struct_size(ser, cpu_preserved_bitmap, nr_words);
+
+	mutex_lock(&cpu_preserved_lock);
+	ret = cpu_preserved_init_runtime_buffer_locked();
+	if (ret) {
+		mutex_unlock(&cpu_preserved_lock);
+		return ret;
+	}
+
+	ser = kho_alloc_preserve(ser_sz);
+	if (IS_ERR(ser)) {
+		mutex_unlock(&cpu_preserved_lock);
+		return PTR_ERR(ser);
+	}
+
+	memset(ser, 0, ser_sz);
+	ser->nr_cpu_words = nr_words;
+	cpu_preserved_global_ser = ser;
+	cpu_preserved_sync_global_ser();
+	mutex_unlock(&cpu_preserved_lock);
+
+	argp->data = virt_to_phys(ser);
+	argp->obj = ser;
+	return 0;
+}
+
+static void cpu_preserved_flb_unpreserve(struct liveupdate_flb_op_args *argp)
+{
+	struct cpu_preserved_global_ser *ser;
+
+	if (!argp->data)
+		return;
+
+	ser = phys_to_virt(argp->data);
+	scoped_guard(mutex, &cpu_preserved_lock) {
+		if (WARN_ON_ONCE(!cpumask_empty(&cpu_preserved_outgoing.mask)))
+			return;
+		cpu_preserved_global_ser = NULL;
+		cpu_preserved_unpreserve_runtime_buffer();
+	}
+
+	kho_unpreserve_free(ser);
+}
+
+static int cpu_preserved_flb_retrieve(struct liveupdate_flb_op_args *argp)
+{
+	struct cpu_preserved_global_ser *ser;
+	u64 nr_bits;
+	int cpu;
+
+	if (!argp->data)
+		return -EINVAL;
+
+	ser = phys_to_virt(argp->data);
+	arch_cpu_preserved_early_init();
+
+	/*
+	 * The outgoing kernel may have been built with a larger NR_CPUS.  Any
+	 * preserved CPU we cannot represent would be silently forgotten and
+	 * left spinning in its park loop forever, so refuse the handover
+	 * instead.
+	 */
+	nr_bits = (u64)ser->nr_cpu_words * BITS_PER_TYPE(u64);
+	if (nr_bits > nr_cpu_ids &&
+	    find_next_bit((const unsigned long *)ser->cpu_preserved_bitmap,
+			  nr_bits, nr_cpu_ids) < nr_bits) {
+		pr_err("preserved CPU above nr_cpu_ids=%u in handover data\n",
+		       nr_cpu_ids);
+		return -ERANGE;
+	}
+
+	mutex_lock(&cpu_preserved_lock);
+	bitmap_from_arr64(cpumask_bits(&cpu_preserved_mask),
+			  ser->cpu_preserved_bitmap, min_t(u64, nr_bits, nr_cpu_ids));
+	cpumask_copy(&cpu_preserved_incoming.mask, &cpu_preserved_mask);
+
+	cpu_preserved_clean(&cpu_preserved_mask);
+	for_each_cpu(cpu, &cpu_preserved_mask)
+		set_cpu_present(cpu, false);
+	mutex_unlock(&cpu_preserved_lock);
+
+	argp->obj = ser;
+	return 0;
+}
+
+static void cpu_preserved_flb_finish(struct liveupdate_flb_op_args *argp)
+{
+	struct cpu_preserved_global_ser *ser = argp->obj;
+
+	if (!ser)
+		return;
+
+	guard(mutex)(&cpu_preserved_lock);
+	if (WARN_ON_ONCE(!cpumask_empty(&cpu_preserved_incoming.mask)))
+		return;
+
+	if (ser->text_runtime_pa && ser->text_runtime_size) {
+		unsigned long nr_pages = ser->text_runtime_size >> PAGE_SHIFT;
+		struct page *page = kho_restore_pages(ser->text_runtime_pa, nr_pages);
+
+		if (page) {
+			for (unsigned long i = 0; i < nr_pages; i++)
+				__free_page(page + i);
+		}
+	}
+
+	if (ser->data_runtime_pa && ser->data_runtime_size) {
+		unsigned long nr_pages = ser->data_runtime_size >> PAGE_SHIFT;
+		struct page *page = kho_restore_pages(ser->data_runtime_pa, nr_pages);
+
+		if (page) {
+			for (unsigned long i = 0; i < nr_pages; i++)
+				__free_page(page + i);
+		}
+	}
+
+	kho_restore_free(ser);
+}
+
+static const struct liveupdate_flb_ops cpu_preserved_flb_ops = {
+	.preserve   = cpu_preserved_flb_preserve,
+	.unpreserve = cpu_preserved_flb_unpreserve,
+	.retrieve   = cpu_preserved_flb_retrieve,
+	.finish     = cpu_preserved_flb_finish,
+	.owner      = THIS_MODULE,
+};
+
+static struct liveupdate_flb cpu_preserved_flb = {
+	.ops        = &cpu_preserved_flb_ops,
+	.compatible = CPU_PRESERVED_LUO_FLB_COMPATIBLE,
+};
+
 static int file_to_cpu(struct file *file, unsigned int *cpup)
 {
 	struct dentry *dentry, *parent;
@@ -1486,6 +1625,7 @@ static struct liveupdate_file_handler cpu_preserve_handler = {
 
 static int __init cpu_preserve_early_init(void)
 {
+	void *obj;
 	int err;
 
 	if (!liveupdate_enabled())
@@ -1502,6 +1642,19 @@ static int __init cpu_preserve_early_init(void)
 		       ERR_PTR(err));
 		return err;
 	}
+
+	err = liveupdate_register_flb(&cpu_preserve_handler,
+				      &cpu_preserved_flb);
+	if (err && err != -EOPNOTSUPP) {
+		pr_err("Could not register cpu_preserved FLB: %pe\n",
+		       ERR_PTR(err));
+		return err;
+	}
+
+	/* Retrieve incoming preserved CPUs before secondary CPU bringup */
+	if (liveupdate_enabled() &&
+	    !liveupdate_flb_get_incoming(&cpu_preserved_flb, &obj))
+		liveupdate_flb_put_incoming(&cpu_preserved_flb);
 
 	return 0;
 }

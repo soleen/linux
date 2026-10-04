@@ -123,6 +123,14 @@ static inline void cpu_preserved_report_dead(void)
  */
 void arch_cpu_preserved_kick(int cpu);
 
+/**
+ * arch_cpu_preserved_early_init - Arch early-boot init for incoming preserved CPUs
+ *
+ * Architecture backend hook invoked by cpu_preserve_early_init() before
+ * secondary CPU bringup to restore per-CPU preserved hardware state.
+ */
+void arch_cpu_preserved_early_init(void);
+
 void arch_cpu_preserved_park_finish(int cpu) __cpu_preserved_sym_asm(arch_cpu_preserved_park_finish);
 
 /**
@@ -241,6 +249,7 @@ static inline void arch_cpu_preserved_park_init(int cpu) {}
 static inline void arch_cpu_preserved_dcache_clean(unsigned long start,
 						   unsigned long end) {}
 static inline void arch_cpu_preserved_kick(int cpu) {}
+static inline void arch_cpu_preserved_early_init(void) {}
 static inline void arch_cpu_preserved_park_finish(int cpu) {}
 static inline void arch_cpu_preserved_dcache_inval(unsigned long start,
 						   unsigned long end) {}
