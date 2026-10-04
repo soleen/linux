@@ -1552,49 +1552,12 @@ bool vmx_emulation_required(struct kvm_vcpu *vcpu)
 
 unsigned long vmx_get_rflags(struct kvm_vcpu *vcpu)
 {
-	struct vcpu_vmx *vmx = to_vmx(vcpu);
-	unsigned long rflags, save_rflags;
-
-	if (!kvm_register_is_available(vcpu, VCPU_REG_RFLAGS)) {
-		kvm_register_mark_available(vcpu, VCPU_REG_RFLAGS);
-		rflags = vmcs_readl(GUEST_RFLAGS);
-		if (vmx->rmode.vm86_active) {
-			rflags &= RMODE_GUEST_OWNED_EFLAGS_BITS;
-			save_rflags = vmx->rmode.save_rflags;
-			rflags |= save_rflags & ~RMODE_GUEST_OWNED_EFLAGS_BITS;
-		}
-		vmx->rflags = rflags;
-	}
-	return vmx->rflags;
+	return __vmx_get_rflags(vcpu);
 }
 
 void vmx_set_rflags(struct kvm_vcpu *vcpu, unsigned long rflags)
 {
-	struct vcpu_vmx *vmx = to_vmx(vcpu);
-	unsigned long old_rflags;
-
-	/*
-	 * Unlike CR0 and CR4, RFLAGS handling requires checking if the vCPU
-	 * is an unrestricted guest in order to mark L2 as needing emulation
-	 * if L1 runs L2 as a restricted guest.
-	 */
-	if (is_unrestricted_guest(vcpu)) {
-		kvm_register_mark_available(vcpu, VCPU_REG_RFLAGS);
-		vmx->rflags = rflags;
-		vmcs_writel(GUEST_RFLAGS, rflags);
-		return;
-	}
-
-	old_rflags = vmx_get_rflags(vcpu);
-	vmx->rflags = rflags;
-	if (vmx->rmode.vm86_active) {
-		vmx->rmode.save_rflags = rflags;
-		rflags |= X86_EFLAGS_IOPL | X86_EFLAGS_VM;
-	}
-	vmcs_writel(GUEST_RFLAGS, rflags);
-
-	if ((old_rflags ^ vmx->rflags) & X86_EFLAGS_VM)
-		vmx->vt.emulation_required = vmx_emulation_required(vcpu);
+	__vmx_set_rflags(vcpu, rflags);
 }
 
 bool vmx_get_if_flag(struct kvm_vcpu *vcpu)
@@ -1604,31 +1567,12 @@ bool vmx_get_if_flag(struct kvm_vcpu *vcpu)
 
 u32 vmx_get_interrupt_shadow(struct kvm_vcpu *vcpu)
 {
-	u32 interruptibility = vmcs_read32(GUEST_INTERRUPTIBILITY_INFO);
-	int ret = 0;
-
-	if (interruptibility & GUEST_INTR_STATE_STI)
-		ret |= KVM_X86_SHADOW_INT_STI;
-	if (interruptibility & GUEST_INTR_STATE_MOV_SS)
-		ret |= KVM_X86_SHADOW_INT_MOV_SS;
-
-	return ret;
+	return __vmx_get_interrupt_shadow(vcpu);
 }
 
 void vmx_set_interrupt_shadow(struct kvm_vcpu *vcpu, int mask)
 {
-	u32 interruptibility_old = vmcs_read32(GUEST_INTERRUPTIBILITY_INFO);
-	u32 interruptibility = interruptibility_old;
-
-	interruptibility &= ~(GUEST_INTR_STATE_STI | GUEST_INTR_STATE_MOV_SS);
-
-	if (mask & KVM_X86_SHADOW_INT_MOV_SS)
-		interruptibility |= GUEST_INTR_STATE_MOV_SS;
-	else if (mask & KVM_X86_SHADOW_INT_STI)
-		interruptibility |= GUEST_INTR_STATE_STI;
-
-	if ((interruptibility != interruptibility_old))
-		vmcs_write32(GUEST_INTERRUPTIBILITY_INFO, interruptibility);
+	__vmx_set_interrupt_shadow(vcpu, mask);
 }
 
 static int vmx_rtit_ctl_check(struct kvm_vcpu *vcpu, u64 data)
@@ -1727,70 +1671,6 @@ int vmx_check_emulate_instruction(struct kvm_vcpu *vcpu, int emul_type,
 	return X86EMUL_CONTINUE;
 }
 
-static int skip_emulated_instruction(struct kvm_vcpu *vcpu)
-{
-	union vmx_exit_reason exit_reason = vmx_get_exit_reason(vcpu);
-	unsigned long rip, orig_rip;
-	u32 instr_len;
-
-	/*
-	 * Using VMCS.VM_EXIT_INSTRUCTION_LEN on EPT misconfig depends on
-	 * undefined behavior: Intel's SDM doesn't mandate the VMCS field be
-	 * set when EPT misconfig occurs.  In practice, real hardware updates
-	 * VM_EXIT_INSTRUCTION_LEN on EPT misconfig, but other hypervisors
-	 * (namely Hyper-V) don't set it due to it being undefined behavior,
-	 * i.e. we end up advancing IP with some random value.
-	 */
-	if (!cpu_feature_enabled(X86_FEATURE_HYPERVISOR) ||
-	    exit_reason.basic != EXIT_REASON_EPT_MISCONFIG) {
-		instr_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
-
-		/*
-		 * Emulating an enclave's instructions isn't supported as KVM
-		 * cannot access the enclave's memory or its true RIP, e.g. the
-		 * vmcs.GUEST_RIP points at the exit point of the enclave, not
-		 * the RIP that actually triggered the VM-Exit.  But, because
-		 * most instructions that cause VM-Exit will #UD in an enclave,
-		 * most instruction-based VM-Exits simply do not occur.
-		 *
-		 * There are a few exceptions, notably the debug instructions
-		 * INT1ICEBRK and INT3, as they are allowed in debug enclaves
-		 * and generate #DB/#BP as expected, which KVM might intercept.
-		 * But again, the CPU does the dirty work and saves an instr
-		 * length of zero so VMMs don't shoot themselves in the foot.
-		 * WARN if KVM tries to skip a non-zero length instruction on
-		 * a VM-Exit from an enclave.
-		 */
-		if (!instr_len)
-			goto rip_updated;
-
-		WARN_ONCE(exit_reason.enclave_mode,
-			  "skipping instruction after SGX enclave VM-Exit");
-
-		orig_rip = kvm_rip_read(vcpu);
-		rip = orig_rip + instr_len;
-#ifdef CONFIG_X86_64
-		/*
-		 * We need to mask out the high 32 bits of RIP if not in 64-bit
-		 * mode, but just finding out that we are in 64-bit mode is
-		 * quite expensive.  Only do it if there was a carry.
-		 */
-		if (unlikely(((rip ^ orig_rip) >> 31) == 3) && !is_64_bit_mode(vcpu))
-			rip = (u32)rip;
-#endif
-		kvm_rip_write(vcpu, rip);
-	} else {
-		if (!kvm_emulate_instruction(vcpu, EMULTYPE_SKIP))
-			return 0;
-	}
-
-rip_updated:
-	/* skipping an emulated instruction also counts */
-	vmx_set_interrupt_shadow(vcpu, 0);
-
-	return 1;
-}
-
 /*
  * Recognizes a pending MTF VM-exit and records the nested state for later
  * delivery.
@@ -1828,8 +1708,7 @@ void vmx_update_emulated_instruction(struct kvm_vcpu *vcpu)
 
 int vmx_skip_emulated_instruction(struct kvm_vcpu *vcpu)
 {
-	vmx_update_emulated_instruction(vcpu);
-	return skip_emulated_instruction(vcpu);
+	return __vmx_skip_emulated_instruction(vcpu);
 }
 
 static void vmx_clear_hlt(struct kvm_vcpu *vcpu)
