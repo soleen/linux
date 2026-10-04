@@ -13,6 +13,7 @@ extern const char x86_preserved_exc_handler_array[NUM_EXCEPTION_VECTORS][EARLY_I
 extern bool x86_preserved_mwait __cpu_preserved_sym_asm(x86_preserved_mwait);
 extern u64 x86_preserved_sme_mask
 	__cpu_preserved_sym_asm(x86_preserved_sme_mask);
+extern bool x86_preserved_has_svm __cpu_preserved_sym_asm(x86_preserved_has_svm);
 void x86_preserved_idle(u32 *kicked, u32 *monitor)
 	__cpu_preserved_sym_asm(x86_preserved_idle);
 extern const char x86_preserved_idle_window[]

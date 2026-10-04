@@ -32,6 +32,7 @@ gate_desc x86_preserved_idt[IDT_ENTRIES] __aligned(PAGE_SIZE) __ro_after_init;
 struct desc_ptr x86_preserved_idt_desc __ro_after_init;
 bool x86_preserved_mwait __ro_after_init;
 u64 x86_preserved_sme_mask __ro_after_init;
+bool x86_preserved_has_svm __ro_after_init;
 
 static bool x86_preserved_fixup_exception(struct pt_regs *regs, int trapnr)
 {
@@ -93,6 +94,32 @@ static bool x86_preserved_handle_mce(struct cpu_preserved_stack_context *sctx)
 }
 
 /*
+ * Leave VMX and SVM operation, so that the CPU recognizes INIT again.
+ */
+static void x86_preserved_virt_teardown(void)
+{
+	unsigned long cr4;
+
+	asm volatile("mov %%cr4, %0" : "=r" (cr4));
+	if (cr4 & X86_CR4_VMXE) {
+		asm volatile("1: vmxoff\n\t"
+			     "2:\n\t"
+			     _ASM_EXTABLE(1b, 2b)
+			     : : : "memory", "cc");
+		asm volatile("mov %0, %%cr4" : : "r" (cr4 & ~X86_CR4_VMXE) : "memory");
+	}
+
+	if (x86_preserved_has_svm) {
+		u64 efer = native_rdmsrq(MSR_EFER);
+
+		if (efer & EFER_SVME) {
+			asm volatile("stgi" : : : "memory");
+			native_wrmsrq(MSR_EFER, efer & ~EFER_SVME);
+		}
+	}
+}
+
+/*
  * An unexpected fault leaves the CPU in an unknown state: record the first one
  * and stop for good.  The host sees CPU_PRESERVED_FAULTED and may reset the CPU.
  */
@@ -110,6 +137,7 @@ static void __noreturn x86_preserved_fault(struct cpu_preserved_stack_context *s
 		f->cr3 = __native_read_cr3();
 		cpu_preserved_clean(f);
 
+		x86_preserved_virt_teardown();
 		if (sctx->ser) {
 			/* Pairs with the acquire in cpu_preserved_read_state() */
 			smp_store_release(&sctx->ser->state, CPU_PRESERVED_FAULTED);
@@ -256,6 +284,7 @@ void arch_cpu_preserved_park_init(int cpu)
  */
 void arch_cpu_preserved_park_finish(int cpu __maybe_unused)
 {
+	x86_preserved_virt_teardown();
 }
 
 void arch_cpu_preserved_park_worker(int cpu)

@@ -76,6 +76,7 @@ void arch_cpu_preserved_early_init(void)
 			      !boot_cpu_has_bug(X86_BUG_MONITOR) &&
 			      !boot_cpu_has_bug(X86_BUG_CLFLUSH_MONITOR);
 	x86_preserved_sme_mask = sme_me_mask;
+	x86_preserved_has_svm = boot_cpu_has(X86_FEATURE_SVM);
 }
 
 /*
