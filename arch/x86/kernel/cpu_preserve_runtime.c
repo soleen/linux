@@ -30,6 +30,7 @@ struct desc_ptr x86_preserved_idt_desc;
 struct desc_struct x86_preserved_gdt[GDT_ENTRIES] __aligned(PAGE_SIZE);
 struct desc_ptr x86_preserved_gdt_desc;
 bool x86_preserved_has_svm;
+u16 x86_verw_sel = __KERNEL_DS;
 
 static bool x86_preserved_fixup_exception(struct pt_regs *regs, int trapnr)
 {
