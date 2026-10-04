@@ -275,66 +275,6 @@ int svm_set_efer(struct kvm_vcpu *vcpu, u64 efer)
 	return 0;
 }
 
-static u32 svm_get_interrupt_shadow(struct kvm_vcpu *vcpu)
-{
-	struct vcpu_svm *svm = to_svm(vcpu);
-	u32 ret = 0;
-
-	if (svm->vmcb->control.int_state & SVM_INTERRUPT_SHADOW_MASK)
-		ret = KVM_X86_SHADOW_INT_STI | KVM_X86_SHADOW_INT_MOV_SS;
-	return ret;
-}
-
-static void svm_set_interrupt_shadow(struct kvm_vcpu *vcpu, int mask)
-{
-	struct vcpu_svm *svm = to_svm(vcpu);
-
-	if (mask == 0)
-		svm->vmcb->control.int_state &= ~SVM_INTERRUPT_SHADOW_MASK;
-	else
-		svm->vmcb->control.int_state |= SVM_INTERRUPT_SHADOW_MASK;
-
-}
-
-static int __svm_skip_emulated_instruction(struct kvm_vcpu *vcpu,
-					   int emul_type,
-					   bool commit_side_effects)
-{
-	struct vcpu_svm *svm = to_svm(vcpu);
-	unsigned long old_rflags;
-
-	/*
-	 * SEV-ES does not expose the next RIP. The RIP update is controlled by
-	 * the type of exit and the #VC handler in the guest.
-	 */
-	if (is_sev_es_guest(vcpu))
-		goto done;
-
-	if (nrips && svm->vmcb->control.next_rip != 0) {
-		WARN_ON_ONCE(!cpu_feature_enabled(X86_FEATURE_NRIPS));
-		svm->next_rip = svm->vmcb->control.next_rip;
-	}
-
-	if (!svm->next_rip) {
-		if (unlikely(!commit_side_effects))
-			old_rflags = svm->vmcb->save.rflags;
-
-		if (!kvm_emulate_instruction(vcpu, emul_type))
-			return 0;
-
-		if (unlikely(!commit_side_effects))
-			svm->vmcb->save.rflags = old_rflags;
-	} else {
-		kvm_rip_write(vcpu, svm->next_rip);
-	}
-
-done:
-	if (likely(commit_side_effects))
-		svm_set_interrupt_shadow(vcpu, 0);
-
-	return 1;
-}
-
 int svm_skip_emulated_instruction(struct kvm_vcpu *vcpu)
 {
 	return __svm_skip_emulated_instruction(vcpu, EMULTYPE_SKIP, true);
