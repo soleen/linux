@@ -168,6 +168,63 @@ static inline u64 kvm_get_lapic_tscdeadline_msr(struct kvm_vcpu *vcpu)
 	return __kvm_get_lapic_tscdeadline_msr(vcpu);
 }
 
+static inline void kvm_set_lapic_tscdeadline_msr(struct kvm_vcpu *vcpu, u64 data)
+{
+	struct kvm_lapic *apic = vcpu->arch.apic;
+
+	if (!kvm_apic_present(vcpu) || !apic_lvtt_tscdeadline(apic))
+		return;
+
+	apic->lapic_timer.tscdeadline = data;
+}
+
+static inline int kvm_x2apic_msr_read(struct kvm_vcpu *vcpu, u32 msr, u64 *data)
+{
+	struct kvm_lapic *apic = vcpu->arch.apic;
+	u32 reg = (msr - APIC_BASE_MSR) << 4;
+
+	if (!lapic_in_kernel(vcpu) || !apic_x2apic_mode(apic))
+		return 1;
+
+	switch (reg) {
+	case APIC_ID:
+	case APIC_LVR:
+	case APIC_TASKPRI:
+	case APIC_LDR:
+	case APIC_SPIV:
+	case APIC_ESR:
+	case APIC_LVTT:
+	case APIC_LVTTHMR:
+	case APIC_LVTPC:
+	case APIC_LVT0:
+	case APIC_LVT1:
+	case APIC_LVTERR:
+	case APIC_TMICT:
+	case APIC_TDCR:
+		*data = kvm_lapic_get_reg(apic, reg);
+		return 0;
+	default:
+		return 1;
+	}
+}
+
+static inline int kvm_x2apic_msr_write(struct kvm_vcpu *vcpu, u32 msr, u64 data)
+{
+	struct kvm_lapic *apic = vcpu->arch.apic;
+	u32 reg = (msr - APIC_BASE_MSR) << 4;
+
+	if (!lapic_in_kernel(vcpu) || !apic_x2apic_mode(apic))
+		return 1;
+
+	if (reg != APIC_ICR && (data >> 32))
+		return 1;
+
+	if (reg == APIC_EOI)
+		return 0;
+
+	return 1;
+}
+
 static inline struct kvm_cpuid_entry2 *kvm_find_cpuid_entry2(
 	struct kvm_cpuid_entry2 *entries, int nent, u32 function, u64 index)
 {
@@ -297,6 +354,207 @@ static inline int kvm_emulate_as_nop(struct kvm_vcpu *vcpu)
 static inline int kvm_emulate_invd(struct kvm_vcpu *vcpu)
 {
 	return kvm_emulate_as_nop(vcpu);
+}
+
+static inline int kvm_set_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+{
+	u32 msr = msr_info->index;
+	u64 data = msr_info->data;
+
+	switch (msr) {
+	case MSR_AMD64_NB_CFG:
+	case MSR_IA32_UCODE_REV:
+	case MSR_IA32_UCODE_WRITE:
+	case MSR_VM_HSAVE_PA:
+	case MSR_AMD64_PATCH_LOADER:
+	case MSR_AMD64_BU_CFG2:
+	case MSR_AMD64_DC_CFG:
+	case MSR_AMD64_TW_CFG:
+	case MSR_F15H_EX_CFG:
+	case MSR_IA32_BBL_CR_CTL3:
+		break;
+	case APIC_BASE_MSR ... APIC_BASE_MSR + 0xff:
+		return kvm_x2apic_msr_write(vcpu, msr, data);
+	case MSR_IA32_TSC_DEADLINE:
+		kvm_set_lapic_tscdeadline_msr(vcpu, data);
+		break;
+	default:
+		return KVM_MSR_RET_UNSUPPORTED;
+	}
+	return 0;
+}
+
+static inline int kvm_get_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+{
+	switch (msr_info->index) {
+	case MSR_IA32_PLATFORM_ID:
+	case MSR_IA32_EBL_CR_POWERON:
+	case MSR_IA32_LASTBRANCHFROMIP:
+	case MSR_IA32_LASTBRANCHTOIP:
+	case MSR_IA32_LASTINTFROMIP:
+	case MSR_IA32_LASTINTTOIP:
+	case MSR_AMD64_SYSCFG:
+	case MSR_K8_TSEG_ADDR:
+	case MSR_K8_TSEG_MASK:
+	case MSR_VM_HSAVE_PA:
+	case MSR_K8_INT_PENDING_MSG:
+	case MSR_AMD64_NB_CFG:
+	case MSR_FAM10H_MMIO_CONF_BASE:
+	case MSR_AMD64_BU_CFG2:
+	case MSR_IA32_PERF_CTL:
+	case MSR_AMD64_DC_CFG:
+	case MSR_AMD64_TW_CFG:
+	case MSR_F15H_EX_CFG:
+	case MSR_RAPL_POWER_UNIT:
+	case MSR_PP0_ENERGY_STATUS:
+	case MSR_PP1_ENERGY_STATUS:
+	case MSR_PKG_ENERGY_STATUS:
+	case MSR_DRAM_ENERGY_STATUS:
+		msr_info->data = 0;
+		break;
+	case MSR_IA32_UCODE_REV:
+		msr_info->data = vcpu->arch.microcode_version;
+		break;
+	case MSR_IA32_ARCH_CAPABILITIES:
+		if (!guest_cpu_cap_has(vcpu, X86_FEATURE_ARCH_CAPABILITIES))
+			return KVM_MSR_RET_UNSUPPORTED;
+		msr_info->data = vcpu->arch.arch_capabilities;
+		break;
+	case MSR_IA32_PERF_CAPABILITIES:
+		if (!guest_cpu_cap_has(vcpu, X86_FEATURE_PDCM))
+			return KVM_MSR_RET_UNSUPPORTED;
+		msr_info->data = vcpu->arch.perf_capabilities;
+		break;
+	case MSR_IA32_POWER_CTL:
+		msr_info->data = vcpu->arch.msr_ia32_power_ctl;
+		break;
+	case MSR_IA32_TSC: {
+		u64 offset = msr_info->host_initiated ? vcpu->arch.l1_tsc_offset :
+							vcpu->arch.tsc_offset;
+		u64 ratio = msr_info->host_initiated ? vcpu->arch.l1_tsc_scaling_ratio :
+						       vcpu->arch.tsc_scaling_ratio;
+
+		msr_info->data = kvm_scale_tsc(rdtsc(), ratio) + offset;
+		break;
+	}
+	case MSR_IA32_CR_PAT:
+		msr_info->data = vcpu->arch.pat;
+		break;
+	case MSR_MTRRcap:
+		if (!msr_info->host_initiated &&
+		    !guest_cpu_cap_has(vcpu, X86_FEATURE_MTRR))
+			return 1;
+		msr_info->data = 0x500 | KVM_NR_VAR_MTRR;
+		break;
+	case MSR_IA32_APICBASE:
+		msr_info->data = vcpu->arch.apic_base;
+		break;
+	case APIC_BASE_MSR ... APIC_BASE_MSR + 0xff:
+		return kvm_x2apic_msr_read(vcpu, msr_info->index, &msr_info->data);
+	case MSR_IA32_TSC_DEADLINE:
+		msr_info->data = kvm_get_lapic_tscdeadline_msr(vcpu);
+		break;
+	case MSR_IA32_TSC_ADJUST:
+		msr_info->data = (u64)vcpu->arch.ia32_tsc_adjust_msr;
+		break;
+	case MSR_IA32_MISC_ENABLE:
+		msr_info->data = vcpu->arch.ia32_misc_enable_msr;
+		break;
+	case MSR_IA32_SMBASE:
+		if (!msr_info->host_initiated)
+			return 1;
+		msr_info->data = vcpu->arch.smbase;
+		break;
+	case MSR_SMI_COUNT:
+		msr_info->data = vcpu->arch.smi_count;
+		break;
+	case MSR_EFER:
+		msr_info->data = vcpu->arch.efer;
+		break;
+	case MSR_K7_HWCR:
+		msr_info->data = vcpu->arch.msr_hwcr;
+		break;
+	case MSR_PLATFORM_INFO:
+		if (!msr_info->host_initiated &&
+		    !(vcpu->arch.msr_platform_info & MSR_PLATFORM_INFO_CPUID_FAULT))
+			return 1;
+		msr_info->data = vcpu->arch.msr_platform_info;
+		break;
+	case MSR_MISC_FEATURES_ENABLES:
+		msr_info->data = vcpu->arch.msr_misc_features_enables;
+		break;
+	default:
+		return KVM_MSR_RET_UNSUPPORTED;
+	}
+	return 0;
+}
+
+static inline int __kvm_set_msr(struct kvm_vcpu *vcpu, u32 index, u64 data,
+				bool host_initiated)
+{
+	struct msr_data msr;
+
+	switch (index) {
+	case MSR_FS_BASE:
+	case MSR_GS_BASE:
+	case MSR_KERNEL_GS_BASE:
+	case MSR_CSTAR:
+	case MSR_LSTAR:
+		if (is_noncanonical_msr_address(data, vcpu))
+			return 1;
+		break;
+	case MSR_IA32_SYSENTER_EIP:
+	case MSR_IA32_SYSENTER_ESP:
+		data = __canonical_address(data, max_host_virt_addr_bits());
+		break;
+	default:
+		break;
+	}
+
+	msr.data = data;
+	msr.index = index;
+	msr.host_initiated = host_initiated;
+
+	return kvm_x86_call(set_msr)(vcpu, &msr);
+}
+
+static inline int __kvm_get_msr(struct kvm_vcpu *vcpu, u32 index, u64 *data,
+				bool host_initiated)
+{
+	struct msr_data msr = {
+		.index = index,
+		.host_initiated = host_initiated,
+	};
+	int ret;
+
+	ret = kvm_x86_call(get_msr)(vcpu, &msr);
+	if (!ret)
+		*data = msr.data;
+	return ret;
+}
+
+static inline int kvm_emulate_rdmsr(struct kvm_vcpu *vcpu)
+{
+	u32 ecx = kvm_ecx_read(vcpu);
+	u64 data;
+
+	if (__kvm_get_msr(vcpu, ecx, &data, false))
+		return 0;
+
+	kvm_eax_write(vcpu, data & -1u);
+	kvm_edx_write(vcpu, (data >> 32) & -1u);
+	return kvm_skip_emulated_instruction(vcpu);
+}
+
+static inline int kvm_emulate_wrmsr(struct kvm_vcpu *vcpu)
+{
+	u32 ecx = kvm_ecx_read(vcpu);
+	u64 data = kvm_read_edx_eax(vcpu);
+
+	if (__kvm_set_msr(vcpu, ecx, data, false))
+		return 0;
+
+	return kvm_skip_emulated_instruction(vcpu);
 }
 
 static inline int kvm_emulate_rdtsc(struct kvm_vcpu *vcpu)
