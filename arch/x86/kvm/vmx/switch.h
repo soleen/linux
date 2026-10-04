@@ -21,6 +21,9 @@
 #include "../x86.h"
 
 #ifdef __CPU_PRESERVED_RUNTIME__
+static inline void vmx_switch_preempt_disable(void) {}
+static inline void vmx_switch_preempt_enable(void) {}
+
 static inline void vmx_switch_update_emulated_ref_flags(struct vcpu_vmx *vmx,
 							unsigned long old_rflags)
 {
@@ -55,6 +58,16 @@ static inline int vmx_switch_handle_exception(struct kvm_vcpu *vcpu,
 
 static void grow_ple_window(struct kvm_vcpu *vcpu);
 static int __vmx_handle_exception(struct kvm_vcpu *vcpu, u32 intr_info);
+
+static inline void vmx_switch_preempt_disable(void)
+{
+	preempt_disable();
+}
+
+static inline void vmx_switch_preempt_enable(void)
+{
+	preempt_enable();
+}
 
 static inline void vmx_switch_update_emulated_ref_flags(struct vcpu_vmx *vmx,
 							unsigned long old_rflags)
@@ -552,5 +565,48 @@ static inline int handle_exception_nmi(struct kvm_vcpu *vcpu)
 
 	return vmx_switch_handle_exception(vcpu, intr_info);
 }
+
+static __always_inline void __vmx_update_host_rsp(struct vcpu_vmx *vmx,
+						  unsigned long host_rsp)
+{
+	if (unlikely(host_rsp != vmx->loaded_vmcs->host_state.rsp)) {
+		vmx->loaded_vmcs->host_state.rsp = host_rsp;
+		vmcs_writel(HOST_RSP, host_rsp);
+	}
+}
+
+#ifdef CONFIG_X86_64
+static inline u64 vmx_read_guest_host_msr(struct vcpu_vmx *vmx, u32 msr,
+					  u64 *cache)
+{
+	vmx_switch_preempt_disable();
+	if (vmx->vt.guest_state_loaded)
+		*cache = read_msr(msr);
+	vmx_switch_preempt_enable();
+	return *cache;
+}
+
+static inline void vmx_write_guest_host_msr(struct vcpu_vmx *vmx, u32 msr,
+					    u64 data, u64 *cache)
+{
+	vmx_switch_preempt_disable();
+	if (vmx->vt.guest_state_loaded)
+		wrmsrns(msr, data);
+	vmx_switch_preempt_enable();
+	*cache = data;
+}
+
+static inline u64 vmx_read_guest_kernel_gs_base(struct vcpu_vmx *vmx)
+{
+	return vmx_read_guest_host_msr(vmx, MSR_KERNEL_GS_BASE,
+				       &vmx->msr_guest_kernel_gs_base);
+}
+
+static inline void vmx_write_guest_kernel_gs_base(struct vcpu_vmx *vmx, u64 data)
+{
+	vmx_write_guest_host_msr(vmx, MSR_KERNEL_GS_BASE, data,
+				 &vmx->msr_guest_kernel_gs_base);
+}
+#endif
 
 #endif /* __KVM_X86_VMX_SWITCH_H */
