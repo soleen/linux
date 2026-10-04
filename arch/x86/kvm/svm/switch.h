@@ -21,11 +21,76 @@ static inline int svm_get_cpl(struct kvm_vcpu *vcpu);
 
 #ifdef __CPU_PRESERVED_RUNTIME__
 static inline void svm_switch_cache_pdptrs(struct kvm_vcpu *vcpu) {}
+
+static inline void svm_switch_update_next_rip(struct kvm_vcpu *vcpu)
+{
+	struct vcpu_svm *svm = to_svm(vcpu);
+
+	if (svm->vmcb->control.next_rip != 0)
+		svm->next_rip = svm->vmcb->control.next_rip;
+}
+
+static inline int svm_switch_emulate_skip(struct kvm_vcpu *vcpu, int emul_type,
+					  bool commit_side_effects)
+{
+	struct vcpu_svm *svm = to_svm(vcpu);
+	u32 len = svm->vmcb->control.insn_len;
+
+	if (!len) {
+		switch (svm->vmcb->control.exit_code) {
+		case SVM_EXIT_HLT:
+		case SVM_EXIT_IDLE_HLT:
+			len = 1;
+			break;
+		case SVM_EXIT_RDTSC:
+		case SVM_EXIT_CPUID:
+		case SVM_EXIT_INVD:
+		case SVM_EXIT_PAUSE:
+		case SVM_EXIT_MSR:
+		case SVM_EXIT_WBINVD:
+			len = 2;
+			break;
+		default:
+			return 0;
+		}
+	}
+
+	kvm_rip_write(vcpu, kvm_rip_read(vcpu) + len);
+	return 1;
+}
 #else /* !__CPU_PRESERVED_RUNTIME__ */
 static inline void svm_switch_cache_pdptrs(struct kvm_vcpu *vcpu)
 {
 	if (npt_enabled)
 		load_pdptrs(vcpu, kvm_read_cr3(vcpu));
+}
+
+static inline void svm_switch_update_next_rip(struct kvm_vcpu *vcpu)
+{
+	struct vcpu_svm *svm = to_svm(vcpu);
+
+	if (nrips && svm->vmcb->control.next_rip != 0) {
+		WARN_ON_ONCE(!cpu_feature_enabled(X86_FEATURE_NRIPS));
+		svm->next_rip = svm->vmcb->control.next_rip;
+	}
+}
+
+static inline int svm_switch_emulate_skip(struct kvm_vcpu *vcpu, int emul_type,
+					  bool commit_side_effects)
+{
+	struct vcpu_svm *svm = to_svm(vcpu);
+	unsigned long old_rflags;
+
+	if (unlikely(!commit_side_effects))
+		old_rflags = svm->vmcb->save.rflags;
+
+	if (!kvm_emulate_instruction(vcpu, emul_type))
+		return 0;
+
+	if (unlikely(!commit_side_effects))
+		svm->vmcb->save.rflags = old_rflags;
+
+	return 1;
 }
 #endif /* __CPU_PRESERVED_RUNTIME__ */
 
@@ -192,6 +257,55 @@ static inline void svm_get_gdt(struct kvm_vcpu *vcpu, struct desc_ptr *dt)
 
 	dt->size = svm->vmcb->save.gdtr.limit;
 	dt->address = svm->vmcb->save.gdtr.base;
+}
+
+static inline u32 svm_get_interrupt_shadow(struct kvm_vcpu *vcpu)
+{
+	struct vcpu_svm *svm = to_svm(vcpu);
+	u32 ret = 0;
+
+	if (svm->vmcb->control.int_state & SVM_INTERRUPT_SHADOW_MASK)
+		ret = KVM_X86_SHADOW_INT_STI | KVM_X86_SHADOW_INT_MOV_SS;
+	return ret;
+}
+
+static inline void svm_set_interrupt_shadow(struct kvm_vcpu *vcpu, int mask)
+{
+	struct vcpu_svm *svm = to_svm(vcpu);
+
+	if (mask == 0)
+		svm->vmcb->control.int_state &= ~SVM_INTERRUPT_SHADOW_MASK;
+	else
+		svm->vmcb->control.int_state |= SVM_INTERRUPT_SHADOW_MASK;
+}
+
+static inline int __svm_skip_emulated_instruction(struct kvm_vcpu *vcpu,
+						  int emul_type,
+						  bool commit_side_effects)
+{
+	struct vcpu_svm *svm = to_svm(vcpu);
+
+	/*
+	 * SEV-ES does not expose the next RIP. The RIP update is controlled by
+	 * the type of exit and the #VC handler in the guest.
+	 */
+	if (is_sev_es_guest(vcpu))
+		goto done;
+
+	svm_switch_update_next_rip(vcpu);
+
+	if (!svm->next_rip) {
+		if (!svm_switch_emulate_skip(vcpu, emul_type, commit_side_effects))
+			return 0;
+	} else {
+		kvm_rip_write(vcpu, svm->next_rip);
+	}
+
+done:
+	if (likely(commit_side_effects))
+		svm_set_interrupt_shadow(vcpu, 0);
+
+	return 1;
 }
 
 #endif /* __KVM_X86_SVM_SWITCH_H */
