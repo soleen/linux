@@ -15,10 +15,17 @@
 
 #include "cpuid.h"
 #include "lapic.h"
+#include "regs.h"
+#include "x86.h"
 
 /*
  * Shared LAPIC register and IRR/PIR helpers (used by lapic.c and Caretaker).
  */
+static inline int apic_lvtt_tscdeadline(struct kvm_lapic *apic)
+{
+	return apic->lapic_timer.timer_mode == APIC_LVT_TIMER_TSCDEADLINE;
+}
+
 static inline bool ____kvm_apic_update_irr(unsigned long *pir, void *regs,
 					   int *max_irr)
 {
@@ -85,6 +92,16 @@ static inline int apic_find_highest_irr(struct kvm_lapic *apic)
 		return -1;
 
 	return apic_search_irr(apic);
+}
+
+static inline u64 __kvm_get_lapic_tscdeadline_msr(struct kvm_vcpu *vcpu)
+{
+	struct kvm_lapic *apic = vcpu->arch.apic;
+
+	if (!kvm_apic_present(vcpu) || !apic_lvtt_tscdeadline(apic))
+		return 0;
+
+	return apic->lapic_timer.tscdeadline;
 }
 
 /*
@@ -194,5 +211,16 @@ __kvm_cpuid(struct kvm_vcpu *vcpu, u32 *function, u32 index,
 	}
 
 	return entry;
+}
+
+static inline unsigned long __kvm_get_rflags(struct kvm_vcpu *vcpu)
+{
+	if (test_bit(VCPU_EXREG_RFLAGS, (ulong *)&vcpu->arch.regs_avail))
+		return vcpu->arch.regs[VCPU_REGS_RFLAGS];
+
+	if (test_bit(VCPU_EXREG_RFLAGS, (ulong *)&vcpu->arch.regs_dirty))
+		return vcpu->arch.regs[VCPU_REGS_RFLAGS];
+
+	return kvm_x86_call(get_rflags)(vcpu);
 }
 #endif /* __ARCH_X86_KVM_SWITCH_H */
