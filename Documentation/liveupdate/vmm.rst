@@ -256,8 +256,23 @@ VM & Guest_Memfd Preservation ABI
 .. kernel-doc:: include/linux/kho/abi/kvm.h
    :internal:
 
+KVM Caretaker (Orphaned VM Execution)
+=====================================
+
+.. kernel-doc:: virt/kvm/caretaker/main.c
+   :doc: KVM Caretaker Architecture and Lifecycle
+
+KVM Caretaker Core & Architecture API
+=====================================
+
+.. kernel-doc:: include/linux/kvm_caretaker.h
+
+.. kernel-doc:: virt/kvm/caretaker/main.c
+   :identifiers:
+
 See Also
 ========
 
 - :doc:`/core-api/liveupdate`
+- :doc:`/liveupdate/cpu_preservation`
 - :doc:`/userspace-api/liveupdate`
