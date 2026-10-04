@@ -609,4 +609,13 @@ static inline void vmx_write_guest_kernel_gs_base(struct vcpu_vmx *vmx, u64 data
 }
 #endif
 
+#ifdef __CPU_PRESERVED_RUNTIME__
+static int (*const kvm_vmx_exit_handlers[])(struct kvm_vcpu *vcpu) = {
+	[EXIT_REASON_EXCEPTION_NMI]           = handle_exception_nmi,
+	[EXIT_REASON_EXTERNAL_INTERRUPT]      = handle_external_interrupt,
+};
+static const int kvm_vmx_max_exit_handlers =
+	ARRAY_SIZE(kvm_vmx_exit_handlers);
+#endif /* __CPU_PRESERVED_RUNTIME__ */
+
 #endif /* __KVM_X86_VMX_SWITCH_H */
