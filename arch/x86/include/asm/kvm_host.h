@@ -1502,6 +1502,8 @@ enum kvm_x86_run_flags {
 	KVM_RUN_LOAD_DEBUGCTL		= BIT(2),
 };
 
+struct kvm_kho_pages;
+
 struct kvm_x86_ops {
 	const char *name;
 
@@ -1519,6 +1521,9 @@ struct kvm_x86_ops {
 	int (*vm_init)(struct kvm *kvm);
 	void (*vm_destroy)(struct kvm *kvm);
 	void (*vm_pre_destroy)(struct kvm *kvm);
+#ifdef CONFIG_KVM_CARETAKER
+	void (*vm_collect_kho)(struct kvm *kvm, struct kvm_kho_pages *acc);
+#endif
 
 	/* Create, but do not attach this VCPU */
 	int (*vcpu_precreate)(struct kvm *kvm);

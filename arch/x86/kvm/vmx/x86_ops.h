@@ -19,6 +19,9 @@ void vmx_disable_virtualization_cpu(void);
 void vmx_emergency_disable_virtualization_cpu(void);
 int vmx_vm_init(struct kvm *kvm);
 void vmx_vm_destroy(struct kvm *kvm);
+#if defined(CONFIG_KVM_CARETAKER) && defined(CONFIG_KVM_INTEL)
+void vmx_vm_collect_kho(struct kvm *kvm, struct kvm_kho_pages *acc);
+#endif
 int vmx_vcpu_precreate(struct kvm *kvm);
 int vmx_vcpu_create(struct kvm_vcpu *vcpu);
 fastpath_t vmx_vcpu_run(struct kvm_vcpu *vcpu, u64 run_flags);
