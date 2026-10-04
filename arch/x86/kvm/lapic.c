@@ -592,11 +592,6 @@ static inline int apic_lvt_enabled(struct kvm_lapic *apic, int lvt_type)
 	return !(kvm_lapic_get_reg(apic, lvt_type) & APIC_LVT_MASKED);
 }
 
-static inline int apic_lvtt_tscdeadline(struct kvm_lapic *apic)
-{
-	return apic->lapic_timer.timer_mode == APIC_LVT_TIMER_TSCDEADLINE;
-}
-
 static inline int apic_lvt_nmi_mode(u32 lvt_val)
 {
 	return (lvt_val & (APIC_MODE_MASK | APIC_LVT_MASKED)) == APIC_DM_NMI;
@@ -2678,12 +2673,7 @@ void kvm_free_lapic(struct kvm_vcpu *vcpu)
  */
 u64 kvm_get_lapic_tscdeadline_msr(struct kvm_vcpu *vcpu)
 {
-	struct kvm_lapic *apic = vcpu->arch.apic;
-
-	if (!kvm_apic_present(vcpu) || !apic_lvtt_tscdeadline(apic))
-		return 0;
-
-	return apic->lapic_timer.tscdeadline;
+	return __kvm_get_lapic_tscdeadline_msr(vcpu);
 }
 
 void kvm_set_lapic_tscdeadline_msr(struct kvm_vcpu *vcpu, u64 data)
