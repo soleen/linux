@@ -140,8 +140,6 @@ void kvm_apic_after_set_mcg_cap(struct kvm_vcpu *vcpu);
 bool kvm_apic_match_dest(struct kvm_vcpu *vcpu, struct kvm_lapic *source,
 			   int shorthand, unsigned int dest, int dest_mode);
 void kvm_apic_clear_irr(struct kvm_vcpu *vcpu, int vec);
-bool __kvm_apic_update_irr(unsigned long *pir, void *regs, int *max_irr);
-bool kvm_apic_update_irr(struct kvm_vcpu *vcpu, unsigned long *pir, int *max_irr);
 void kvm_apic_update_ppr(struct kvm_vcpu *vcpu);
 int kvm_apic_set_irq(struct kvm_vcpu *vcpu, struct kvm_lapic_irq *irq,
 		     struct rtc_status *rtc_status);
@@ -171,11 +169,6 @@ int kvm_pv_send_ipi(struct kvm *kvm, unsigned long ipi_bitmap_low,
 int kvm_apic_set_base(struct kvm_vcpu *vcpu, u64 value, bool host_initiated);
 int kvm_apic_get_state(struct kvm_vcpu *vcpu, struct kvm_lapic_state *s);
 int kvm_apic_set_state(struct kvm_vcpu *vcpu, struct kvm_lapic_state *s);
-int kvm_lapic_find_highest_irr(struct kvm_vcpu *vcpu);
-
-u64 kvm_get_lapic_tscdeadline_msr(struct kvm_vcpu *vcpu);
-void kvm_set_lapic_tscdeadline_msr(struct kvm_vcpu *vcpu, u64 data);
-
 void kvm_apic_write_nodecode(struct kvm_vcpu *vcpu, u32 offset);
 void kvm_apic_set_eoi_accelerated(struct kvm_vcpu *vcpu, int vector);
 
@@ -184,8 +177,15 @@ void kvm_lapic_sync_from_vapic(struct kvm_vcpu *vcpu);
 void kvm_lapic_sync_to_vapic(struct kvm_vcpu *vcpu);
 
 int kvm_x2apic_icr_write_fast(struct kvm_lapic *apic, u64 data);
+#ifndef __CPU_PRESERVED_RUNTIME__
+bool __kvm_apic_update_irr(unsigned long *pir, void *regs, int *max_irr);
+bool kvm_apic_update_irr(struct kvm_vcpu *vcpu, unsigned long *pir, int *max_irr);
+int kvm_lapic_find_highest_irr(struct kvm_vcpu *vcpu);
+u64 kvm_get_lapic_tscdeadline_msr(struct kvm_vcpu *vcpu);
+void kvm_set_lapic_tscdeadline_msr(struct kvm_vcpu *vcpu, u64 data);
 int kvm_x2apic_msr_write(struct kvm_vcpu *vcpu, u32 msr, u64 data);
 int kvm_x2apic_msr_read(struct kvm_vcpu *vcpu, u32 msr, u64 *data);
+#endif
 
 int kvm_hv_vapic_msr_write(struct kvm_vcpu *vcpu, u32 msr, u64 data);
 int kvm_hv_vapic_msr_read(struct kvm_vcpu *vcpu, u32 msr, u64 *data);
