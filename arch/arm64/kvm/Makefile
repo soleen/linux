@@ -13,6 +13,8 @@ obj-$(CONFIG_KVM) += hyp/
 CFLAGS_sys_regs.o += -Wno-override-init
 CFLAGS_handle_exit.o += -Wno-override-init
 
+kvm-$(CONFIG_KVM_CARETAKER) += caretaker/host.o
+
 kvm-y += arm.o mmu.o mmio.o psci.o hypercalls.o pvtime.o \
 	 inject_fault.o va_layout.o handle_exit.o config.o \
 	 guest.o debug.o reset.o sys_regs.o stacktrace.o \
