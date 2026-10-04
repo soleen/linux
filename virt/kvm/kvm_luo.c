@@ -124,6 +124,8 @@ static int kvm_luo_retrieve(struct liveupdate_file_op_args *args)
 	return 0;
 
 err_free_ser:
+	if (kvm_caretaker_has_quarantined_vcpu())
+		return err;
 	kvm_kho_folios_finish(KHOSER_LOAD_PTR(ser->kho_folios));
 	kho_restore_free(ser);
 	return err;
@@ -143,6 +145,9 @@ static void kvm_luo_unpreserve(struct liveupdate_file_op_args *args)
 	if (WARN_ON_ONCE(!args->serialized_data))
 		return;
 
+	if ((kvm && kvm->vm_bugged) || kvm_caretaker_has_quarantined_vcpu())
+		return;
+
 	ser = phys_to_virt(args->serialized_data);
 	if (kvm)
 		kvm->kho_folios = NULL;
@@ -159,6 +164,9 @@ static void kvm_luo_finish(struct liveupdate_file_op_args *args)
 		return;
 
 	if (!args->serialized_data)
+		return;
+
+	if ((kvm && kvm->vm_bugged) || kvm_caretaker_has_quarantined_vcpu())
 		return;
 
 	ser = phys_to_virt(args->serialized_data);
