@@ -15,6 +15,7 @@
 
 #include "cpuid.h"
 #include "lapic.h"
+#include "msrs.h"
 #include "regs.h"
 #include "x86.h"
 
@@ -131,6 +132,49 @@ static inline struct kvm_cpuid_entry2 *__kvm_find_cpuid_entry2(
 	return NULL;
 }
 
+#ifdef __CPU_PRESERVED_RUNTIME__
+#include "caretaker/caretaker.h"
+#endif
+
+static inline unsigned long __kvm_get_rflags(struct kvm_vcpu *vcpu)
+{
+	unsigned long rflags;
+
+	rflags = kvm_x86_call(get_rflags)(vcpu);
+	if (vcpu->guest_debug & KVM_GUESTDBG_SINGLESTEP)
+		rflags &= ~X86_EFLAGS_TF;
+	return rflags;
+}
+
+#ifdef __CPU_PRESERVED_RUNTIME__
+static inline unsigned long kvm_get_rflags(struct kvm_vcpu *vcpu)
+{
+	return __kvm_get_rflags(vcpu);
+}
+
+static inline bool kvm_apic_update_irr(struct kvm_vcpu *vcpu,
+				       unsigned long *pir, int *max_irr)
+{
+	return __kvm_apic_update_irr_vcpu(vcpu, pir, max_irr);
+}
+
+static inline int kvm_lapic_find_highest_irr(struct kvm_vcpu *vcpu)
+{
+	return apic_find_highest_irr(vcpu->arch.apic);
+}
+
+static inline u64 kvm_get_lapic_tscdeadline_msr(struct kvm_vcpu *vcpu)
+{
+	return __kvm_get_lapic_tscdeadline_msr(vcpu);
+}
+
+static inline struct kvm_cpuid_entry2 *kvm_find_cpuid_entry2(
+	struct kvm_cpuid_entry2 *entries, int nent, u32 function, u64 index)
+{
+	return __kvm_find_cpuid_entry2(entries, nent, function, index);
+}
+#endif /* __CPU_PRESERVED_RUNTIME__ */
+
 static inline struct kvm_cpuid_entry2 *
 get_out_of_range_cpuid_entry(struct kvm_vcpu *vcpu, u32 *fn_ptr, u32 index)
 {
@@ -155,26 +199,18 @@ get_out_of_range_cpuid_entry(struct kvm_vcpu *vcpu, u32 *fn_ptr, u32 index)
 	if (class && function <= class->eax)
 		return NULL;
 
-	/*
-	 * Leaf specific adjustments are also applied when redirecting to the
-	 * max basic entry, e.g. if the max basic leaf is 0xb but there is no
-	 * entry for CPUID.0xb.index (see below), then the output value for EDX
-	 * needs to be pulled from CPUID.0xb.1.
-	 */
 	*fn_ptr = basic->eax;
 
-	/*
-	 * The class does not exist or the requested function is out of range;
-	 * the effective CPUID entry is the max basic leaf.  Note, the index of
-	 * the original requested leaf is observed!
-	 */
 	return kvm_find_cpuid_entry_index(vcpu, basic->eax, index);
 }
 
-static inline struct kvm_cpuid_entry2 *
-__kvm_cpuid(struct kvm_vcpu *vcpu, u32 *function, u32 index,
-	    u32 *eax, u32 *ebx, u32 *ecx, u32 *edx,
-	    bool exact_only, bool *exact, bool *used_max_basic)
+static inline struct kvm_cpuid_entry2 *__kvm_cpuid(struct kvm_vcpu *vcpu,
+						   u32 *function, u32 index,
+						   u32 *eax, u32 *ebx,
+						   u32 *ecx, u32 *edx,
+						   bool exact_only,
+						   bool *exact,
+						   bool *used_max_basic)
 {
 	struct kvm_cpuid_entry2 *entry;
 
@@ -194,18 +230,12 @@ __kvm_cpuid(struct kvm_vcpu *vcpu, u32 *function, u32 index,
 		*edx = entry->edx;
 	} else {
 		*eax = *ebx = *ecx = *edx = 0;
-		/*
-		 * When leaf 0BH or 1FH is defined, CL is pass-through
-		 * and EDX is always the x2APIC ID, even for undefined
-		 * subleaves. Index 1 will exist iff the leaf is
-		 * implemented, so we pass through CL iff leaf 1
-		 * exists. EDX can be copied from any existing index.
-		 */
 		if (*function == 0xb || *function == 0x1f) {
-			entry = kvm_find_cpuid_entry_index(vcpu, *function, 1);
-			if (entry) {
+			struct kvm_cpuid_entry2 *sub =
+				kvm_find_cpuid_entry_index(vcpu, *function, 1);
+			if (sub) {
 				*ecx = index & 0xff;
-				*edx = entry->edx;
+				*edx = sub->edx;
 			}
 		}
 	}
@@ -213,14 +243,26 @@ __kvm_cpuid(struct kvm_vcpu *vcpu, u32 *function, u32 index,
 	return entry;
 }
 
-static inline unsigned long __kvm_get_rflags(struct kvm_vcpu *vcpu)
+#ifdef __CPU_PRESERVED_RUNTIME__
+static inline int kvm_skip_emulated_instruction(struct kvm_vcpu *vcpu)
 {
-	if (test_bit(VCPU_EXREG_RFLAGS, (ulong *)&vcpu->arch.regs_avail))
-		return vcpu->arch.regs[VCPU_REGS_RFLAGS];
-
-	if (test_bit(VCPU_EXREG_RFLAGS, (ulong *)&vcpu->arch.regs_dirty))
-		return vcpu->arch.regs[VCPU_REGS_RFLAGS];
-
-	return kvm_x86_call(get_rflags)(vcpu);
+	return kvm_x86_call(skip_emulated_instruction)(vcpu);
 }
+
+static inline int kvm_emulate_wbinvd(struct kvm_vcpu *vcpu)
+{
+	return kvm_skip_emulated_instruction(vcpu);
+}
+
+static inline int kvm_emulate_as_nop(struct kvm_vcpu *vcpu)
+{
+	return kvm_skip_emulated_instruction(vcpu);
+}
+
+static inline int kvm_emulate_invd(struct kvm_vcpu *vcpu)
+{
+	return kvm_emulate_as_nop(vcpu);
+}
+#endif /* __CPU_PRESERVED_RUNTIME__ */
+
 #endif /* __ARCH_X86_KVM_SWITCH_H */

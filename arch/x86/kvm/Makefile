@@ -8,7 +8,8 @@ include $(srctree)/virt/kvm/Makefile.kvm
 kvm-y			+= x86.o emulate.o irq.o lapic.o cpuid.o msrs.o pmu.o regs.o \
 			   mtrr.o debugfs.o mmu/mmu.o mmu/page_track.o mmu/spte.o
 kvm-$(CONFIG_LIVEUPDATE) += kvm_luo.o
-kvm-$(CONFIG_KVM_CARETAKER) += mmu/kho.o caretaker/host.o
+preserved-obj-$(CONFIG_KVM_CARETAKER) += caretaker/runtime.preserved.o
+kvm-$(CONFIG_KVM_CARETAKER) += mmu/kho.o caretaker/host.o $(preserved-obj-y)
 
 kvm-$(CONFIG_X86_64) += mmu/tdp_iter.o mmu/tdp_mmu.o
 kvm-$(CONFIG_KVM_IOAPIC) += i8259.o i8254.o ioapic.o
@@ -43,6 +44,9 @@ $(obj)/svm/vmenter.o: $(obj)/kvm-asm-offsets.h
 
 AFLAGS_vmx/vmenter.o    := -iquote $(obj)
 $(obj)/vmx/vmenter.o: $(obj)/kvm-asm-offsets.h
+
+include $(srctree)/scripts/Makefile.cpu_preserve
+
 
 $(obj)/kvm-asm-offsets.h: $(obj)/kvm-asm-offsets.s FORCE
 	$(call filechk,offsets,__KVM_ASM_OFFSETS_H__)
