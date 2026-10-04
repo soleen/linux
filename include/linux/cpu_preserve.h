@@ -112,6 +112,10 @@ void arch_cpu_preserved_dcache_inval(unsigned long start, unsigned long end)
 const struct cpumask *cpu_get_preserved_mask(void);
 struct cpu_preserved_stack_context *cpu_preserved_get_sctx(int cpu);
 
+struct attribute_group;
+extern const struct attribute_group cpu_preserve_attr_group;
+extern const struct attribute_group cpu_preserve_root_attr_group;
+
 /**
  * cpu_preserved_report_dead - Park preserved CPU when reporting dead in hotplug
  *
