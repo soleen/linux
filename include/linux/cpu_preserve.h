@@ -95,7 +95,85 @@ void arch_cpu_preserved_park_init(int cpu);
 void arch_cpu_preserved_dcache_clean(unsigned long start, unsigned long end);
 void arch_cpu_preserved_dcache_inval(unsigned long start, unsigned long end);
 
+const struct cpumask *cpu_get_preserved_mask(void);
+struct cpu_preserved_stack_context *cpu_preserved_get_sctx(int cpu);
+
+struct page;
+
+/**
+ * arch_cpu_preserved_setup_buffer - Map preserved execution buffer outside Scratch
+ * @text_page: Head page of allocated preserved text memory.
+ * @text_nr_pages: Number of pages in the preserved text buffer.
+ * @data_page: Head page of allocated preserved data memory.
+ * @data_nr_pages: Number of pages in the preserved data buffer.
+ *
+ * Architecture backend hook to remap kernel page table entries for
+ * .cpu_preserved.text and .cpu_preserved.data to the newly allocated
+ * pages outside Scratch memory.
+ *
+ * Return: 0 on success, or a negative errno on failure.
+ */
+int arch_cpu_preserved_setup_buffer(struct page *text_page,
+				    unsigned int text_nr_pages,
+				    struct page *data_page,
+				    unsigned int data_nr_pages);
+
+struct cpu_preserved_as_ser *cpu_preserved_as_create(void);
+void cpu_preserved_as_adopt(struct cpu_preserved_as_ser *ser);
+void cpu_preserved_as_unpreserve(struct cpu_preserved_as_ser *ser);
+void cpu_preserved_as_restore_free(struct cpu_preserved_as_ser *ser);
+int cpu_preserved_as_map(struct cpu_preserved_as_ser *as, phys_addr_t pa,
+			 unsigned long va, size_t size, pgprot_t prot);
+void cpu_preserved_as_unmap(struct cpu_preserved_as_ser *as,
+			    unsigned long va, size_t size);
+void cpu_preserved_free_kho(void *va, bool is_incoming);
+void *cpu_preserved_as_alloc_page(void *arg);
+
+/**
+ * arch_cpu_preserved_as_map - Add one range to a preserved address space
+ * @as: Address space to map into; its root PGD is at @as->pgd_pa.
+ * @pa: Physical address of the range.
+ * @va: Virtual address the range must appear at.
+ * @size: Size of the range in bytes.
+ * @prot: Protection to apply.
+ *
+ * Architecture backend for cpu_preserved_as_map(). Page table pages must be
+ * obtained from cpu_preserved_as_alloc_page() with @as as its argument, so
+ * that the core layer can preserve and later free them; the caller holds the
+ * mapping lock and takes care of cache maintenance and of the TLB.
+ *
+ * Return: 0 on success, or a negative errno on failure.
+ */
+int arch_cpu_preserved_as_map(struct cpu_preserved_as_ser *as, phys_addr_t pa,
+			      unsigned long va, size_t size, pgprot_t prot);
+
+/**
+ * arch_cpu_preserved_as_unmap - Remove one range from a preserved address space
+ * @as: Address space to unmap from; its root PGD is at @as->pgd_pa.
+ * @va: Virtual address of the range to unmap.
+ * @size: Size of the range in bytes.
+ *
+ * Clears page table entries covering [@va, @va + @size) in @as.
+ *
+ * Return: %true if any PTE was cleared, %false otherwise.
+ */
+bool arch_cpu_preserved_as_unmap(struct cpu_preserved_as_ser *as,
+				 unsigned long va, size_t size);
+
+/**
+ * arch_cpu_preserved_as_flush_tlb - Publish preserved page table updates
+ *
+ * Called after every successful arch_cpu_preserved_as_map() or
+ * arch_cpu_preserved_as_unmap(). Architectures whose preserved CPUs can hold
+ * stale translations for these address spaces must invalidate them here.
+ */
+void arch_cpu_preserved_as_flush_tlb(void);
+
 #else /* !CONFIG_LIVEUPDATE_CPU */
+
+#include <linux/kexec_handover.h>
+
+struct cpu_preserved_as_ser;
 
 static inline bool cpu_is_preserved(int cpu) { return false; }
 static inline void cpu_preserved_set_dead(void) {}
@@ -105,6 +183,37 @@ static inline void arch_cpu_preserved_dcache_clean(unsigned long start,
 						   unsigned long end) {}
 static inline void arch_cpu_preserved_dcache_inval(unsigned long start,
 						   unsigned long end) {}
+static inline const struct cpumask *cpu_get_preserved_mask(void)
+{
+	return cpu_none_mask;
+}
+
+static inline struct cpu_preserved_stack_context *
+cpu_preserved_get_sctx(int cpu)
+{
+	return NULL;
+}
+
+static inline void cpu_preserved_as_unmap(struct cpu_preserved_as_ser *as,
+					  unsigned long va, size_t size) {}
+
+static inline void cpu_preserved_free_kho(void *va, bool is_incoming)
+{
+	if (!va)
+		return;
+	if (is_incoming)
+		kho_restore_free(va);
+	else
+		kho_unpreserve_free(va);
+}
+
+static inline int arch_cpu_preserved_setup_buffer(struct page *text_page,
+						  unsigned int text_nr_pages,
+						  struct page *data_page,
+						  unsigned int data_nr_pages)
+{
+	return 0;
+}
 
 static __always_inline struct cpu_preserved_stack_context *
 cpu_preserved_get_stack_context(void)
