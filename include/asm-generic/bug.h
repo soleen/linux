@@ -57,6 +57,9 @@ struct bug_entry {
 	unsigned short	flags;
 };
 #endif	/* CONFIG_GENERIC_BUG */
+#endif	/* CONFIG_BUG */
+
+#if defined(CONFIG_BUG) && !defined(__CPU_PRESERVED_RUNTIME__)
 
 /*
  * Don't use BUG() or BUG_ON() unless there's really no way out; one
