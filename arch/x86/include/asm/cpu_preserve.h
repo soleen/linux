@@ -23,6 +23,10 @@
  * @cr2:        CR2 when it was taken.
  * @cr3:        CR3 when it was taken.
  * @nr_mce:     Number of machine checks the CPU recovered from.
+ * @abort_fn:   Set by the running workload, called once after the first
+ *              fault is recorded, so that the workload can restore the host
+ *              state and mark itself failed.
+ * @abort_data: Workload data for @abort_fn.
  *
  * Private to the runtime, reported by arch_cpu_preserved_wait_dead().
  */
@@ -35,6 +39,8 @@ struct x86_preserved_fault {
 	unsigned long cr2;
 	unsigned long cr3;
 	unsigned long nr_mce;
+	void (*abort_fn)(int cpu, const struct x86_preserved_fault *fault);
+	void *abort_data;
 };
 
 enum {

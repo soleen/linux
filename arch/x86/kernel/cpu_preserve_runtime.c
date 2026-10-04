@@ -137,6 +137,13 @@ static void __noreturn x86_preserved_fault(struct cpu_preserved_stack_context *s
 		f->cr3 = __native_read_cr3();
 		cpu_preserved_clean(f);
 
+		if (f->abort_fn) {
+			void (*abort_fn)(int, const struct x86_preserved_fault *) = f->abort_fn;
+
+			f->abort_fn = NULL;
+			abort_fn(sctx->cpu, f);
+		}
+
 		x86_preserved_virt_teardown();
 		if (sctx->ser) {
 			/* Pairs with the acquire in cpu_preserved_read_state() */
