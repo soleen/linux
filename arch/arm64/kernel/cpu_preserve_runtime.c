@@ -16,6 +16,7 @@
 #include <uapi/linux/psci.h>
 
 #include <asm/barrier.h>
+#include <asm/caretaker.h>
 #include <asm/cputype.h>
 #include <asm/daifflags.h>
 #include <asm/processor.h>
@@ -209,6 +210,13 @@ void arch_cpu_preserved_park_init(int cpu)
 	local_daif_mask();
 	write_sysreg((unsigned long)arm64_preserved_vectors, vbar_el1);
 	isb();
+
+#if IS_ENABLED(CONFIG_KVM_CARETAKER)
+	if (read_sysreg(CurrentEL) == CurrentEL_EL2) {
+		write_sysreg_s((unsigned long)caretaker_hyp_vector, SYS_VBAR_EL2);
+		isb();
+	}
+#endif
 
 	if ((read_sysreg(ttbr1_el1) & TTBRx_EL1_BADDR) !=
 	    arm64_pgd_to_ttbr1(sctx->session_pgd_pa))
