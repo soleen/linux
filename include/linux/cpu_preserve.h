@@ -112,6 +112,8 @@ const struct cpumask *cpu_get_preserved_mask(void);
 struct cpu_preserved_stack_context *cpu_preserved_get_sctx(int cpu);
 
 struct page;
+struct liveupdate_session;
+struct cpu_preserved_session;
 
 /**
  * arch_cpu_preserved_setup_buffer - Prepare the copy of the preserved runtime
@@ -140,6 +142,11 @@ void cpu_preserved_as_unmap(struct cpu_preserved_as_ser *as,
 			    unsigned long va, size_t size);
 void cpu_preserved_free_kho(void *va, bool is_incoming);
 void *cpu_preserved_as_alloc_page(void *arg);
+
+struct cpu_preserved_session *cpu_preserved_session_get(struct liveupdate_session *s);
+void cpu_preserved_session_put(struct cpu_preserved_session *ps);
+struct cpu_preserved_as_ser *cpu_preserved_session_as(struct cpu_preserved_session *ps);
+const struct cpumask *cpu_preserved_session_cpus(struct cpu_preserved_session *ps);
 
 /**
  * arch_cpu_preserved_as_map - Add one range to a preserved address space

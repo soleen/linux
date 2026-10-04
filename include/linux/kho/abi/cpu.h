@@ -111,10 +111,24 @@ struct cpu_preserved_as_ser {
 static_assert(sizeof(struct cpu_preserved_as_ser) == 32);
 
 /**
+ * struct cpu_preserved_session_ser - Serialized preserved CPU session metadata
+ * @as: Preservation pointer to struct cpu_preserved_as_ser.
+ *
+ * The CPUs of a session are the handed-over CPUs whose descriptors point to
+ * it.
+ */
+struct cpu_preserved_session_ser {
+	DECLARE_KHOSER_PTR(as, struct cpu_preserved_as_ser *);
+};
+
+static_assert(sizeof(struct cpu_preserved_session_ser) == 8);
+
+/**
  * struct cpu_preserved_ser - Serialized state for preserved CPU
  * @cpu:      Logical CPU number in the preserving kernel, for information.
  * @state:    Preserved workload state (enum cpu_preserved_workload).
  * @stack_pa: Physical address of this CPU's preserved stack.
+ * @session:  Preservation pointer to preserved CPU session serialized metadata.
  * @hwid:     Hardware identifier of the CPU, as arch_match_cpu_phys_id() takes.
  * @next:     Preservation pointer to the next CPU handed over, or 0.
  *
@@ -125,12 +139,13 @@ struct cpu_preserved_ser {
 	u32 cpu;
 	u32 state;
 	u64 stack_pa;
+	DECLARE_KHOSER_PTR(session, struct cpu_preserved_session_ser *);
 	u64 hwid;
 	DECLARE_KHOSER_PTR(next, struct cpu_preserved_ser *);
 };
 
 static_assert(offsetof(struct cpu_preserved_ser, state) == 4,
 	      "state is updated with cmpxchg and must be naturally aligned");
-static_assert(sizeof(struct cpu_preserved_ser) == 32);
+static_assert(sizeof(struct cpu_preserved_ser) == 40);
 
 #endif /* _LINUX_KHO_ABI_CPU_H */
