@@ -249,6 +249,13 @@ static inline int kvm_skip_emulated_instruction(struct kvm_vcpu *vcpu)
 	return kvm_x86_call(skip_emulated_instruction)(vcpu);
 }
 
+static inline int kvm_emulate_halt(struct kvm_vcpu *vcpu)
+{
+	++vcpu->stat.halt_exits;
+	cpu_relax();
+	return kvm_skip_emulated_instruction(vcpu);
+}
+
 static inline int kvm_emulate_wbinvd(struct kvm_vcpu *vcpu)
 {
 	return kvm_skip_emulated_instruction(vcpu);
