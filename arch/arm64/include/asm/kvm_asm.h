@@ -284,11 +284,15 @@ extern void __kvm_adjust_pc(struct kvm_vcpu *vcpu);
 extern bool __vgic_v3_get_gic_config(void);
 extern void __vgic_v3_init_lrs(void);
 
+#ifdef __CPU_PRESERVED_RUNTIME__
+#define __KVM_EXTABLE(from, to)
+#else
 #define __KVM_EXTABLE(from, to)						\
 	"	.pushsection	__kvm_ex_table, \"a\"\n"		\
 	"	.align		3\n"					\
 	"	.long		(" #from " - .), (" #to " - .)\n"	\
 	"	.popsection\n"
+#endif
 
 
 #define __kvm_at(at_op, addr)						\
@@ -363,10 +367,12 @@ void __noreturn __cold nvhe_hyp_panic_handler(u64 esr, u64 spsr, u64 elr_virt,
  * code to write to it, and that SPSR_EL2 and ELR_EL2 are restored by the fixup.
  */
 .macro	_kvm_extable, from, to
+#ifndef __CPU_PRESERVED_RUNTIME__
 	.pushsection	__kvm_ex_table, "a"
 	.align		3
 	.long		(\from - .), (\to - .)
 	.popsection
+#endif
 .endm
 
 #define CPU_XREG_OFFSET(x)	(CPU_USER_PT_REGS + 8*x)

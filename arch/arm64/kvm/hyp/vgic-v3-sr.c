@@ -316,7 +316,8 @@ void __vgic_v3_activate_traps(struct vgic_v3_cpu_if *cpu_if)
 	}
 
 	/* Only disable SRE if the host implements the GICv2 interface */
-	if (static_branch_unlikely(&vgic_v3_has_v2_compat)) {
+	if (!__is_defined(__CPU_PRESERVED_RUNTIME__) &&
+	    static_branch_unlikely(&vgic_v3_has_v2_compat)) {
 		/*
 		 * Prevent the guest from touching the ICC_SRE_EL1 system
 		 * register. Note that this may not have any effect, as
@@ -332,7 +333,8 @@ void __vgic_v3_activate_traps(struct vgic_v3_cpu_if *cpu_if)
 	 * also applies if we don't expect any system register access (no
 	 * vgic at all). In any case, no need to provide MI configuration.
 	 */
-	if (static_branch_unlikely(&vgic_v3_cpuif_trap) ||
+	if ((!__is_defined(__CPU_PRESERVED_RUNTIME__) &&
+	     static_branch_unlikely(&vgic_v3_cpuif_trap)) ||
 	    cpu_if->its_vpe.its_vm || !cpu_if->vgic_sre)
 		write_gicreg(vgic_ich_hcr_trap_bits() | ICH_HCR_EL2_En, ICH_HCR_EL2);
 }
@@ -342,7 +344,8 @@ void __vgic_v3_deactivate_traps(struct vgic_v3_cpu_if *cpu_if)
 	u64 val;
 
 	/* Only restore SRE if the host implements the GICv2 interface */
-	if (static_branch_unlikely(&vgic_v3_has_v2_compat)) {
+	if (!__is_defined(__CPU_PRESERVED_RUNTIME__) &&
+	    static_branch_unlikely(&vgic_v3_has_v2_compat)) {
 		val = read_gicreg(ICC_SRE_EL2);
 		write_gicreg(val | ICC_SRE_EL2_ENABLE, ICC_SRE_EL2);
 
@@ -357,7 +360,8 @@ void __vgic_v3_deactivate_traps(struct vgic_v3_cpu_if *cpu_if)
 	 * If we were trapping system registers, we enabled the VGIC even if
 	 * no interrupts were being injected, and we disable it again here.
 	 */
-	if (static_branch_unlikely(&vgic_v3_cpuif_trap) ||
+	if ((!__is_defined(__CPU_PRESERVED_RUNTIME__) &&
+	     static_branch_unlikely(&vgic_v3_cpuif_trap)) ||
 	    cpu_if->its_vpe.its_vm || !cpu_if->vgic_sre)
 		write_gicreg(0, ICH_HCR_EL2);
 }

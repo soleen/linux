@@ -821,7 +821,8 @@ static inline bool kvm_hyp_handle_sysreg(struct kvm_vcpu *vcpu, u64 *exit_code)
 	    handle_ampere1_tcr(vcpu))
 		return true;
 
-	if (static_branch_unlikely(&vgic_v3_cpuif_trap) &&
+	if ((__is_defined(__CPU_PRESERVED_RUNTIME__) ||
+	     static_branch_unlikely(&vgic_v3_cpuif_trap)) &&
 	    __vgic_v3_perform_cpuif_access(vcpu) == 1)
 		return true;
 
@@ -833,7 +834,8 @@ static inline bool kvm_hyp_handle_sysreg(struct kvm_vcpu *vcpu, u64 *exit_code)
 
 static inline bool kvm_hyp_handle_cp15_32(struct kvm_vcpu *vcpu, u64 *exit_code)
 {
-	if (static_branch_unlikely(&vgic_v3_cpuif_trap) &&
+	if ((__is_defined(__CPU_PRESERVED_RUNTIME__) ||
+	     static_branch_unlikely(&vgic_v3_cpuif_trap)) &&
 	    __vgic_v3_perform_cpuif_access(vcpu) == 1)
 		return true;
 
@@ -856,7 +858,8 @@ static inline bool kvm_hyp_handle_dabt_low(struct kvm_vcpu *vcpu, u64 *exit_code
 	if (kvm_hyp_handle_memory_fault(vcpu, exit_code))
 		return true;
 
-	if (static_branch_unlikely(&vgic_v2_cpuif_trap)) {
+	if (!__is_defined(__CPU_PRESERVED_RUNTIME__) &&
+	    static_branch_unlikely(&vgic_v2_cpuif_trap)) {
 		bool valid;
 
 		valid = kvm_vcpu_trap_is_translation_fault(vcpu) &&
@@ -988,7 +991,11 @@ static inline void __kvm_unexpected_el2_exception(void)
 	}
 
 	/* Trigger a panic after restoring the hyp context. */
+#ifdef __CPU_PRESERVED_RUNTIME__
+	kvm_hyp_ctxt[0].sys_regs[ELR_EL2] = elr_el2;
+#else
 	this_cpu_ptr(&kvm_hyp_ctxt)->sys_regs[ELR_EL2] = elr_el2;
+#endif
 	write_sysreg(__guest_exit_restore_elr_and_panic, elr_el2);
 }
 

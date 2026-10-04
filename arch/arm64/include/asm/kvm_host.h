@@ -988,8 +988,8 @@ struct kvm_vcpu_arch {
  * Note that the set/clear accessors must be preempt-safe in order to
  * avoid nesting them with load/put which also manipulate flags...
  */
-#ifdef __KVM_NVHE_HYPERVISOR__
-/* the nVHE hypervisor is always non-preemptible */
+#if defined(__KVM_NVHE_HYPERVISOR__) || defined(__CPU_PRESERVED_RUNTIME__)
+/* the nVHE hypervisor and preserved runtime are always non-preemptible */
 #define __vcpu_flags_preempt_disable()
 #define __vcpu_flags_preempt_enable()
 #else
@@ -1372,8 +1372,6 @@ static inline bool kvm_arm_is_pvtime_enabled(struct kvm_vcpu_arch *vcpu_arch)
 
 struct kvm_vcpu *kvm_mpidr_to_vcpu(struct kvm *kvm, unsigned long mpidr);
 
-DECLARE_KVM_HYP_PER_CPU(struct kvm_host_data, kvm_host_data);
-
 /*
  * How we access per-CPU host data depends on the where we access it from,
  * and the mode we're in:
@@ -1391,9 +1389,15 @@ DECLARE_KVM_HYP_PER_CPU(struct kvm_host_data, kvm_host_data);
  *
  * Yes, this is all totally trivial. Shoot me now.
  */
-#if defined(__KVM_NVHE_HYPERVISOR__) || defined(__KVM_VHE_HYPERVISOR__)
+#if defined(__CPU_PRESERVED_RUNTIME__)
+extern struct kvm_host_data kvm_host_data[];
+struct kvm_host_data *caretaker_current_host_data(void);
+#define host_data_ptr(f)	(&caretaker_current_host_data()->f)
+#elif defined(__KVM_NVHE_HYPERVISOR__) || defined(__KVM_VHE_HYPERVISOR__)
+DECLARE_KVM_HYP_PER_CPU(struct kvm_host_data, kvm_host_data);
 #define host_data_ptr(f)	(&this_cpu_ptr(&kvm_host_data)->f)
 #else
+DECLARE_KVM_HYP_PER_CPU(struct kvm_host_data, kvm_host_data);
 #define host_data_ptr(f)						\
 	(static_branch_unlikely(&kvm_protected_mode_initialized) ?	\
 	 &this_cpu_ptr(&kvm_host_data)->f :				\
