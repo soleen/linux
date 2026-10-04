@@ -4,9 +4,11 @@
 
 #include "reverse_cpuid.h"
 #include <asm/cpu.h>
+#include <asm/cpuid/api.h>
 #include <asm/processor.h>
 #include <uapi/asm/kvm_para.h>
 
+#include "kvm_emulate.h"
 #include "smm.h"
 
 extern u32 kvm_cpu_caps[NR_KVM_CPU_CAPS] __read_mostly;
@@ -23,8 +25,7 @@ static inline void kvm_finalize_cpu_caps(void)
 void kvm_vcpu_after_set_cpuid(struct kvm_vcpu *vcpu);
 int kvm_set_cpuid(struct kvm_vcpu *vcpu, struct kvm_cpuid_entry2 *e2, int nent);
 void kvm_get_cpuid(struct kvm_vcpu *vcpu, struct kvm_cpuid2 *cpuid);
-struct kvm_cpuid_entry2 *kvm_find_cpuid_entry2(struct kvm_cpuid_entry2 *entries,
-					       int nent, u32 function, u64 index);
+
 /*
  * Magic value used by KVM when querying userspace-provided CPUID entries and
  * doesn't care about the CPIUD index because the index of the function in
@@ -36,6 +37,14 @@ struct kvm_cpuid_entry2 *kvm_find_cpuid_entry2(struct kvm_cpuid_entry2 *entries,
  * kvm_find_cpuid_entry2() and kvm_find_cpuid_entry().
  */
 #define KVM_CPUID_INDEX_NOT_SIGNIFICANT -1ull
+
+#ifdef __CPU_PRESERVED_RUNTIME__
+static inline struct kvm_cpuid_entry2 *kvm_find_cpuid_entry2(
+	struct kvm_cpuid_entry2 *entries, int nent, u32 function, u64 index);
+#else
+struct kvm_cpuid_entry2 *kvm_find_cpuid_entry2(struct kvm_cpuid_entry2 *entries,
+					       int nent, u32 function, u64 index);
+#endif
 
 static inline struct kvm_cpuid_entry2 *kvm_find_cpuid_entry_index(struct kvm_vcpu *vcpu,
 								  u32 function, u32 index)
@@ -63,8 +72,10 @@ int kvm_vcpu_ioctl_set_cpuid2(struct kvm_vcpu *vcpu,
 int kvm_vcpu_ioctl_get_cpuid2(struct kvm_vcpu *vcpu,
 			      struct kvm_cpuid2 *cpuid,
 			      struct kvm_cpuid_entry2 __user *entries);
+#ifndef __CPU_PRESERVED_RUNTIME__
 bool kvm_cpuid(struct kvm_vcpu *vcpu, u32 *eax, u32 *ebx,
 	       u32 *ecx, u32 *edx, bool exact_only);
+#endif
 
 void __init kvm_init_xstate_sizes(void);
 u32 xstate_required_size(u64 xstate_bv, bool compacted);

@@ -169,6 +169,7 @@ int kvm_pv_send_ipi(struct kvm *kvm, unsigned long ipi_bitmap_low,
 int kvm_apic_set_base(struct kvm_vcpu *vcpu, u64 value, bool host_initiated);
 int kvm_apic_get_state(struct kvm_vcpu *vcpu, struct kvm_lapic_state *s);
 int kvm_apic_set_state(struct kvm_vcpu *vcpu, struct kvm_lapic_state *s);
+
 void kvm_apic_write_nodecode(struct kvm_vcpu *vcpu, u32 offset);
 void kvm_apic_set_eoi_accelerated(struct kvm_vcpu *vcpu, int vector);
 
@@ -212,9 +213,15 @@ static inline u32 kvm_lapic_get_reg(struct kvm_lapic *apic, int reg_off)
 
 DECLARE_STATIC_KEY_FALSE(kvm_has_noapic_vcpu);
 
+#ifdef __CPU_PRESERVED_RUNTIME__
+#define kvm_lapic_static_branch_unlikely(key)	true
+#else
+#define kvm_lapic_static_branch_unlikely(key)	static_branch_unlikely(key)
+#endif
+
 static inline bool lapic_in_kernel(struct kvm_vcpu *vcpu)
 {
-	if (static_branch_unlikely(&kvm_has_noapic_vcpu))
+	if (kvm_lapic_static_branch_unlikely(&kvm_has_noapic_vcpu))
 		return vcpu->arch.apic;
 	return true;
 }
@@ -223,7 +230,7 @@ extern struct static_key_false_deferred apic_hw_disabled;
 
 static inline bool kvm_apic_hw_enabled(struct kvm_lapic *apic)
 {
-	if (static_branch_unlikely(&apic_hw_disabled.key))
+	if (kvm_lapic_static_branch_unlikely(&apic_hw_disabled.key))
 		return apic->vcpu->arch.apic_base & MSR_IA32_APICBASE_ENABLE;
 	return true;
 }
@@ -232,7 +239,7 @@ extern struct static_key_false_deferred apic_sw_disabled;
 
 static inline bool kvm_apic_sw_enabled(struct kvm_lapic *apic)
 {
-	if (static_branch_unlikely(&apic_sw_disabled.key))
+	if (kvm_lapic_static_branch_unlikely(&apic_sw_disabled.key))
 		return apic->sw_enabled;
 	return true;
 }

@@ -10,6 +10,7 @@
 
 #ifdef __ASSEMBLER__
 .macro RESTORE_GUEST_SPEC_CTRL_BODY guest_spec_ctrl:req, label:req
+#ifndef __CPU_PRESERVED_RUNTIME__
 	/*
 	 * SPEC_CTRL handling: if the guest's SPEC_CTRL value differs from the
 	 * host's, write the MSR.  This is kept out-of-line so that the common
@@ -37,9 +38,11 @@
 #endif
 	mov $MSR_IA32_SPEC_CTRL, %ecx
 	wrmsr
+#endif
 .endm
 
 .macro RESTORE_HOST_SPEC_CTRL_BODY guest_spec_ctrl:req, enter_flags:req, label:req
+#ifndef __CPU_PRESERVED_RUNTIME__
 	/* Same for after vmexit.  */
 	mov $MSR_IA32_SPEC_CTRL, %ecx
 
@@ -76,6 +79,7 @@
 	ALTERNATIVE __stringify(je \label), "", X86_FEATURE_KERNEL_IBRS
 #endif
 	wrmsr
+#endif
 .endm
 
 #define WORD_SIZE (BITS_PER_LONG / 8)

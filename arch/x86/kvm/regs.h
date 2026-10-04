@@ -162,8 +162,12 @@ __BUILD_KVM_GPR_ACCESSORS(r15, R15)
  * touch the cache, it runs after the cache is reset (post VM-Exit), and PMIs
  * need to access several registers that are cacheable.
  */
+#ifdef __CPU_PRESERVED_RUNTIME__
+#define kvm_assert_register_caching_allowed(vcpu) do { } while (0)
+#else
 #define kvm_assert_register_caching_allowed(vcpu)		\
 	lockdep_assert_once(in_task() || kvm_arch_pmi_in_guest(vcpu))
+#endif
 
 /*
  * avail  dirty
@@ -498,7 +502,9 @@ static inline void kvm_get_segment(struct kvm_vcpu *vcpu,
 unsigned long kvm_get_linear_rip(struct kvm_vcpu *vcpu);
 bool kvm_is_linear_rip(struct kvm_vcpu *vcpu, unsigned long linear_rip);
 
+#ifndef __CPU_PRESERVED_RUNTIME__
 unsigned long kvm_get_rflags(struct kvm_vcpu *vcpu);
+#endif
 void __kvm_set_rflags(struct kvm_vcpu *vcpu, unsigned long rflags);
 void kvm_set_rflags(struct kvm_vcpu *vcpu, unsigned long rflags);
 
