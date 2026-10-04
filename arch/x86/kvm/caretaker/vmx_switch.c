@@ -297,9 +297,12 @@ static void vmx_caretaker_post_exit(void *page)
 }
 
 static const struct kvm_x86_ops vmx_caretaker_x86_ops = {
+	.get_msr = vmx_get_msr,
+	.set_msr = vmx_set_msr,
 	.get_segment = __vmx_get_segment,
 	.get_gdt = __vmx_get_gdt,
 	.get_idt = __vmx_get_idt,
+	.get_cpl = __vmx_get_cpl_cached,
 	.get_cs_db_l_bits = __vmx_get_cs_db_l_bits,
 	.cache_reg = __vmx_cache_reg,
 	.get_rflags = __vmx_get_rflags,

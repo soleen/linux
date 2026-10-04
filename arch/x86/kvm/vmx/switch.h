@@ -610,12 +610,184 @@ static inline void vmx_write_guest_kernel_gs_base(struct vcpu_vmx *vmx, u64 data
 #endif
 
 #ifdef __CPU_PRESERVED_RUNTIME__
+static inline int __vmx_get_cpl_cached(struct kvm_vcpu *vcpu)
+{
+	return __vmx_get_cpl(vcpu, false);
+}
+
+static inline int vmx_get_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+{
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
+
+	switch (msr_info->index) {
+#ifdef CONFIG_X86_64
+	case MSR_FS_BASE:
+		msr_info->data = vmcs_readl(GUEST_FS_BASE);
+		break;
+	case MSR_GS_BASE:
+		msr_info->data = vmcs_readl(GUEST_GS_BASE);
+		break;
+	case MSR_KERNEL_GS_BASE:
+		msr_info->data = vmx_read_guest_kernel_gs_base(vmx);
+		break;
+	case MSR_STAR:
+	case MSR_LSTAR:
+	case MSR_SYSCALL_MASK:
+		msr_info->data = read_msr(msr_info->index);
+		break;
+#endif
+	case MSR_EFER:
+		return kvm_get_msr_common(vcpu, msr_info);
+	case MSR_IA32_UMWAIT_CONTROL:
+		if (!msr_info->host_initiated && !vmx_has_waitpkg(vmx))
+			return 1;
+		msr_info->data = vmx->msr_ia32_umwait_control;
+		break;
+	case MSR_IA32_SYSENTER_CS:
+		msr_info->data = vmcs_read32(GUEST_SYSENTER_CS);
+		break;
+	case MSR_IA32_SYSENTER_EIP:
+		msr_info->data = vmcs_readl(GUEST_SYSENTER_EIP);
+		break;
+	case MSR_IA32_SYSENTER_ESP:
+		msr_info->data = vmcs_readl(GUEST_SYSENTER_ESP);
+		break;
+	case MSR_IA32_BNDCFGS:
+		if (!kvm_mpx_supported() ||
+		    (!msr_info->host_initiated &&
+		     !guest_cpu_cap_has(vcpu, X86_FEATURE_MPX)))
+			return 1;
+		msr_info->data = vmcs_read64(GUEST_BNDCFGS);
+		break;
+	case MSR_IA32_MCG_EXT_CTL:
+		if (!msr_info->host_initiated &&
+		    !(vmx->msr_ia32_feature_control & FEAT_CTL_LMCE_ENABLED))
+			return 1;
+		msr_info->data = vcpu->arch.mcg_ext_ctl;
+		break;
+	case MSR_IA32_FEAT_CTL:
+		msr_info->data = vmx->msr_ia32_feature_control;
+		break;
+	case MSR_IA32_SGXLEPUBKEYHASH0 ... MSR_IA32_SGXLEPUBKEYHASH3:
+		if (!msr_info->host_initiated &&
+		    !guest_cpu_cap_has(vcpu, X86_FEATURE_SGX_LC))
+			return 1;
+		msr_info->data = vmx->msr_ia32_sgxlepubkeyhash
+			[msr_info->index - MSR_IA32_SGXLEPUBKEYHASH0];
+		break;
+	case MSR_IA32_S_CET:
+		msr_info->data = vmcs_readl(GUEST_S_CET);
+		break;
+	case MSR_KVM_INTERNAL_GUEST_SSP:
+		msr_info->data = vmcs_readl(GUEST_SSP);
+		break;
+	case MSR_IA32_INT_SSP_TAB:
+		msr_info->data = vmcs_readl(GUEST_INTR_SSP_TABLE);
+		break;
+	case MSR_IA32_DEBUGCTLMSR:
+		msr_info->data = vmx_guest_debugctl_read();
+		break;
+	default:
+		return kvm_get_msr_common(vcpu, msr_info);
+	}
+
+	return 0;
+}
+
+static inline int vmx_set_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+{
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
+	u32 msr_index = msr_info->index;
+	u64 data = msr_info->data;
+
+	switch (msr_index) {
+	case MSR_EFER:
+		return kvm_set_msr_common(vcpu, msr_info);
+#ifdef CONFIG_X86_64
+	case MSR_FS_BASE:
+		vmx_segment_cache_clear(vmx);
+		vmcs_writel(GUEST_FS_BASE, data);
+		break;
+	case MSR_GS_BASE:
+		vmx_segment_cache_clear(vmx);
+		vmcs_writel(GUEST_GS_BASE, data);
+		break;
+	case MSR_KERNEL_GS_BASE:
+		vmx_write_guest_kernel_gs_base(vmx, data);
+		break;
+	case MSR_STAR:
+	case MSR_LSTAR:
+	case MSR_SYSCALL_MASK:
+		if (wrmsrq_safe(msr_index, data))
+			return 1;
+		break;
+#endif
+	case MSR_IA32_SYSENTER_CS:
+		vmcs_write32(GUEST_SYSENTER_CS, data);
+		break;
+	case MSR_IA32_SYSENTER_EIP:
+		vmcs_writel(GUEST_SYSENTER_EIP, data);
+		break;
+	case MSR_IA32_SYSENTER_ESP:
+		vmcs_writel(GUEST_SYSENTER_ESP, data);
+		break;
+	case MSR_IA32_BNDCFGS:
+		if (!kvm_mpx_supported() ||
+		    (!msr_info->host_initiated &&
+		     !guest_cpu_cap_has(vcpu, X86_FEATURE_MPX)))
+			return 1;
+		if (is_noncanonical_msr_address(data & PAGE_MASK, vcpu) ||
+		    (data & MSR_IA32_BNDCFGS_RSVD))
+			return 1;
+		vmcs_write64(GUEST_BNDCFGS, data);
+		break;
+	case MSR_IA32_UMWAIT_CONTROL:
+		if (!msr_info->host_initiated && !vmx_has_waitpkg(vmx))
+			return 1;
+		if (data & (BIT_ULL(1) | GENMASK_ULL(63, 32)))
+			return 1;
+		vmx->msr_ia32_umwait_control = data;
+		break;
+	case MSR_IA32_MCG_EXT_CTL:
+		if ((!msr_info->host_initiated &&
+		     !(vmx->msr_ia32_feature_control & FEAT_CTL_LMCE_ENABLED)) ||
+		    (data & ~MCG_EXT_CTL_LMCE_EN))
+			return 1;
+		vcpu->arch.mcg_ext_ctl = data;
+		break;
+	case MSR_IA32_SGXLEPUBKEYHASH0 ... MSR_IA32_SGXLEPUBKEYHASH3:
+		if (!msr_info->host_initiated &&
+		    (!guest_cpu_cap_has(vcpu, X86_FEATURE_SGX_LC) ||
+		    ((vmx->msr_ia32_feature_control & FEAT_CTL_LOCKED) &&
+		    !(vmx->msr_ia32_feature_control & FEAT_CTL_SGX_LC_ENABLED))))
+			return 1;
+		vmx->msr_ia32_sgxlepubkeyhash
+			[msr_index - MSR_IA32_SGXLEPUBKEYHASH0] = data;
+		break;
+	case MSR_IA32_S_CET:
+		vmcs_writel(GUEST_S_CET, data);
+		break;
+	case MSR_KVM_INTERNAL_GUEST_SSP:
+		vmcs_writel(GUEST_SSP, data);
+		break;
+	case MSR_IA32_INT_SSP_TAB:
+		vmcs_writel(GUEST_INTR_SSP_TABLE, data);
+		break;
+	default:
+		return kvm_set_msr_common(vcpu, msr_info);
+	}
+
+	return 0;
+}
+
 static int (*const kvm_vmx_exit_handlers[])(struct kvm_vcpu *vcpu) = {
 	[EXIT_REASON_EXCEPTION_NMI]           = handle_exception_nmi,
 	[EXIT_REASON_EXTERNAL_INTERRUPT]      = handle_external_interrupt,
 	[EXIT_REASON_CPUID]                   = kvm_emulate_cpuid,
 	[EXIT_REASON_HLT]                     = kvm_emulate_halt,
 	[EXIT_REASON_RDTSC]                   = kvm_emulate_rdtsc,
+	[EXIT_REASON_MSR_READ]                = kvm_emulate_rdmsr,
+	[EXIT_REASON_MSR_WRITE]               = kvm_emulate_wrmsr,
 	[EXIT_REASON_PAUSE_INSTRUCTION]       = handle_pause,
 };
 static const int kvm_vmx_max_exit_handlers =
