@@ -72,7 +72,8 @@ struct kvm_x86_ops;
  * @kernel_gs_base:   Guest MSR_KERNEL_GS_BASE switched across VMX entry/exit.
  * @save_guest_fpu:   True if guest FPU state can be captured via XSAVE at detach.
  * @gdt:              Per-vCPU preserved GDT containing the active Caretaker TSS.
- * @tss:              Per-vCPU hardware TSS whose SP0/IST point to @stack.
+ * @tss:              Per-vCPU hardware TSS whose SP0 points to @stack. Each
+ *                    run copies in the IST pointers of the CPU that runs it.
  * @stack:            2 KB standalone host stack occupying the upper half of the
  *                    page ([2048..4096)).
  *
