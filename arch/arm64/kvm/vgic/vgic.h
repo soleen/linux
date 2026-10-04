@@ -76,6 +76,9 @@ void kvm_patch_ich_vtr_el2(struct alt_instr *alt,
 
 static inline u64 vgic_ich_vtr(void)
 {
+#ifdef __CPU_PRESERVED_RUNTIME__
+	return read_gicreg(ICH_VTR_EL2);
+#else
 	u64 vtr;
 
 	/* All non-RES0 bits are in the bottom 32bits */
@@ -86,6 +89,7 @@ static inline u64 vgic_ich_vtr(void)
 		     : "=r" (vtr));
 
 	return vtr;
+#endif
 }
 
 static inline u64 kvm_get_guest_vtr_el2(void)
@@ -186,6 +190,9 @@ void kvm_compute_ich_hcr_trap_bits(struct alt_instr *alt,
 
 static inline u64 vgic_ich_hcr_trap_bits(void)
 {
+#ifdef __CPU_PRESERVED_RUNTIME__
+	return 0;
+#else
 	u64 hcr;
 
 	/* All the traps are in the bottom 16bits */
@@ -195,6 +202,7 @@ static inline u64 vgic_ich_hcr_trap_bits(void)
 		     : "=r" (hcr));
 
 	return hcr;
+#endif
 }
 
 /*
