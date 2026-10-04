@@ -22,7 +22,7 @@ function get_arch_conf() {
 		KERNEL_IMAGE="Image"
 		KERNEL_CMDLINE="console=ttyAMA0"
 	elif [[ "$arch" == "x86" ]]; then
-		QEMU_CMD="qemu-system-x86_64"
+		QEMU_CMD="qemu-system-x86_64 -M q35 -cpu max -device intel-iommu,intremap=on,eim=on"
 		KERNEL_IMAGE="bzImage"
 		KERNEL_CMDLINE="console=ttyS0"
 	else
@@ -145,6 +145,7 @@ function mkinitrd() {
 	cat > "$workspace_dir/cpio_list_inner" <<EOF
 dir /dev 0755 0 0
 dir /proc 0755 0 0
+dir /sys 0755 0 0
 dir /debugfs 0755 0 0
 nod /dev/console 0600 0 0 c 5 1
 file /init $workspace_dir/init 0755 0 0
@@ -157,6 +158,7 @@ EOF
 	cat > "$workspace_dir/cpio_list" <<EOF
 dir /dev 0755 0 0
 dir /proc 0755 0 0
+dir /sys 0755 0 0
 dir /debugfs 0755 0 0
 nod /dev/console 0600 0 0 c 5 1
 file /init $workspace_dir/init 0755 0 0
@@ -179,7 +181,7 @@ function run_qemu() {
 
 	echo "# Serial Log: $serial"
 	timeout 30s \
-	$qemu_cmd -m 1G -smp 2 -no-reboot -nographic -nodefaults \
+	$qemu_cmd -m 1G -smp 4 -no-reboot -nographic -nodefaults \
 		  -accel tcg -accel hvf -accel kvm \
 		  -serial file:"$serial" \
 		  -append "$cmdline" \
@@ -256,7 +258,13 @@ function main() {
 	local final_kernel="$build_dir/arch/$arch/boot/$KERNEL_IMAGE"
 	mkinitrd "$build_dir" "$final_kernel" "$test_name"
 
-	run_qemu "$QEMU_CMD" "$KERNEL_CMDLINE" "$final_kernel"
+	# kselftest harness tests run once, without kexec
+	local cmdline="$KERNEL_CMDLINE"
+	if grep -q kselftest_harness.h "$test_dir/$test_name.c"; then
+		cmdline="$cmdline luo_harness"
+	fi
+
+	run_qemu "$QEMU_CMD" "$cmdline" "$final_kernel"
 	ktap_test_pass "$test_name succeeded"
 }
 
