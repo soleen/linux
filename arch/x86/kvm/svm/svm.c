@@ -54,6 +54,7 @@
 #include "svm.h"
 #include "svm_ops.h"
 #include "switch.h"
+
 #include "caretaker/svm.h"
 #include "hyperv.h"
 #include "kvm_onhyperv.h"
@@ -4133,7 +4134,19 @@ static void svm_complete_interrupts(struct kvm_vcpu *vcpu)
 		break;
 	}
 	case SVM_EXITINTINFO_TYPE_INTR:
-		kvm_queue_interrupt(vcpu, vector, false);
+		/*
+		 * A maskable hardware interrupt is only injected when RFLAGS.IF
+		 * is set, and RFLAGS.IF remains set if vectoring aborts before
+		 * the interrupt gate is entered.  If RFLAGS.IF is already clear
+		 * for a non-SEV-ES L1 guest, interrupt gate delivery has already
+		 * completed (e.g. under QEMU TCG, which leaves exit_int_info
+		 * populated after delivering event_inj) and re-queueing would
+		 * inject a duplicate interrupt with RFLAGS.IF == 0 before
+		 * SWAPGS.
+		 */
+		if (is_sev_es_guest(vcpu) || is_guest_mode(vcpu) ||
+		    (kvm_get_rflags(vcpu) & X86_EFLAGS_IF))
+			kvm_queue_interrupt(vcpu, vector, false);
 		break;
 	case SVM_EXITINTINFO_TYPE_SOFT:
 		kvm_queue_interrupt(vcpu, vector, true);
@@ -4153,6 +4166,7 @@ static void svm_cancel_injection(struct kvm_vcpu *vcpu)
 	control->exit_int_info_err = control->event_inj_err;
 	control->event_inj = 0;
 	svm_complete_interrupts(vcpu);
+	control->exit_int_info = 0;
 }
 
 static fastpath_t svm_exit_handlers_fastpath(struct kvm_vcpu *vcpu)
@@ -4307,6 +4321,8 @@ static __no_kcsan fastpath_t svm_vcpu_run(struct kvm_vcpu *vcpu, u64 run_flags)
 	 */
 	if (!cpu_feature_enabled(X86_FEATURE_V_SPEC_CTRL))
 		x86_spec_ctrl_set_guest(svm->virt_spec_ctrl);
+
+	svm->vmcb->control.exit_int_info = 0;
 
 	svm_vcpu_enter_exit(vcpu, enter_flags);
 
