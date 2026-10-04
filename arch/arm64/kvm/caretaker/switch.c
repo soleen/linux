@@ -178,7 +178,15 @@ arm64_caretaker_op_disarm_timer(void *data)
 	isb();
 }
 
+static bool caretaker_hyp_handle_wfx(struct kvm_vcpu *vcpu, u64 *exit_code)
+{
+	kvm_incr_pc(vcpu);
+	*exit_code = ARM_EXCEPTION_TRAP;
+	return false;
+}
+
 static const exit_handler_fn caretaker_exit_handlers[ESR_ELx_EC_MAX + 1] = {
+	[ESR_ELx_EC_WFx]		= caretaker_hyp_handle_wfx,
 	[ESR_ELx_EC_CP15_32]		= kvm_hyp_handle_cp15_32,
 	[ESR_ELx_EC_SYS64]		= kvm_hyp_handle_sysreg,
 	[ESR_ELx_EC_IABT_LOW]		= kvm_hyp_handle_iabt_low,
@@ -246,7 +254,8 @@ arm64_caretaker_vcpu_run(struct kvm_caretaker_vcpu *cvcpu,
 	if (ARM_EXCEPTION_IS_TRAP(exit_code)) {
 		u8 ec = kvm_vcpu_trap_get_class(vcpu);
 
-		if (ec == ESR_ELx_EC_DABT_LOW ||
+		if (ec == ESR_ELx_EC_WFx ||
+		    ec == ESR_ELx_EC_DABT_LOW ||
 		    ec == ESR_ELx_EC_IABT_LOW) {
 			*reason = ONCORE_EXIT_YIELD_IDLE;
 			return false;
