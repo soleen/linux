@@ -10,12 +10,17 @@
 #include <linux/kho/abi/kvm.h>
 #include <linux/kho/abi/kvm_arm64.h>
 #include <linux/kvm_host.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 
 #include <asm/kvm_emulate.h>
 #include <asm/kvm_mmu.h>
+#include <asm/kvm_pgtable.h>
+
+#include <kvm/arm_arch_timer.h>
 #include <kvm/arm_vgic.h>
 
+#include "caretaker/caretaker.h"
 #include "sys_regs.h"
 #include "vgic/vgic.h"
 
@@ -27,6 +32,14 @@ int kvm_arch_vm_luo_preserve(struct kvm *kvm, struct kvm_luo_ser *ser)
 	ser->type = kvm_phys_shift(&kvm->arch.mmu);
 
 	return 0;
+}
+
+void kvm_arch_vm_luo_unpreserve(struct kvm *kvm, struct kvm_luo_ser *ser)
+{
+#ifdef CONFIG_KVM_CARETAKER
+	if (kvm)
+		kvm->caretaker_vm = NULL;
+#endif
 }
 
 static void kvm_arm_luo_get_regs(struct kvm_vcpu *vcpu, struct kvm_regs *regs)
@@ -140,6 +153,16 @@ int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_ser *ser)
 
 	KHOSER_STORE_PTR(ser->arch_state, state);
 
+	if (IS_ENABLED(CONFIG_KVM_CARETAKER)) {
+		int ret = arm64_kvm_caretaker_preserve(vcpu, ser);
+
+		if (ret) {
+			kho_unpreserve_free(state);
+			ser->arch_state.phys = 0;
+			return ret;
+		}
+	}
+
 	return 0;
 }
 
@@ -221,6 +244,9 @@ int kvm_arch_vcpu_luo_retrieve(struct kvm_vcpu *vcpu, struct kvm_vcpu_ser *ser)
 
 void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_ser *ser)
 {
+	arm64_kvm_caretaker_unpreserve(ser);
+	if (WARN_ON_ONCE(ser->cb.phys))
+		return;
 	if (ser->arch_state.phys) {
 		kho_unpreserve_free(KHOSER_LOAD_PTR(ser->arch_state));
 		ser->arch_state.phys = 0;
@@ -229,6 +255,9 @@ void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_ser *ser)
 
 void kvm_arch_vcpu_luo_finish(struct kvm_vcpu_ser *ser)
 {
+	arm64_kvm_caretaker_finish(ser);
+	if (WARN_ON_ONCE(ser->cb.phys))
+		return;
 	if (ser->arch_state.phys) {
 		kho_restore_free(KHOSER_LOAD_PTR(ser->arch_state));
 		ser->arch_state.phys = 0;

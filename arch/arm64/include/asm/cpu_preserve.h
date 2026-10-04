@@ -71,6 +71,8 @@ void gicv3_cpu_preserved_enable_sgi(void)
 	__cpu_preserved_sym_asm(gicv3_cpu_preserved_enable_sgi);
 void gicv3_cpu_preserved_kick_mpidr(u64 mpidr)
 	__cpu_preserved_sym_asm(gicv3_cpu_preserved_kick_mpidr);
+int gicv3_cpu_preserved_get_redist_region(int idx, phys_addr_t *pa,
+					  unsigned long *va, size_t *size);
 
 u64 arch_cpu_preserved_mode(void);
 #define arch_cpu_preserved_mode arch_cpu_preserved_mode
@@ -78,6 +80,12 @@ u64 arch_cpu_preserved_mode(void);
 static inline void gicv3_cpu_preserved_clear_active_priorities(void) {}
 static inline void gicv3_cpu_preserved_enable_sgi(void) {}
 static inline void gicv3_cpu_preserved_kick_mpidr(u64 mpidr) {}
+static inline int gicv3_cpu_preserved_get_redist_region(int idx, phys_addr_t *pa,
+							unsigned long *va,
+							size_t *size)
+{
+	return -ENOENT;
+}
 #endif
 
 #endif /* !__ASSEMBLY__ */

@@ -46,6 +46,7 @@
 #include <linux/kvm_host.h>
 #include <linux/kvm_caretaker.h>
 #include <linux/pagemap.h>
+#include <linux/fdtable.h>
 #include <linux/file.h>
 #include <linux/err.h>
 #include <linux/anon_inodes.h>
@@ -148,6 +149,7 @@ static void kvm_luo_unpreserve(struct liveupdate_file_op_args *args)
 		return;
 
 	ser = phys_to_virt(args->serialized_data);
+	kvm_arch_vm_luo_unpreserve(kvm, ser);
 	if (kvm)
 		kvm->kho_folios = NULL;
 	kvm_kho_folios_unpreserve(KHOSER_LOAD_PTR(ser->kho_folios));
@@ -376,7 +378,6 @@ static void kvm_vcpu_luo_finish(struct liveupdate_file_op_args *args)
 		mutex_unlock(&vcpu->mutex);
 	if (err)
 		return;
-
 	kvm_arch_vcpu_luo_finish(ser);
 	kho_restore_free(ser);
 }
