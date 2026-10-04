@@ -1623,6 +1623,39 @@ static struct liveupdate_file_handler cpu_preserve_handler = {
 	.compatible = CPU_PRESERVED_LUO_FH_COMPATIBLE,
 };
 
+static int cpu_preserve_reboot_notify(struct notifier_block *nb,
+				      unsigned long action, void *data)
+{
+	int cpu;
+
+	scoped_guard(mutex, &cpu_preserved_lock) {
+		for_each_cpu(cpu, &cpu_preserved_mask) {
+			/*
+			 * If this CPU is not being preserved across an outgoing
+			 * live update, signal it to exit the park loop and
+			 * offline it.
+			 */
+			if (kexec_in_progress && liveupdate_enabled() &&
+			    !cpu_preserved_is_incoming(cpu))
+				continue;
+
+			cpu_signal_exit(cpu);
+			arch_cpu_preserved_kick(cpu);
+			if (WARN_ON_ONCE(cpu_wait_dead(cpu)))
+				continue;
+
+			__cpu_unpreserve_locked(cpu);
+		}
+	}
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block cpu_preserve_reboot_nb = {
+	.notifier_call = cpu_preserve_reboot_notify,
+	.priority = 0,
+};
+
 static int __init cpu_preserve_early_init(void)
 {
 	void *obj;
@@ -1655,6 +1688,8 @@ static int __init cpu_preserve_early_init(void)
 	if (liveupdate_enabled() &&
 	    !liveupdate_flb_get_incoming(&cpu_preserved_flb, &obj))
 		liveupdate_flb_put_incoming(&cpu_preserved_flb);
+
+	register_reboot_notifier(&cpu_preserve_reboot_nb);
 
 	return 0;
 }
