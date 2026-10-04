@@ -11,16 +11,24 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/bitmap.h>
 #include <linux/bitops.h>
+#include <linux/kexec_handover.h>
+#include <linux/mutex.h>
 
 #include <asm/kvm_asm.h>
 #include <asm/kvm_mmu.h>
 
+#define KVM_ARM_VMID_KHO_NAME	"kvm_arm_vmid"
+
 unsigned int __ro_after_init kvm_arm_vmid_bits;
 static DEFINE_RAW_SPINLOCK(cpu_vmid_lock);
+static DEFINE_MUTEX(kho_vmid_mutex);
 
 static atomic64_t vmid_generation;
 static unsigned long *vmid_map;
+static unsigned long *pinned_vmid_map;
+static unsigned long *kho_vmid_map;
 
 static DEFINE_PER_CPU(atomic64_t, active_vmids);
 static DEFINE_PER_CPU(u64, reserved_vmids);
@@ -48,6 +56,8 @@ static void flush_context(void)
 	u64 vmid;
 
 	bitmap_zero(vmid_map, NUM_USER_VMIDS);
+	if (pinned_vmid_map)
+		bitmap_or(vmid_map, vmid_map, pinned_vmid_map, NUM_USER_VMIDS);
 
 	for_each_possible_cpu(cpu) {
 		vmid = atomic64_xchg_relaxed(&per_cpu(active_vmids, cpu), 0);
@@ -169,12 +179,76 @@ void kvm_arm_vmid_update(struct kvm_vmid *kvm_vmid)
 	raw_spin_unlock_irqrestore(&cpu_vmid_lock, flags);
 }
 
+int kvm_arm_vmid_pin(struct kvm_vmid *kvm_vmid, u32 *vmid_idx)
+{
+	size_t map_bytes = BITS_TO_LONGS(NUM_USER_VMIDS) * sizeof(unsigned long);
+	unsigned long flags;
+	u64 vmid;
+	u32 idx;
+
+	if (!vmid_map || !pinned_vmid_map)
+		return -EINVAL;
+
+	mutex_lock(&kho_vmid_mutex);
+	if (!kho_vmid_map) {
+		void *buf = kho_alloc_preserve(map_bytes);
+
+		if (IS_ERR(buf)) {
+			mutex_unlock(&kho_vmid_mutex);
+			return PTR_ERR(buf);
+		}
+		if (kho_add_subtree(KVM_ARM_VMID_KHO_NAME, buf, map_bytes)) {
+			kho_unpreserve_free(buf);
+			mutex_unlock(&kho_vmid_mutex);
+			return -ENOMEM;
+		}
+		raw_spin_lock_irqsave(&cpu_vmid_lock, flags);
+		kho_vmid_map = buf;
+		bitmap_copy(kho_vmid_map, pinned_vmid_map, NUM_USER_VMIDS);
+		raw_spin_unlock_irqrestore(&cpu_vmid_lock, flags);
+	}
+	mutex_unlock(&kho_vmid_mutex);
+
+	raw_spin_lock_irqsave(&cpu_vmid_lock, flags);
+	vmid = atomic64_read(&kvm_vmid->id);
+	if (!vmid_gen_match(vmid))
+		vmid = new_vmid(kvm_vmid);
+	idx = vmid2idx(vmid);
+	__set_bit(idx, vmid_map);
+	__set_bit(idx, pinned_vmid_map);
+	if (kho_vmid_map)
+		__set_bit(idx, kho_vmid_map);
+	raw_spin_unlock_irqrestore(&cpu_vmid_lock, flags);
+
+	*vmid_idx = idx;
+	return 0;
+}
+
+void kvm_arm_vmid_unpin(u32 vmid_idx)
+{
+	unsigned long flags;
+
+	if (!pinned_vmid_map || !vmid_idx || vmid_idx >= NUM_USER_VMIDS)
+		return;
+
+	raw_spin_lock_irqsave(&cpu_vmid_lock, flags);
+	__clear_bit(vmid_idx, pinned_vmid_map);
+	if (kho_vmid_map)
+		__clear_bit(vmid_idx, kho_vmid_map);
+	raw_spin_unlock_irqrestore(&cpu_vmid_lock, flags);
+}
+
 /*
  * Initialize the VMID allocator
  */
 int __init kvm_arm_vmid_alloc_init(void)
 {
+	size_t map_bytes;
+	phys_addr_t kho_phys;
+	size_t kho_size;
+
 	kvm_arm_vmid_bits = kvm_get_vmid_bits();
+	map_bytes = BITS_TO_LONGS(NUM_USER_VMIDS) * sizeof(unsigned long);
 
 	/*
 	 * Expect allocation after rollover to fail if we don't have
@@ -186,10 +260,37 @@ int __init kvm_arm_vmid_alloc_init(void)
 	if (!vmid_map)
 		return -ENOMEM;
 
+	pinned_vmid_map = bitmap_zalloc(NUM_USER_VMIDS, GFP_KERNEL);
+	if (!pinned_vmid_map) {
+		bitmap_free(vmid_map);
+		vmid_map = NULL;
+		return -ENOMEM;
+	}
+
+	if (is_kho_boot() &&
+	    kho_retrieve_subtree(KVM_ARM_VMID_KHO_NAME, &kho_phys, &kho_size) == 0) {
+		void *prev_map = phys_to_virt(kho_phys);
+
+		if (kho_size >= map_bytes) {
+			memcpy(pinned_vmid_map, prev_map, map_bytes);
+			bitmap_or(vmid_map, vmid_map, pinned_vmid_map,
+				  NUM_USER_VMIDS);
+		}
+		kho_restore_free(prev_map);
+	}
+
 	return 0;
 }
 
 void __init kvm_arm_vmid_alloc_free(void)
 {
+	if (kho_vmid_map) {
+		kho_remove_subtree(kho_vmid_map);
+		kho_unpreserve_free(kho_vmid_map);
+		kho_vmid_map = NULL;
+	}
+	bitmap_free(pinned_vmid_map);
+	pinned_vmid_map = NULL;
 	bitmap_free(vmid_map);
+	vmid_map = NULL;
 }
