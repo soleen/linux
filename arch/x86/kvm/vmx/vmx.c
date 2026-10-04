@@ -5133,24 +5133,15 @@ handle_pf:
 	return kvm_handle_page_fault(vcpu, error_code, cr2, NULL, 0);
 }
 
-static int handle_exception_nmi(struct kvm_vcpu *vcpu)
+static int __vmx_handle_exception(struct kvm_vcpu *vcpu, u32 intr_info)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
 	struct kvm_run *kvm_run = vcpu->run;
-	u32 intr_info, ex_no, error_code;
+	u32 ex_no, error_code;
 	unsigned long dr6;
 	u32 vect_info;
 
 	vect_info = vmx->idt_vectoring_info;
-	intr_info = vmx_get_intr_info(vcpu);
-
-	/*
-	 * Machine checks are handled by handle_exception_irqoff(), or by
-	 * vmx_vcpu_run() if a #MC occurs on VM-Entry.  NMIs are handled by
-	 * vmx_vcpu_enter_exit().
-	 */
-	if (is_machine_check(intr_info) || is_nmi(intr_info))
-		return 1;
 
 	/*
 	 * Queue the exception here instead of in handle_nm_fault_irqoff().
@@ -5278,12 +5269,6 @@ static int handle_exception_nmi(struct kvm_vcpu *vcpu)
 		break;
 	}
 	return 0;
-}
-
-static __always_inline int handle_external_interrupt(struct kvm_vcpu *vcpu)
-{
-	++vcpu->stat.irq_exits;
-	return 1;
 }
 
 static int handle_triple_fault(struct kvm_vcpu *vcpu)
@@ -5560,6 +5545,18 @@ static int handle_interrupt_window(struct kvm_vcpu *vcpu)
 	return 1;
 }
 
+static int handle_nmi_window(struct kvm_vcpu *vcpu)
+{
+	if (KVM_BUG_ON(!enable_vnmi, vcpu->kvm))
+		return -EIO;
+
+	exec_controls_clearbit(to_vmx(vcpu), CPU_BASED_NMI_WINDOW_EXITING);
+	++vcpu->stat.nmi_window_exits;
+	kvm_make_request(KVM_REQ_EVENT, vcpu);
+
+	return 1;
+}
+
 static int handle_invlpg(struct kvm_vcpu *vcpu)
 {
 	unsigned long exit_qualification = vmx_get_exit_qual(vcpu);
@@ -5728,18 +5725,6 @@ static int handle_ept_misconfig(struct kvm_vcpu *vcpu)
 	return kvm_mmu_page_fault(vcpu, gpa, PFERR_RSVD_MASK, NULL, 0);
 }
 
-static int handle_nmi_window(struct kvm_vcpu *vcpu)
-{
-	if (KVM_BUG_ON(!enable_vnmi, vcpu->kvm))
-		return -EIO;
-
-	exec_controls_clearbit(to_vmx(vcpu), CPU_BASED_NMI_WINDOW_EXITING);
-	++vcpu->stat.nmi_window_exits;
-	kvm_make_request(KVM_REQ_EVENT, vcpu);
-
-	return 1;
-}
-
 /*
  * Returns true if emulation is required (due to the vCPU having invalid state
  * with unsrestricted guest mode disabled) and KVM can't faithfully emulate the
@@ -5820,25 +5805,6 @@ static int handle_invalid_guest_state(struct kvm_vcpu *vcpu)
 	return 1;
 }
 
-/*
- * Indicate a busy-waiting vcpu in spinlock. We do not enable the PAUSE
- * exiting, so only get here on cpu with PAUSE-Loop-Exiting.
- */
-static int handle_pause(struct kvm_vcpu *vcpu)
-{
-	if (!kvm_pause_in_guest(vcpu->kvm))
-		grow_ple_window(vcpu);
-
-	/*
-	 * Intel sdm vol3 ch-25.1.3 says: The "PAUSE-loop exiting"
-	 * VM-execution control is ignored if CPL > 0. OTOH, KVM
-	 * never set PAUSE_EXITING and just set PLE if supported,
-	 * so the vcpu must be CPL=0 if it gets a PAUSE exit.
-	 */
-	kvm_vcpu_on_spin(vcpu, true);
-	return kvm_skip_emulated_instruction(vcpu);
-}
-
 static int handle_monitor_trap(struct kvm_vcpu *vcpu)
 {
 	return 1;
@@ -5898,37 +5864,6 @@ static int handle_pml_full(struct kvm_vcpu *vcpu)
 	 * here.., and there's no userspace involvement needed for PML.
 	 */
 	return 1;
-}
-
-static fastpath_t handle_fastpath_preemption_timer(struct kvm_vcpu *vcpu,
-						   bool force_immediate_exit)
-{
-	struct vcpu_vmx *vmx = to_vmx(vcpu);
-
-	/*
-	 * In the *extremely* unlikely scenario that this is a spurious VM-Exit
-	 * due to the timer expiring while it was "soft" disabled, just eat the
-	 * exit and re-enter the guest.
-	 */
-	if (unlikely(vmx->loaded_vmcs->hv_timer_soft_disabled))
-		return EXIT_FASTPATH_REENTER_GUEST;
-
-	/*
-	 * If the timer expired because KVM used it to force an immediate exit,
-	 * then mission accomplished.
-	 */
-	if (force_immediate_exit)
-		return EXIT_FASTPATH_EXIT_HANDLED;
-
-	/*
-	 * If L2 is active, go down the slow path as emulating the guest timer
-	 * expiration likely requires synthesizing a nested VM-Exit.
-	 */
-	if (is_guest_mode(vcpu))
-		return EXIT_FASTPATH_NONE;
-
-	kvm_lapic_expired_hv_timer(vcpu);
-	return EXIT_FASTPATH_REENTER_GUEST;
 }
 
 static int handle_preemption_timer(struct kvm_vcpu *vcpu)
