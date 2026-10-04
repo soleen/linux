@@ -267,6 +267,13 @@ void arch_cpu_preserved_park_init(int cpu)
 	write_sysreg((unsigned long)arm64_preserved_vectors, vbar_el1);
 	isb();
 
+#if IS_ENABLED(CONFIG_KVM_CARETAKER)
+	if (read_sysreg(CurrentEL) == CurrentEL_EL2) {
+		write_sysreg_s((unsigned long)caretaker_hyp_vector, SYS_VBAR_EL2);
+		isb();
+	}
+#endif
+
 	write_sysreg(0, ttbr0_el1);
 	write_sysreg(sctx->session_pgd_pa, ttbr1_el1);
 	isb();

@@ -46,6 +46,7 @@ struct cpu_preserved_ser;
  * @session_pgd_pa:   Session root page table physical address, or 0.
  * @ser:              Preserved CPU descriptor in isolated address space.
  * @entry_fn:         Workload entry function to run.
+ * @running_priv:     Active workload private context for fault recovery.
  * @fault:            Per-CPU exception telemetry and abort callback (x86_64).
  *
  * This structure lives at the base of a preserved CPU's dedicated stack and is
@@ -62,6 +63,7 @@ struct cpu_preserved_stack_context {
 	u64 session_pgd_pa;
 	struct cpu_preserved_ser *ser;
 	void (*entry_fn)(void *data);
+	void *running_priv;
 #ifdef CONFIG_X86_64
 	struct x86_preserved_fault fault;
 #elif defined(CONFIG_ARM64)
