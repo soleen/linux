@@ -18,6 +18,20 @@ Architecture Backend Interface
 
 .. kernel-doc:: include/linux/cpu_preserve.h
 
+On-Core Execution and Scheduling Framework
+==========================================
+
+.. kernel-doc:: kernel/liveupdate/oncore.c
+   :doc: On-Core Execution and Scheduling Framework
+
+On-Core Session & Job API
+=========================
+
+.. kernel-doc:: include/linux/oncore.h
+
+.. kernel-doc:: kernel/liveupdate/oncore.c
+   :identifiers:
+
 CPU Preservation ABI
 ====================
 
