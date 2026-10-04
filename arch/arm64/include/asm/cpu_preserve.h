@@ -51,10 +51,18 @@ void gicv3_cpupr_enable_sgi(void)
 	__cpupr_sym_asm(gicv3_cpupr_enable_sgi);
 void gicv3_cpupr_kick_mpidr(u64 mpidr)
 	__cpupr_sym_asm(gicv3_cpupr_kick_mpidr);
+int gicv3_cpupr_get_redist_region(int idx, phys_addr_t *pa,
+				  unsigned long *va, size_t *size);
 #else
 static inline void gicv3_cpupr_clear_active_priorities(void) {}
 static inline void gicv3_cpupr_enable_sgi(void) {}
 static inline void gicv3_cpupr_kick_mpidr(u64 mpidr) {}
+static inline int gicv3_cpupr_get_redist_region(int idx, phys_addr_t *pa,
+						unsigned long *va,
+						size_t *size)
+{
+	return -ENOENT;
+}
 #endif
 
 #endif /* __ASM_ARM64_CPU_PRESERVE_H */

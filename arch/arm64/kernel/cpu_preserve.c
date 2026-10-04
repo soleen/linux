@@ -96,6 +96,19 @@ static void arm64_cpupr_gic_init(void)
 		arm64_discover_gicr_res(&iomem_resource);
 }
 
+int gicv3_cpupr_get_redist_region(int idx, phys_addr_t *pa,
+				  unsigned long *va, size_t *size)
+{
+	arm64_cpupr_gic_init();
+	if (idx < 0 || idx >= cpupr_gic.nr_regions)
+		return -ENOENT;
+
+	*pa = cpupr_gic.regions[idx].pa;
+	*va = (unsigned long)cpupr_gic.regions[idx].va;
+	*size = cpupr_gic.regions[idx].size;
+	return 0;
+}
+
 /**
  * arch_cpupr_as_map - Populate an isolated page table on arm64
  * @ps: Session that owns the address space.

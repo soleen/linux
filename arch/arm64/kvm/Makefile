@@ -3,7 +3,7 @@
 # Makefile for Kernel-based Virtual Machine module
 #
 
-ccflags-y += -I $(src)
+ccflags-y += -I $(src) -I $(src)/hyp/include
 
 include $(srctree)/virt/kvm/Makefile.kvm
 
@@ -13,7 +13,16 @@ obj-$(CONFIG_KVM) += hyp/
 CFLAGS_sys_regs.o += -Wno-override-init
 CFLAGS_handle_exit.o += -Wno-override-init
 
-kvm-$(CONFIG_KVM_CARETAKER) += caretaker/host.o
+preserved-obj-$(CONFIG_KVM_CARETAKER) += caretaker/switch.preserved.o \
+					 caretaker/entry.preserved.o \
+					 hyp/entry.preserved.o \
+					 hyp/vgic-v3-sr.preserved.o \
+					 hyp/aarch32.preserved.o
+kvm-$(CONFIG_KVM_CARETAKER) += caretaker/host.o $(preserved-obj-y)
+
+PRESERVED_EXTRA_CFLAGS := -D__KVM_VHE_HYPERVISOR__
+PRESERVED_EXTRA_AFLAGS := -D__KVM_VHE_HYPERVISOR__
+include $(srctree)/scripts/Makefile.cpu_preserve
 
 kvm-y += arm.o mmu.o mmio.o psci.o hypercalls.o pvtime.o \
 	 inject_fault.o va_layout.o handle_exit.o config.o \
