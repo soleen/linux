@@ -92,6 +92,10 @@ asmlinkage void x86_preserved_handle_exception(struct pt_regs *regs, int vector)
 		cpu_preserved_clean(f);
 	}
 
+	if (sctx && sctx->ser) {
+		while (smp_load_acquire(&sctx->ser->state) == CPU_PRESERVED_WORKLOAD)
+			arch_cpu_preserved_park_wait();
+	}
 	cpu_preserved_park_loop(cpu);
 
 	arch_cpu_preserved_park_finish(cpu);

@@ -722,6 +722,7 @@ const struct cpumask *cpu_get_preserved_mask(void)
 
 static void cpu_signal_exit(int cpu)
 {
+	struct cpu_preserved_stack_context *sctx = cpu_preserved_stack_va(cpu);
 	struct cpu_preserved_ser *ser = cpu_preserved_get_ser(cpu);
 
 	if (ser) {
@@ -738,6 +739,140 @@ static void cpu_signal_exit(int cpu)
 			}
 		}
 	}
+	if (sctx) {
+		WRITE_ONCE(sctx->entry_fn, NULL);
+		WRITE_ONCE(sctx->workload_context, 0);
+		cpu_preserved_clean(sctx);
+	}
+}
+
+/**
+ * cpu_preserved_attach_workload - Attach & start workload execution on core
+ * @cpu: Logical CPU identifier.
+ * @entry_fn: Workload callback to execute repeatedly on the physical core.
+ * @data: Opaque argument passed to @entry_fn.
+ *
+ * Return: 0 on success, negative error code on failure.
+ */
+int cpu_preserved_attach_workload(int cpu,
+				  void (*entry_fn)(void *data), void *data)
+{
+	struct cpu_preserved_stack_context *sctx;
+	struct cpu_preserved_ser *ser;
+	u32 old;
+
+	if ((unsigned int)cpu >= nr_cpu_ids)
+		return -EINVAL;
+
+	mutex_lock(&cpu_preserved_lock);
+	if (!cpumask_test_cpu(cpu, &cpu_preserved_outgoing.mask)) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -ENODEV;
+	}
+
+	sctx = cpu_preserved_stack_va(cpu);
+	if (!sctx || sctx->magic != CPU_PRESERVED_STACK_MAGIC) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -ENODEV;
+	}
+
+	ser = cpu_preserved_get_ser(cpu);
+	if (!ser) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -EBUSY;
+	}
+
+	cpu_preserved_inval(ser);
+	if (READ_ONCE(ser->state) != CPU_PRESERVED_PARKED || sctx->entry_fn) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -EBUSY;
+	}
+
+	WRITE_ONCE(sctx->workload_context, (u64)(uintptr_t)data);
+	WRITE_ONCE(sctx->entry_fn, entry_fn);
+	cpu_preserved_clean(sctx);
+
+	old = CPU_PRESERVED_PARKED;
+	/* Pairs with smp_load_acquire() in cpu_preserved_park_loop() */
+	if (!try_cmpxchg_release(&ser->state, &old, CPU_PRESERVED_WORKLOAD)) {
+		WRITE_ONCE(sctx->entry_fn, NULL);
+		WRITE_ONCE(sctx->workload_context, 0);
+		cpu_preserved_clean(sctx);
+		mutex_unlock(&cpu_preserved_lock);
+		return -EBUSY;
+	}
+	cpu_preserved_clean(ser);
+
+	arch_cpu_preserved_kick(cpu);
+	mutex_unlock(&cpu_preserved_lock);
+	return 0;
+}
+
+/**
+ * cpu_preserved_detach_workload - Detach workload and return core to idle park
+ * @cpu: Logical CPU identifier.
+ *
+ * Return: 0 on success, negative error code on failure.
+ */
+int cpu_preserved_detach_workload(int cpu)
+{
+	struct cpu_preserved_stack_context *sctx;
+	struct cpu_preserved_ser *ser;
+
+	if ((unsigned int)cpu >= nr_cpu_ids)
+		return -EINVAL;
+
+	mutex_lock(&cpu_preserved_lock);
+	if (!cpumask_test_cpu(cpu, &cpu_preserved_mask)) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -ENODEV;
+	}
+
+	sctx = cpu_preserved_stack_va(cpu);
+	if (!sctx || sctx->magic != CPU_PRESERVED_STACK_MAGIC) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -ENODEV;
+	}
+
+	ser = cpu_preserved_get_ser(cpu);
+	if (ser) {
+		u32 old = CPU_PRESERVED_WORKLOAD;
+
+		cpu_preserved_inval(ser);
+		if (try_cmpxchg(&ser->state, &old, CPU_PRESERVED_PARKED))
+			cpu_preserved_clean(ser);
+	}
+	WRITE_ONCE(sctx->entry_fn, NULL);
+	WRITE_ONCE(sctx->workload_context, 0);
+	cpu_preserved_clean(sctx);
+
+	arch_cpu_preserved_kick(cpu);
+	mutex_unlock(&cpu_preserved_lock);
+	return 0;
+}
+
+/**
+ * cpu_preserved_set_workload_context - Set workload context and root page table
+ * @cpu: Logical CPU identifier.
+ * @ctx: Opaque owning workload context pointer.
+ * @pgd_pa: Physical address of workload root page table (or 0 for default).
+ */
+void cpu_preserved_set_workload_context(int cpu, void *ctx, phys_addr_t pgd_pa)
+{
+	struct cpu_preserved_stack_context *sctx;
+
+	if (cpu < 0 || cpu >= nr_cpu_ids)
+		return;
+
+	mutex_lock(&cpu_preserved_lock);
+	sctx = cpu_preserved_stack_va(cpu);
+	if (sctx && sctx->magic == CPU_PRESERVED_STACK_MAGIC) {
+		sctx->workload_context = (u64)(uintptr_t)ctx;
+		if (pgd_pa)
+			sctx->session_pgd_pa = pgd_pa;
+		cpu_preserved_clean(sctx);
+	}
+	mutex_unlock(&cpu_preserved_lock);
 }
 
 #define CPU_WAIT_PARKED_TIMEOUT_US	5000000
@@ -1200,8 +1335,11 @@ static int cpu_preserve(unsigned int cpu, struct liveupdate_session *session)
 	sctx = stack;
 	sctx->magic = CPU_PRESERVED_STACK_MAGIC;
 	sctx->cpu = cpu;
+	sctx->reserved = 0;
+	sctx->workload_context = 0;
 	sctx->session_pgd_pa = as->pgd_pa;
 	sctx->ser = ser;
+	sctx->entry_fn = NULL;
 	cpu_preserved_clean(sctx);
 
 	scoped_guard(mutex, &cpu_preserved_lock) {
@@ -1582,6 +1720,7 @@ static int cpu_preserve_retrieve(struct liveupdate_file_op_args *args)
 
 	args->file = file;
 	cpu_preserve_restore_incoming_cpu(args->session, ser);
+	cpu_preserved_detach_workload(ser->cpu);
 
 	return 0;
 }

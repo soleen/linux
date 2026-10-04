@@ -39,18 +39,24 @@ struct cpu_preserved_ser;
  * struct cpu_preserved_stack_context - Context header at base of preserved CPU stack
  * @magic:            Validation signature (%CPU_PRESERVED_STACK_MAGIC).
  * @cpu:              Logical CPU identifier of the preserved physical core.
+ * @reserved:         Must be zero.
+ * @workload_context: Opaque owning workload or session context.
  * @session_pgd_pa:   Session root page table physical address, or 0.
  * @ser:              Preserved CPU descriptor in isolated address space.
+ * @entry_fn:         Workload entry function to run.
  *
  * This structure lives at the base of a preserved CPU's dedicated stack and is
- * accessed by the preserved CPU during parking. It is private to the preserved
- * CPU execution context of the kernel that allocated it.
+ * accessed by the preserved CPU during parking and workload execution. It is
+ * private to the preserved CPU execution context of the kernel that allocated it.
  */
 struct cpu_preserved_stack_context {
 	u64 magic;
 	u32 cpu;
+	u32 reserved;
+	u64 workload_context;
 	u64 session_pgd_pa;
 	struct cpu_preserved_ser *ser;
+	void (*entry_fn)(void *data);
 #ifdef CONFIG_X86_64
 	struct x86_preserved_fault fault;
 #elif defined(CONFIG_ARM64)
@@ -104,6 +110,10 @@ void arch_cpu_preserved_dcache_inval(unsigned long start, unsigned long end);
 
 const struct cpumask *cpu_get_preserved_mask(void);
 struct cpu_preserved_stack_context *cpu_preserved_get_sctx(int cpu);
+int cpu_preserved_attach_workload(int cpu,
+				  void (*entry_fn)(void *data), void *data);
+int cpu_preserved_detach_workload(int cpu);
+void cpu_preserved_set_workload_context(int cpu, void *ctx, phys_addr_t pgd_pa);
 
 /**
  * cpu_preserved_report_dead - Park preserved CPU when reporting dead in hotplug
@@ -287,6 +297,21 @@ static inline void cpu_preserved_free_kho(void *va, bool is_incoming)
 	else
 		kho_unpreserve_free(va);
 }
+
+static inline int cpu_preserved_attach_workload(int cpu,
+						void (*entry_fn)(void *data),
+						void *data)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int cpu_preserved_detach_workload(int cpu)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline void cpu_preserved_set_workload_context(int cpu, void *ctx,
+						      phys_addr_t pgd_pa) {}
 
 static inline int arch_cpu_preserved_setup_buffer(struct page *text_page,
 						  unsigned int text_nr_pages,

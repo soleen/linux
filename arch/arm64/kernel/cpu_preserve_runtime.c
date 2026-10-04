@@ -237,6 +237,11 @@ asmlinkage void arm64_preserved_handle_exception(unsigned long kind)
 		cpu_preserved_clean(f);
 	}
 
+	if (sctx && sctx->ser) {
+		while (smp_load_acquire(&sctx->ser->state) ==
+		       CPU_PRESERVED_WORKLOAD)
+			arch_cpu_preserved_park_wait();
+	}
 	cpu_preserved_park_loop(cpu);
 
 	arch_cpu_preserved_park_finish(cpu);

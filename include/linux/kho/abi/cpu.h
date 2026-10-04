@@ -54,6 +54,7 @@ enum cpu_preserved_workload {
 	CPU_PRESERVED_PARKED = 1,
 	CPU_PRESERVED_EXITING = 2,
 	CPU_PRESERVED_DEAD = 3,
+	CPU_PRESERVED_WORKLOAD = 4,
 };
 
 /**
