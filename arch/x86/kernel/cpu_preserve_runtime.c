@@ -91,6 +91,13 @@ asmlinkage void x86_preserved_handle_exception(struct pt_regs *regs, int vector)
 		f->cr3 = __native_read_cr3();
 		f->count++;
 		cpu_preserved_clean(f);
+
+		if (f->abort_fn) {
+			void (*abort_fn)(int, const struct x86_preserved_fault *) = f->abort_fn;
+
+			f->abort_fn = NULL;
+			abort_fn(cpu, f);
+		}
 	}
 
 	if (sctx && sctx->ser) {

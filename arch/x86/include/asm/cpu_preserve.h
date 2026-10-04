@@ -20,6 +20,8 @@ struct x86_preserved_fault {
 	unsigned long sp;
 	unsigned long cr2;
 	unsigned long cr3;
+	void (*abort_fn)(int cpu, const struct x86_preserved_fault *fault);
+	void *abort_data;
 };
 
 extern gate_desc x86_preserved_idt[IDT_ENTRIES]
