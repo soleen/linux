@@ -244,6 +244,17 @@ static inline struct kvm_cpuid_entry2 *__kvm_cpuid(struct kvm_vcpu *vcpu,
 }
 
 #ifdef __CPU_PRESERVED_RUNTIME__
+static inline bool kvm_cpuid(struct kvm_vcpu *vcpu, u32 *eax, u32 *ebx,
+			     u32 *ecx, u32 *edx, bool exact_only)
+{
+	u32 function = *eax, index = *ecx;
+	bool exact, used_max_basic;
+
+	__kvm_cpuid(vcpu, &function, index, eax, ebx, ecx, edx, exact_only,
+		    &exact, &used_max_basic);
+	return exact;
+}
+
 static inline int kvm_skip_emulated_instruction(struct kvm_vcpu *vcpu)
 {
 	return kvm_x86_call(skip_emulated_instruction)(vcpu);
@@ -253,6 +264,23 @@ static inline int kvm_emulate_halt(struct kvm_vcpu *vcpu)
 {
 	++vcpu->stat.halt_exits;
 	cpu_relax();
+	return kvm_skip_emulated_instruction(vcpu);
+}
+
+static inline int kvm_emulate_cpuid(struct kvm_vcpu *vcpu)
+{
+	u32 eax, ebx, ecx, edx;
+
+	if (!kvm_is_cpuid_allowed(vcpu))
+		return 0;
+
+	eax = kvm_eax_read(vcpu);
+	ecx = kvm_ecx_read(vcpu);
+	kvm_cpuid(vcpu, &eax, &ebx, &ecx, &edx, false);
+	kvm_eax_write(vcpu, eax);
+	kvm_ebx_write(vcpu, ebx);
+	kvm_ecx_write(vcpu, ecx);
+	kvm_edx_write(vcpu, edx);
 	return kvm_skip_emulated_instruction(vcpu);
 }
 
