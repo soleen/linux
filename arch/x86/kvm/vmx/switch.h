@@ -39,8 +39,22 @@ static inline int vmx_switch_emulate_skip(struct kvm_vcpu *vcpu)
 {
 	return 0;
 }
+
+static inline void vmx_switch_on_pause(struct kvm_vcpu *vcpu)
+{
+	cpu_relax();
+}
+
+static inline int vmx_switch_handle_exception(struct kvm_vcpu *vcpu,
+					      u32 intr_info)
+{
+	return -EINVAL;
+}
 #else /* !__CPU_PRESERVED_RUNTIME__ */
 #include "x86_ops.h"
+
+static void grow_ple_window(struct kvm_vcpu *vcpu);
+static int __vmx_handle_exception(struct kvm_vcpu *vcpu, u32 intr_info);
 
 static inline void vmx_switch_update_emulated_ref_flags(struct vcpu_vmx *vmx,
 							unsigned long old_rflags)
@@ -63,6 +77,39 @@ static inline bool vmx_switch_use_exit_instr_len(union vmx_exit_reason exit_reas
 static inline int vmx_switch_emulate_skip(struct kvm_vcpu *vcpu)
 {
 	return kvm_emulate_instruction(vcpu, EMULTYPE_SKIP);
+}
+
+static inline void vmx_switch_on_pause(struct kvm_vcpu *vcpu)
+{
+	if (!kvm_pause_in_guest(vcpu->kvm))
+		grow_ple_window(vcpu);
+
+	/*
+	 * Intel sdm vol3 ch-25.1.3 says: The "PAUSE-loop exiting"
+	 * VM-execution control is ignored if CPL > 0. OTOH, KVM
+	 * never set PAUSE_EXITING and just set PLE if supported,
+	 * so the vcpu must be CPL=0 if it gets a PAUSE exit.
+	 */
+	kvm_vcpu_on_spin(vcpu, true);
+}
+
+static inline fastpath_t vmx_switch_handle_hv_timer(struct kvm_vcpu *vcpu)
+{
+	/*
+	 * If L2 is active, go down the slow path as emulating the guest timer
+	 * expiration likely requires synthesizing a nested VM-Exit.
+	 */
+	if (is_guest_mode(vcpu))
+		return EXIT_FASTPATH_NONE;
+
+	kvm_lapic_expired_hv_timer(vcpu);
+	return EXIT_FASTPATH_REENTER_GUEST;
+}
+
+static inline int vmx_switch_handle_exception(struct kvm_vcpu *vcpu,
+					      u32 intr_info)
+{
+	return __vmx_handle_exception(vcpu, intr_info);
 }
 #endif /* __CPU_PRESERVED_RUNTIME__ */
 
@@ -450,6 +497,60 @@ static inline int __vmx_sync_pir_to_irr(struct kvm_vcpu *vcpu)
 		kvm_make_request(KVM_REQ_EVENT, vcpu);
 
 	return max_irr;
+}
+
+static __always_inline int handle_external_interrupt(struct kvm_vcpu *vcpu)
+{
+	++vcpu->stat.irq_exits;
+	return 1;
+}
+
+static inline int handle_pause(struct kvm_vcpu *vcpu)
+{
+	vmx_switch_on_pause(vcpu);
+	return kvm_skip_emulated_instruction(vcpu);
+}
+
+static inline fastpath_t handle_fastpath_preemption_timer(struct kvm_vcpu *vcpu,
+							  bool force_immediate_exit)
+{
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
+
+	/*
+	 * In the *extremely* unlikely scenario that this is a spurious VM-Exit
+	 * due to the timer expiring while it was "soft" disabled, just eat the
+	 * exit and re-enter the guest.
+	 */
+	if (unlikely(vmx->loaded_vmcs->hv_timer_soft_disabled))
+		return EXIT_FASTPATH_REENTER_GUEST;
+
+	/*
+	 * If the timer expired because KVM used it to force an immediate exit,
+	 * then mission accomplished.
+	 */
+	if (force_immediate_exit)
+		return EXIT_FASTPATH_EXIT_HANDLED;
+
+#ifndef __CPU_PRESERVED_RUNTIME__
+	return vmx_switch_handle_hv_timer(vcpu);
+#else
+	return EXIT_FASTPATH_EXIT_HANDLED;
+#endif
+}
+
+static inline int handle_exception_nmi(struct kvm_vcpu *vcpu)
+{
+	u32 intr_info = vmx_get_intr_info(vcpu);
+
+	/*
+	 * Machine checks are handled by handle_exception_irqoff(), or by
+	 * vmx_vcpu_run() if a #MC occurs on VM-Entry.  NMIs are handled by
+	 * vmx_vcpu_enter_exit().
+	 */
+	if (is_machine_check(intr_info) || is_nmi(intr_info))
+		return 1;
+
+	return vmx_switch_handle_exception(vcpu, intr_info);
 }
 
 #endif /* __KVM_X86_VMX_SWITCH_H */
