@@ -178,6 +178,11 @@ frees the KHO-allocated ``struct kvm_vcpu_arch_ser`` and
 in-memory ``struct kvm_vcpu`` in the outgoing kernel remains intact,
 allowing the VMM to resume vCPU execution without recreating the vCPU.
 
+The ``struct kvm_vcpu_arch_ser`` of a vCPU that the KVM Caretaker runs is
+allocated from the isolated address space of its On-Core session instead,
+which frees it, in both kernels, when the address space is torn down (see
+:doc:`/liveupdate/cpu_preservation`).
+
 Preserved Architectural State
 -----------------------------
 
@@ -266,8 +271,23 @@ VM & Guest_Memfd Preservation ABI
 .. kernel-doc:: include/linux/kho/abi/kvm.h
    :internal:
 
+KVM Caretaker (Orphaned VM Execution)
+=====================================
+
+.. kernel-doc:: virt/kvm/caretaker/main.c
+   :doc: KVM Caretaker Architecture and Lifecycle
+
+KVM Caretaker Core & Architecture API
+=====================================
+
+.. kernel-doc:: include/linux/kvm_caretaker.h
+
+.. kernel-doc:: virt/kvm/caretaker/main.c
+   :identifiers:
+
 See Also
 ========
 
 - :doc:`/core-api/liveupdate`
+- :doc:`/liveupdate/cpu_preservation`
 - :doc:`/userspace-api/liveupdate`
