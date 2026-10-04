@@ -105,6 +105,19 @@ static void arm64_cpu_preserved_gic_init(void)
 		arm64_discover_gicr_res(&iomem_resource);
 }
 
+int gicv3_cpu_preserved_get_redist_region(int idx, phys_addr_t *pa,
+					  unsigned long *va, size_t *size)
+{
+	arm64_cpu_preserved_gic_init();
+	if (idx < 0 || idx >= cpu_preserved_gic.nr_regions)
+		return -ENOENT;
+
+	*pa = cpu_preserved_gic.regions[idx].pa;
+	*va = (unsigned long)cpu_preserved_gic.regions[idx].va;
+	*size = cpu_preserved_gic.regions[idx].size;
+	return 0;
+}
+
 static pte_t *arm64_get_kernel_pte(unsigned long addr)
 {
 	pgd_t *pgdp = pgd_offset_k(addr);

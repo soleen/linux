@@ -10,12 +10,16 @@
 #include <linux/kho/abi/kvm.h>
 #include <linux/kho/abi/kvm_arm64.h>
 #include <linux/kvm_host.h>
-#include <linux/slab.h>
+#include <linux/sched.h>
 
 #include <asm/kvm_emulate.h>
 #include <asm/kvm_mmu.h>
+#include <asm/kvm_pgtable.h>
+
+#include <kvm/arm_arch_timer.h>
 #include <kvm/arm_vgic.h>
 
+#include "caretaker/caretaker.h"
 #include "sys_regs.h"
 #include "vgic/vgic.h"
 
@@ -28,31 +32,54 @@ int kvm_arch_vm_luo_preserve(struct kvm *kvm, struct kvm_luo_ser *ser)
 	return 0;
 }
 
+void kvm_arch_vm_luo_unpreserve(struct kvm *kvm, struct kvm_luo_ser *ser)
+{
+#ifdef CONFIG_KVM_CARETAKER
+	if (kvm)
+		kvm->caretaker_vm = NULL;
+#endif
+}
+
+static void kvm_arm_luo_get_regs(struct kvm_vcpu *vcpu, struct kvm_regs *regs)
+{
+	regs->regs = vcpu->arch.ctxt.regs;
+	regs->sp_el1 = ctxt_sys_reg(&vcpu->arch.ctxt, SP_EL1);
+	regs->elr_el1 = ctxt_sys_reg(&vcpu->arch.ctxt, ELR_EL1);
+	regs->spsr[KVM_SPSR_EL1] = ctxt_sys_reg(&vcpu->arch.ctxt, SPSR_EL1);
+	regs->spsr[KVM_SPSR_ABT] = vcpu->arch.ctxt.spsr_abt;
+	regs->spsr[KVM_SPSR_UND] = vcpu->arch.ctxt.spsr_und;
+	regs->spsr[KVM_SPSR_IRQ] = vcpu->arch.ctxt.spsr_irq;
+	regs->spsr[KVM_SPSR_FIQ] = vcpu->arch.ctxt.spsr_fiq;
+	regs->fp_regs = vcpu->arch.ctxt.fp_regs;
+}
+
+static void kvm_arm_luo_set_regs(struct kvm_vcpu *vcpu, const struct kvm_regs *regs)
+{
+	vcpu->arch.ctxt.regs = regs->regs;
+	ctxt_sys_reg(&vcpu->arch.ctxt, SP_EL1) = regs->sp_el1;
+	ctxt_sys_reg(&vcpu->arch.ctxt, ELR_EL1) = regs->elr_el1;
+	ctxt_sys_reg(&vcpu->arch.ctxt, SPSR_EL1) = regs->spsr[KVM_SPSR_EL1];
+	vcpu->arch.ctxt.spsr_abt = regs->spsr[KVM_SPSR_ABT];
+	vcpu->arch.ctxt.spsr_und = regs->spsr[KVM_SPSR_UND];
+	vcpu->arch.ctxt.spsr_irq = regs->spsr[KVM_SPSR_IRQ];
+	vcpu->arch.ctxt.spsr_fiq = regs->spsr[KVM_SPSR_FIQ];
+	vcpu->arch.ctxt.fp_regs = regs->fp_regs;
+}
+
 int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_ser *ser)
 {
 	struct kvm_arm64_sysregs_ser *sysregs;
 	struct kvm_vcpu_arch_ser *state;
-	u64 *indices;
 	int num_sysregs;
+	u64 *indices;
 	size_t size;
 	int i;
 
-	if (vcpu_has_nv(vcpu))
-		return -EOPNOTSUPP;
-
 	num_sysregs = kvm_arm_get_sys_reg_indices(vcpu, NULL);
-	if (num_sysregs < 0)
-		return num_sysregs;
-
-	indices = kmalloc_array(num_sysregs, sizeof(*indices), GFP_KERNEL);
+	indices = kmalloc_array(num_sysregs, sizeof(u64), GFP_KERNEL);
 	if (!indices)
 		return -ENOMEM;
-
 	num_sysregs = kvm_arm_get_sys_reg_indices(vcpu, indices);
-	if (num_sysregs < 0) {
-		kfree(indices);
-		return num_sysregs;
-	}
 
 	size = sizeof(*state) + struct_size(sysregs, sysregs, num_sysregs);
 	state = kho_alloc_preserve(size);
@@ -61,10 +88,10 @@ int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_ser *ser)
 		return PTR_ERR(state);
 	}
 
-	/* Core general-purpose and FP registers (uAPI struct kvm_regs) */
+	/* Core register state (uAPI struct kvm_regs) */
 	kvm_arm_luo_get_regs(vcpu, &state->regs);
 
-	/* Multiprocessor state (uAPI struct kvm_mp_state) */
+	/* Multiprocessor execution state (uAPI struct kvm_mp_state) */
 	kvm_arch_vcpu_ioctl_get_mpstate(vcpu, &state->mp_state);
 	state->pad = 0;
 
@@ -93,6 +120,16 @@ int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_ser *ser)
 	KHOSER_STORE_PTR(state->sysregs, sysregs);
 
 	KHOSER_STORE_PTR(ser->arch_state, state);
+
+	if (IS_ENABLED(CONFIG_KVM_CARETAKER)) {
+		int ret = arm64_kvm_caretaker_preserve(vcpu, ser);
+
+		if (ret) {
+			kho_unpreserve_free(state);
+			ser->arch_state.phys = 0;
+			return ret;
+		}
+	}
 
 	return 0;
 }
@@ -172,6 +209,9 @@ int kvm_arch_vcpu_luo_retrieve(struct kvm_vcpu *vcpu, struct kvm_vcpu_ser *ser)
 
 void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_ser *ser)
 {
+	arm64_kvm_caretaker_unpreserve(ser);
+	if (WARN_ON_ONCE(ser->cb.phys))
+		return;
 	if (ser->arch_state.phys) {
 		kho_unpreserve_free(phys_to_virt(ser->arch_state.phys));
 		ser->arch_state.phys = 0;
@@ -180,6 +220,9 @@ void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_ser *ser)
 
 void kvm_arch_vcpu_luo_finish(struct kvm_vcpu_ser *ser)
 {
+	arm64_kvm_caretaker_finish(ser);
+	if (WARN_ON_ONCE(ser->cb.phys))
+		return;
 	if (ser->arch_state.phys) {
 		kho_restore_free(phys_to_virt(ser->arch_state.phys));
 		ser->arch_state.phys = 0;

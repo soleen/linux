@@ -67,6 +67,38 @@ struct kvm_vcpu_arch_ser {
 static_assert(offsetof(struct kvm_vcpu_arch_ser, sysregs) % sizeof(u64) == 0,
 	      "sysregs pointer must be 64-bit aligned");
 
+/**
+ * struct kvm_caretaker_arch_ser - ARM64-specific Caretaker control block ABI
+ * @cb:               Common Caretaker control block header (must be at offset 0).
+ * @vgic_initialized: Non-zero if @vgic_* fields hold live VGICv3 CPU interface state.
+ * @cflags:           KVM vCPU architectural flags.
+ * @cntvoff_el2:      Guest virtual counter offset active during Caretaker execution.
+ * @hcr_el2:          Hypervisor Configuration Register active during Caretaker execution.
+ * @mdcr_el2:         Monitor Debug Configuration Register active during Caretaker execution.
+ * @used_lrs:         Number of active VGICv3 List Registers.
+ * @vgic_hcr:         VGICv3 Hypervisor Control Register.
+ * @vgic_vmcr:        VGICv3 Virtual Machine Control Register.
+ * @vmid:             Pinned Stage-2 VMID index active during Caretaker execution.
+ * @vgic_ap0r:        VGICv3 Active Priorities Group 0 Registers.
+ * @vgic_ap1r:        VGICv3 Active Priorities Group 1 Registers.
+ * @vgic_lr:          VGICv3 List Registers.
+ */
+struct kvm_caretaker_arch_ser {
+	struct kvm_caretaker_cb_ser cb;
+	u32 vgic_initialized;
+	u32 cflags;
+	u64 cntvoff_el2;
+	u64 hcr_el2;
+	u64 mdcr_el2;
+	u32 used_lrs;
+	u32 vgic_hcr;
+	u32 vgic_vmcr;
+	u32 vmid;
+	u32 vgic_ap0r[4];
+	u32 vgic_ap1r[4];
+	u64 vgic_lr[16];
+} __packed;
+
 #endif /* CONFIG_ARM64 */
 
 #endif /* _LINUX_KHO_ABI_KVM_ARM64_H */

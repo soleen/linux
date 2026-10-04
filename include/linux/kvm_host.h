@@ -2686,6 +2686,7 @@ struct kvm_luo_ser;
 struct kvm_vcpu_ser;
 
 int kvm_arch_vm_luo_preserve(struct kvm *kvm, struct kvm_luo_ser *ser);
+void kvm_arch_vm_luo_unpreserve(struct kvm *kvm, struct kvm_luo_ser *ser);
 
 #ifdef CONFIG_KVM_CARETAKER
 int kvm_arch_vm_luo_freeze(struct kvm *kvm, struct kvm_luo_ser *ser);
