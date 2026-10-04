@@ -107,8 +107,10 @@ static inline u64 native_read_msr(u32 msr)
 
 	val = __rdmsr(msr);
 
+#ifndef __CPU_PRESERVED_RUNTIME__
 	if (tracepoint_enabled(read_msr))
 		do_trace_read_msr(msr, val, 0);
+#endif
 
 	return val;
 }
@@ -123,8 +125,10 @@ static inline int native_read_msr_safe(u32 msr, u64 *p)
 		     _ASM_EXTABLE_TYPE_REG(1b, 2b, EX_TYPE_RDMSR_SAFE, %[err])
 		     : [err] "=r" (err), EAX_EDX_RET(val, low, high)
 		     : "c" (msr));
+#ifndef __CPU_PRESERVED_RUNTIME__
 	if (tracepoint_enabled(read_msr))
 		do_trace_read_msr(msr, EAX_EDX_VAL(val, low, high), err);
+#endif
 
 	*p = EAX_EDX_VAL(val, low, high);
 
@@ -136,8 +140,10 @@ static inline void notrace native_write_msr(u32 msr, u64 val)
 {
 	native_wrmsrq(msr, val);
 
+#ifndef __CPU_PRESERVED_RUNTIME__
 	if (tracepoint_enabled(write_msr))
 		do_trace_write_msr(msr, val, 0);
+#endif
 }
 
 /* Can be uninlined because referenced by paravirt */
@@ -151,8 +157,10 @@ static inline int notrace native_write_msr_safe(u32 msr, u64 val)
 		     : [err] "=a" (err)
 		     : "c" (msr), "0" ((u32)val), "d" ((u32)(val >> 32))
 		     : "memory");
+#ifndef __CPU_PRESERVED_RUNTIME__
 	if (tracepoint_enabled(write_msr))
 		do_trace_write_msr(msr, val, err);
+#endif
 	return err;
 }
 

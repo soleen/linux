@@ -40,7 +40,7 @@ extern void __WARN_trap(struct bug_entry *bug, ...);
 #define BUG_UDB			0xffd6
 #define BUG_LOCK		0xfff0
 
-#ifdef CONFIG_GENERIC_BUG
+#if defined(CONFIG_GENERIC_BUG) && !defined(__CPU_PRESERVED_RUNTIME__)
 
 #ifdef CONFIG_DEBUG_BUGVERBOSE
 #define __BUG_ENTRY_VERBOSE(file, line)					\
@@ -110,6 +110,7 @@ do {									\
 
 #endif /* CONFIG_GENERIC_BUG */
 
+#ifndef __CPU_PRESERVED_RUNTIME__
 #define HAVE_ARCH_BUG
 #define BUG()							\
 do {								\
@@ -134,6 +135,7 @@ do {									\
 	_BUG_FLAGS(cond_str, ASM_UD2, __flags, ARCH_WARN_REACHABLE);	\
 	instrumentation_end();						\
 } while (0)
+#endif /* !__CPU_PRESERVED_RUNTIME__ */
 
 #ifdef HAVE_ARCH_BUG_FORMAT_ARGS
 
