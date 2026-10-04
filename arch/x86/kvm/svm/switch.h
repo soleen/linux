@@ -58,7 +58,14 @@ static inline int svm_switch_emulate_skip(struct kvm_vcpu *vcpu, int emul_type,
 	kvm_rip_write(vcpu, kvm_rip_read(vcpu) + len);
 	return 1;
 }
+
+static inline void svm_switch_on_pause(struct kvm_vcpu *vcpu)
+{
+	cpu_relax();
+}
 #else /* !__CPU_PRESERVED_RUNTIME__ */
+static void grow_ple_window(struct kvm_vcpu *vcpu);
+
 static inline void svm_switch_cache_pdptrs(struct kvm_vcpu *vcpu)
 {
 	if (npt_enabled)
@@ -91,6 +98,22 @@ static inline int svm_switch_emulate_skip(struct kvm_vcpu *vcpu, int emul_type,
 		svm->vmcb->save.rflags = old_rflags;
 
 	return 1;
+}
+
+static inline void svm_switch_on_pause(struct kvm_vcpu *vcpu)
+{
+	bool in_kernel;
+
+	/*
+	 * CPL is not made available for an SEV-ES guest, therefore
+	 * vcpu->arch.preempted_in_kernel can never be true.  Just
+	 * set in_kernel to false as well.
+	 */
+	in_kernel = !is_sev_es_guest(vcpu) && svm_get_cpl(vcpu) == 0;
+
+	grow_ple_window(vcpu);
+
+	kvm_vcpu_on_spin(vcpu, in_kernel);
 }
 #endif /* __CPU_PRESERVED_RUNTIME__ */
 
@@ -306,6 +329,36 @@ done:
 		svm_set_interrupt_shadow(vcpu, 0);
 
 	return 1;
+}
+
+static inline int nmi_interception(struct kvm_vcpu *vcpu)
+{
+	return 1;
+}
+
+static inline int smi_interception(struct kvm_vcpu *vcpu)
+{
+	return 1;
+}
+
+static inline int intr_interception(struct kvm_vcpu *vcpu)
+{
+	++vcpu->stat.irq_exits;
+	return 1;
+}
+
+static inline int pause_interception(struct kvm_vcpu *vcpu)
+{
+	svm_switch_on_pause(vcpu);
+	return kvm_skip_emulated_instruction(vcpu);
+}
+
+static inline int msr_interception(struct kvm_vcpu *vcpu)
+{
+	if (to_svm(vcpu)->vmcb->control.exit_info_1)
+		return kvm_emulate_wrmsr(vcpu);
+	else
+		return kvm_emulate_rdmsr(vcpu);
 }
 
 #endif /* __KVM_X86_SVM_SWITCH_H */
