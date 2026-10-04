@@ -329,6 +329,8 @@ static void init_insn_state(struct objtool_file *file, struct insn_state *state,
 
 	if (opts.noinstr && sec)
 		state->noinstr = sec->noinstr;
+	if (sec)
+		state->cpu_preserved = sec->cpu_preserved;
 }
 
 static struct cfi_state *cfi_alloc(void)
@@ -418,6 +420,12 @@ static int decode_instructions(struct objtool_file *file)
 		struct instruction *insns = NULL;
 		u8 prev_len = 0;
 		u8 idx = 0;
+
+		if (!strncmp(sec->name, ".cpu_preserved.text", 19) ||
+		    !strncmp(sec->name, ".cpu_preserved.data", 19) ||
+		    !strncmp(sec->name, ".cpu_preserved.ex_table", 23) ||
+		    !strncmp(sec->name, ".cpu_preserved.bss", 18))
+			sec->cpu_preserved = true;
 
 		if (!is_text_sec(sec))
 			continue;
@@ -3511,6 +3519,18 @@ static int validate_call(struct objtool_file *file,
 			 struct instruction *insn,
 			 struct insn_state *state)
 {
+	if (state->cpu_preserved) {
+		struct symbol *dest = insn_call_dest(insn);
+
+		if (dest && !dest->sec->cpu_preserved &&
+		    (dest->sec->idx != SHN_UNDEF || opts.link ||
+		     strncmp(dest->name, "__cpu_preserved_", 16))) {
+			WARN_INSN(insn, "call to %s() leaves .cpu_preserved.text section",
+				  call_dest_name(insn));
+			return 1;
+		}
+	}
+
 	if (state->noinstr && state->instr <= 0 &&
 	    !noinstr_call_dest(file, insn, insn_call_dest(insn))) {
 		WARN_INSN(insn, "call to %s() leaves .noinstr.text section", call_dest_name(insn));
@@ -4164,7 +4184,14 @@ static int validate_retpoline(struct objtool_file *file)
 		if (insn->retpoline_safe)
 			continue;
 
-		if (insn->sec->init)
+		/*
+		 * Preserved CPU text (.cpu_preserved.text) executes across
+		 * kexec when the outgoing kernel's retpoline/rethunk targets
+		 * are no longer mapped.
+		 */
+		if (insn->sec->init || insn->sec->cpu_preserved ||
+		    (insn->alt_group && insn->alt_group->orig_group &&
+		     insn->alt_group->orig_group->first_insn->sec->cpu_preserved))
 			continue;
 
 		if (insn->type == INSN_RETURN) {
@@ -4440,6 +4467,12 @@ static int validate_noinstr_sections(struct objtool_file *file)
 		warnings += validate_unwind_hints(file, sec);
 	}
 
+	sec = find_section_by_name(file->elf, ".cpu_preserved.text");
+	if (sec) {
+		warnings += validate_section(file, sec);
+		warnings += validate_unwind_hints(file, sec);
+	}
+
 	return warnings;
 }
 
@@ -4653,6 +4686,7 @@ static int validate_ibt(struct objtool_file *file)
 		    !strcmp(sec->name, "_kprobe_blacklist")		||
 		    !strcmp(sec->name, "__bug_table")			||
 		    !strcmp(sec->name, "__ex_table")			||
+		    !strcmp(sec->name, ".cpu_preserved.ex_table")	||
 		    !strcmp(sec->name, "__jump_table")			||
 		    !strcmp(sec->name, ".init.klp_funcs")		||
 		    !strcmp(sec->name, "__mcount_loc")			||
