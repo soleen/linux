@@ -62,6 +62,14 @@ static void vt_vm_destroy(struct kvm *kvm)
        vmx_vm_destroy(kvm);
 }
 
+#if defined(CONFIG_KVM_CARETAKER) && defined(CONFIG_KVM_INTEL)
+static void vt_vm_collect_kho(struct kvm *kvm, struct kvm_kho_pages *acc)
+{
+	if (!is_td(kvm))
+		vmx_vm_collect_kho(kvm, acc);
+}
+#endif
+
 static int vt_vcpu_precreate(struct kvm *kvm)
 {
 	if (is_td(kvm))
@@ -903,6 +911,9 @@ struct kvm_x86_ops vt_x86_ops __initdata = {
 	.vm_init = vt_op(vm_init),
 	.vm_destroy = vt_op(vm_destroy),
 	.vm_pre_destroy = vt_op_tdx_only(vm_pre_destroy),
+#if defined(CONFIG_KVM_CARETAKER) && defined(CONFIG_KVM_INTEL)
+	.vm_collect_kho = vt_op(vm_collect_kho),
+#endif
 
 	.vcpu_precreate = vt_op(vcpu_precreate),
 	.vcpu_create = vt_op(vcpu_create),

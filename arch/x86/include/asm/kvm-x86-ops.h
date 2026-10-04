@@ -23,6 +23,9 @@ KVM_X86_OP(vcpu_after_set_cpuid)
 KVM_X86_OP(vm_init)
 KVM_X86_OP_OPTIONAL(vm_destroy)
 KVM_X86_OP_OPTIONAL(vm_pre_destroy)
+#ifdef CONFIG_KVM_CARETAKER
+KVM_X86_OP_OPTIONAL(vm_collect_kho)
+#endif
 KVM_X86_OP_OPTIONAL_RET0(vcpu_precreate)
 KVM_X86_OP(vcpu_create)
 KVM_X86_OP(vcpu_free)
