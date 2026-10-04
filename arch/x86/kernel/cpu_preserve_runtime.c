@@ -29,6 +29,7 @@ struct desc_ptr x86_preserved_idt_desc;
 
 struct desc_struct x86_preserved_gdt[GDT_ENTRIES] __aligned(PAGE_SIZE);
 struct desc_ptr x86_preserved_gdt_desc;
+bool x86_preserved_has_svm;
 
 static bool x86_preserved_fixup_exception(struct pt_regs *regs, int trapnr)
 {
@@ -160,10 +161,37 @@ void arch_cpu_preserved_park_init(int cpu)
 }
 
 /*
+ * Disable hardware virtualization on physical core so INIT is recognized.
+ */
+static void arch_cpu_preserved_virt_teardown(void)
+{
+	unsigned long cr4;
+
+	asm volatile("mov %%cr4, %0" : "=r" (cr4));
+	if (cr4 & X86_CR4_VMXE) {
+		asm volatile("1: vmxoff\n\t"
+			     "2:\n\t"
+			     _ASM_EXTABLE(1b, 2b)
+			     : : : "memory", "cc");
+		asm volatile("mov %0, %%cr4" : : "r" (cr4 & ~X86_CR4_VMXE) : "memory");
+	}
+
+	if (x86_preserved_has_svm) {
+		u64 efer = native_rdmsrq(MSR_EFER);
+
+		if (efer & EFER_SVME) {
+			asm volatile("stgi" : : : "memory");
+			native_wrmsrq(MSR_EFER, efer & ~EFER_SVME);
+		}
+	}
+}
+
+/*
  * Architecture cleanup on park loop exit.
  */
 void arch_cpu_preserved_park_finish(int cpu __maybe_unused)
 {
+	arch_cpu_preserved_virt_teardown();
 }
 
 bool arch_cpu_preserved_is_active(void)

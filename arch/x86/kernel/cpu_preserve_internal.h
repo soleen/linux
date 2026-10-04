@@ -11,6 +11,8 @@ extern struct desc_struct x86_preserved_gdt[GDT_ENTRIES]
 	__cpu_preserved_sym_asm(x86_preserved_gdt);
 extern struct desc_ptr x86_preserved_gdt_desc
 	__cpu_preserved_sym_asm(x86_preserved_gdt_desc);
+extern bool x86_preserved_has_svm
+	__cpu_preserved_sym_asm(x86_preserved_has_svm);
 extern const char x86_preserved_exc_handler_array[NUM_EXCEPTION_VECTORS][EARLY_IDT_HANDLER_SIZE]
 	__cpu_preserved_sym_asm(x86_preserved_exc_handler_array);
 

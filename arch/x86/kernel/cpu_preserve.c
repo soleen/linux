@@ -82,6 +82,9 @@ static void init_preserved_gdt(void)
 
 void arch_cpu_preserved_early_init(void)
 {
+	x86_preserved_has_svm = boot_cpu_has(X86_FEATURE_SVM);
+	cpu_preserved_clean(&x86_preserved_has_svm);
+
 	init_preserved_idt();
 	init_preserved_gdt();
 }
