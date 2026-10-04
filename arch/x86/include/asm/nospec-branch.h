@@ -323,10 +323,12 @@
 .macro __UNTRAIN_RET ibpb_feature, call_depth_insns
 #if defined(CONFIG_MITIGATION_RETHUNK) || defined(CONFIG_MITIGATION_IBPB_ENTRY)
 	VALIDATE_UNRET_END
+#ifndef __CPU_PRESERVED_RUNTIME__
 	CALL_UNTRAIN_RET
 	ALTERNATIVE_2 "",						\
 		      "call write_ibpb", \ibpb_feature,			\
 		     __stringify(\call_depth_insns), X86_FEATURE_CALL_DEPTH
+#endif
 #endif
 .endm
 

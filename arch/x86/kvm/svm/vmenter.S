@@ -56,8 +56,10 @@ SYM_FUNC_START(__svm_vcpu_run)
 	/* Accessed directly from the stack in RESTORE_HOST_SPEC_CTRL.  */
 	push %_ASM_ARG2
 
+#ifndef __CPU_PRESERVED_RUNTIME__
 	/* Needed to restore access to percpu variables.  */
 	__ASM_SIZE(push) PER_CPU_VAR(svm_data + SD_save_area_pa)
+#endif
 
 	/* Finally save @svm. */
 	push %_ASM_ARG1
@@ -127,10 +129,12 @@ SYM_FUNC_START(__svm_vcpu_run)
 5:	vmsave %_ASM_AX
 6:
 
+#ifndef __CPU_PRESERVED_RUNTIME__
 	/* Restores GSBASE among other things, allowing access to percpu data.  */
 	pop %_ASM_AX
 7:	vmload %_ASM_AX
 8:
+#endif
 
 	/* IMPORTANT: Stuff the RSB immediately after VM-Exit, before RET! */
 	FILL_RETURN_BUFFER %_ASM_AX, RSB_CLEAR_LOOPS, X86_FEATURE_RSB_VMEXIT
@@ -189,6 +193,7 @@ SYM_FUNC_START(__svm_vcpu_run)
 	RESTORE_HOST_SPEC_CTRL_BODY SVM_spec_ctrl(%_ASM_DI), (%_ASM_SP), 901b
 	jmp 901b
 
+#ifndef __CPU_PRESERVED_RUNTIME__
 10:	cmpb $0, _ASM_RIP(virt_rebooting)
 	jne 2b
 	ud2
@@ -206,10 +211,11 @@ SYM_FUNC_START(__svm_vcpu_run)
 	_ASM_EXTABLE(3b, 30b)
 	_ASM_EXTABLE(5b, 50b)
 	_ASM_EXTABLE(7b, 70b)
+#endif
 
 SYM_FUNC_END(__svm_vcpu_run)
 
-#ifdef CONFIG_KVM_AMD_SEV
+#if defined(CONFIG_KVM_AMD_SEV) && !defined(__CPU_PRESERVED_RUNTIME__)
 
 #define SEV_ES_GPRS_BASE 0x300
 
