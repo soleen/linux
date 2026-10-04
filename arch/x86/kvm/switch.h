@@ -15,11 +15,17 @@
 
 #include "cpuid.h"
 #include "lapic.h"
+#include "regs.h"
 #include "x86.h"
 
 /*
  * Shared LAPIC register and IRR/PIR helpers (used by lapic.c and Caretaker).
  */
+static inline int apic_lvtt_tscdeadline(struct kvm_lapic *apic)
+{
+	return apic->lapic_timer.timer_mode == APIC_LVT_TIMER_TSCDEADLINE;
+}
+
 static inline bool ____kvm_apic_update_irr(unsigned long *pir, void *regs,
 					   int *max_irr)
 {
@@ -88,6 +94,16 @@ static inline int apic_find_highest_irr(struct kvm_lapic *apic)
 	return apic_search_irr(apic);
 }
 
+static inline u64 __kvm_get_lapic_tscdeadline_msr(struct kvm_vcpu *vcpu)
+{
+	struct kvm_lapic *apic = vcpu->arch.apic;
+
+	if (!kvm_apic_present(vcpu) || !apic_lvtt_tscdeadline(apic))
+		return 0;
+
+	return apic->lapic_timer.tscdeadline;
+}
+
 /*
  * Shared CPUID lookup helpers (used by cpuid.c and Caretaker).
  */
@@ -113,6 +129,16 @@ static inline struct kvm_cpuid_entry2 *__kvm_find_cpuid_entry2(
 	}
 
 	return NULL;
+}
+
+static inline unsigned long __kvm_get_rflags(struct kvm_vcpu *vcpu)
+{
+	unsigned long rflags;
+
+	rflags = kvm_x86_call(get_rflags)(vcpu);
+	if (vcpu->guest_debug & KVM_GUESTDBG_SINGLESTEP)
+		rflags &= ~X86_EFLAGS_TF;
+	return rflags;
 }
 
 static inline struct kvm_cpuid_entry2 *
