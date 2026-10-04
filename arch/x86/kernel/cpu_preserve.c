@@ -110,11 +110,39 @@ void arch_cpu_preserved_kick(int cpu)
 	native_wrmsrq(APIC_BASE_MSR + (APIC_ICR >> 4), val);
 }
 
+static void arch_cpu_preserved_set_max_perf(void)
+{
+	u64 cap;
+
+	/* Intel HWP (Speed Shift): autonomously request maximum performance */
+	if (boot_cpu_has(X86_FEATURE_HWP) &&
+	    !rdmsrq_safe(MSR_HWP_CAPABILITIES, &cap)) {
+		u8 highest = HWP_HIGHEST_PERF(cap);
+
+		if (highest) {
+			wrmsrq_safe(MSR_HWP_REQUEST, HWP_MIN_PERF(highest) |
+				    HWP_MAX_PERF(highest) |
+				    HWP_DESIRED_PERF(highest));
+		}
+	}
+
+	/* Intel Energy Performance Bias: hint for maximum performance */
+	if (boot_cpu_has(X86_FEATURE_EPB))
+		wrmsrq_safe(MSR_IA32_ENERGY_PERF_BIAS, ENERGY_PERF_BIAS_PERFORMANCE);
+
+	/* AMD CPPC: request maximum performance ratio and zero energy preference */
+	if (boot_cpu_has(X86_FEATURE_CPPC)) {
+		wrmsrq_safe(MSR_AMD_CPPC_REQ, AMD_CPPC_MAX_PERF_MASK |
+			    AMD_CPPC_MIN_PERF_MASK | AMD_CPPC_DES_PERF_MASK);
+	}
+}
+
 /*
  * Switch stack and enter park loop.
  */
 void arch_cpu_preserved_park_on_stack(int cpu, unsigned long stack_top)
 {
+	arch_cpu_preserved_set_max_perf();
 	arch_cpu_preserved_call_on_stack(cpu, stack_top, arch_cpu_preserved_park_worker);
 }
 
