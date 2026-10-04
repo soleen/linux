@@ -6752,91 +6752,9 @@ void vmx_hwapic_isr_update(struct kvm_vcpu *vcpu, int max_isr)
 	}
 }
 
-static void vmx_set_rvi(int vector)
-{
-	u16 status;
-	u8 old;
-
-	if (vector == -1)
-		vector = 0;
-
-	status = vmcs_read16(GUEST_INTR_STATUS);
-	old = (u8)status & 0xff;
-	if ((u8)vector != old) {
-		status &= ~0xff;
-		status |= (u8)vector;
-		vmcs_write16(GUEST_INTR_STATUS, status);
-	}
-}
-
 int vmx_sync_pir_to_irr(struct kvm_vcpu *vcpu)
 {
-	struct vcpu_vt *vt = to_vt(vcpu);
-	bool max_irr_is_from_pir;
-	int max_irr;
-
-	if (KVM_BUG_ON(!enable_apicv, vcpu->kvm))
-		return -EIO;
-
-	if (pi_test_on(&vt->pi_desc)) {
-		pi_clear_on(&vt->pi_desc);
-		/*
-		 * IOMMU can write to PID.ON, so the barrier matters even on UP.
-		 * But on x86 this is just a compiler barrier anyway.
-		 */
-		smp_mb__after_atomic();
-		max_irr_is_from_pir = kvm_apic_update_irr(vcpu, vt->pi_desc.pir,
-							  &max_irr);
-	} else {
-		max_irr = kvm_lapic_find_highest_irr(vcpu);
-		max_irr_is_from_pir = false;
-	}
-
-	/*
-	 * If APICv is enabled and L2 is not active, then update the Requesting
-	 * Virtual Interrupt (RVI) portion of vmcs01.GUEST_INTR_STATUS with the
-	 * highest priority IRR to deliver the IRQ via Virtual Interrupt
-	 * Delivery.  Note, this is required even if the highest priority IRQ
-	 * was already pending in the IRR, as RVI isn't updated in lockstep with
-	 * the IRR (unlike apic->irr_pending).
-	 *
-	 * For the cases where Virtual Interrupt Delivery can't be used:
-	 *
-	 * 1) If L2 is running and the vCPU has a new pending interrupt.  If L1
-	 * wants to exit on interrupts, KVM_REQ_EVENT is needed to synthesize a
-	 * VM-Exit to L1.  If L1 doesn't want to exit, the interrupt is injected
-	 * into L2, but KVM doesn't use virtual interrupt delivery to inject
-	 * interrupts into L2, and so KVM_REQ_EVENT is again needed.
-	 *
-	 * 2) If APICv is disabled for this vCPU, assigned devices may still
-	 * attempt to post interrupts.  The posted interrupt vector will cause
-	 * a VM-Exit and the subsequent entry will call sync_pir_to_irr.
-	 *
-	 * In both cases, set KVM_REQ_EVENT if and only if the highest priority
-	 * pending IRQ came from the PIR, as setting KVM_REQ_EVENT if any IRQ
-	 * is pending may put the vCPU into an infinite loop, e.g. if the IRQ
-	 * is blocked, then it will stay pending until an IRQ window is opened.
-	 *
-	 * Note!  It's possible that one or more IRQs were moved from the PIR
-	 * to the IRR _without_ max_irr_is_from_pir being true!  I.e. if there
-	 * was a higher priority IRQ already pending in the IRR.  Not setting
-	 * KVM_REQ_EVENT in this case is intentional and safe.  If APICv is
-	 * inactive, or L2 is running with exit-on-interrupt off (in vmcs12),
-	 * i.e. without nested virtual interrupt delivery, then there's no need
-	 * to request an IRQ window as the lower priority IRQ only needs to be
-	 * delivered when the higher priority IRQ is dismissed from the ISR,
-	 * i.e. on the next EOI, and EOIs are always intercepted if APICv is
-	 * disabled or if L2 is running without nested VID.  If L2 is running
-	 * exit-on-interrupt on (in vmcs12), then the higher priority IRQ will
-	 * trigger a nested VM-Exit, at which point KVM will re-evaluate L1's
-	 * pending IRQs.
-	 */
-	if (!is_guest_mode(vcpu) && kvm_vcpu_apicv_active(vcpu))
-		vmx_set_rvi(max_irr);
-	else if (max_irr_is_from_pir)
-		kvm_make_request(KVM_REQ_EVENT, vcpu);
-
-	return max_irr;
+	return __vmx_sync_pir_to_irr(vcpu);
 }
 
 void vmx_load_eoi_exitmap(struct kvm_vcpu *vcpu, u64 *eoi_exit_bitmap)

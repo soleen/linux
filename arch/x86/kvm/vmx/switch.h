@@ -404,4 +404,52 @@ static inline int __vmx_skip_emulated_instruction(struct kvm_vcpu *vcpu)
 	return skip_emulated_instruction(vcpu);
 }
 
+static inline void vmx_set_rvi(int vector)
+{
+	u16 status;
+	u8 old;
+
+	if (vector == -1)
+		vector = 0;
+
+	status = vmcs_read16(GUEST_INTR_STATUS);
+	old = (u8)status & 0xff;
+	if ((u8)vector != old) {
+		status &= ~0xff;
+		status |= (u8)vector;
+		vmcs_write16(GUEST_INTR_STATUS, status);
+	}
+}
+
+static inline int __vmx_sync_pir_to_irr(struct kvm_vcpu *vcpu)
+{
+	struct vcpu_vt *vt = to_vt(vcpu);
+	bool max_irr_is_from_pir;
+	int max_irr;
+
+	if (KVM_BUG_ON(!enable_apicv, vcpu->kvm))
+		return -EIO;
+
+	if (pi_test_on(&vt->pi_desc)) {
+		pi_clear_on(&vt->pi_desc);
+		/*
+		 * IOMMU can write to PID.ON, so the barrier matters even on UP.
+		 * But on x86 this is just a compiler barrier anyway.
+		 */
+		smp_mb__after_atomic();
+		max_irr_is_from_pir = kvm_apic_update_irr(vcpu, vt->pi_desc.pir,
+							  &max_irr);
+	} else {
+		max_irr = kvm_lapic_find_highest_irr(vcpu);
+		max_irr_is_from_pir = false;
+	}
+
+	if (!is_guest_mode(vcpu) && kvm_vcpu_apicv_active(vcpu))
+		vmx_set_rvi(max_irr);
+	else if (max_irr_is_from_pir)
+		kvm_make_request(KVM_REQ_EVENT, vcpu);
+
+	return max_irr;
+}
+
 #endif /* __KVM_X86_VMX_SWITCH_H */
