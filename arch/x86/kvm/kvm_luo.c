@@ -20,6 +20,7 @@
 #include <linux/mem_encrypt.h>
 #include <asm/virt.h>
 
+#include "caretaker/caretaker.h"
 #include "cpuid.h"
 #include "fpu.h"
 #include "lapic.h"
@@ -152,6 +153,14 @@ int kvm_arch_vcpu_luo_preserve(struct kvm_vcpu *vcpu, struct kvm_vcpu_ser *ser)
 
 	KHOSER_STORE_PTR(ser->arch_state, state);
 
+	if (IS_ENABLED(CONFIG_KVM_CARETAKER)) {
+		ret = kvm_arch_vcpu_caretaker_preserve(vcpu, ser, state, size);
+		if (ret) {
+			ser->arch_state.phys = 0;
+			goto err_free;
+		}
+	}
+
 	return 0;
 
 err_put:
@@ -227,14 +236,27 @@ int kvm_arch_vcpu_luo_retrieve(struct kvm_vcpu *vcpu, struct kvm_vcpu_ser *ser)
 	if (kvm_nested_ops.enabled)
 		kvm_leave_nested(vcpu);
 
-	kvm_vcpu_srcu_read_lock(vcpu);
-	ret = kvm_vcpu_ioctl_x86_set_vcpu_events(vcpu, &state->events);
-	kvm_vcpu_srcu_read_unlock(vcpu);
-	if (ret)
-		goto out;
+	if (!KHOSER_LOAD_PTR(ser->cb)) {
+		kvm_vcpu_srcu_read_lock(vcpu);
+		ret = kvm_vcpu_ioctl_x86_set_vcpu_events(vcpu, &state->events);
+		kvm_vcpu_srcu_read_unlock(vcpu);
+		if (ret)
+			goto out;
+	}
 
 	if (lapic_in_kernel(vcpu)) {
-		ret = kvm_vcpu_ioctl_set_lapic(vcpu, &state->lapic);
+		if (KHOSER_LOAD_PTR(ser->cb)) {
+			struct kvm_lapic_state lapic = state->lapic;
+			int k;
+
+			for (k = 0; k < 8; k++) {
+				*(u32 *)(lapic.regs + APIC_ISR + 0x10 * k) = 0;
+				*(u32 *)(lapic.regs + APIC_IRR + 0x10 * k) = 0;
+			}
+			ret = kvm_vcpu_ioctl_set_lapic(vcpu, &lapic);
+		} else {
+			ret = kvm_vcpu_ioctl_set_lapic(vcpu, &state->lapic);
+		}
 		if (ret)
 			goto out;
 	}
@@ -259,6 +281,9 @@ out:
 
 void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_ser *ser)
 {
+	kvm_arch_vcpu_caretaker_unpreserve(ser);
+	if (WARN_ON_ONCE(ser->cb.phys))
+		return;
 	if (ser->arch_state.phys) {
 		struct kvm_vcpu_arch_ser *state =
 			phys_to_virt(__sme_clr(ser->arch_state.phys));
@@ -270,6 +295,9 @@ void kvm_arch_vcpu_luo_unpreserve(struct kvm_vcpu_ser *ser)
 
 void kvm_arch_vcpu_luo_finish(struct kvm_vcpu_ser *ser)
 {
+	kvm_arch_vcpu_caretaker_finish(ser);
+	if (WARN_ON_ONCE(ser->cb.phys))
+		return;
 	if (ser->arch_state.phys) {
 		struct kvm_vcpu_arch_ser *state =
 			phys_to_virt(__sme_clr(ser->arch_state.phys));
