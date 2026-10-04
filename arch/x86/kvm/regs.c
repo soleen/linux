@@ -4,6 +4,7 @@
 #include "lapic.h"
 #include "mmu.h"
 #include "regs.h"
+#include "switch.h"
 #include "x86.h"
 
 unsigned long kvm_get_linear_rip(struct kvm_vcpu *vcpu)
@@ -27,12 +28,7 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_is_linear_rip);
 
 unsigned long kvm_get_rflags(struct kvm_vcpu *vcpu)
 {
-	unsigned long rflags;
-
-	rflags = kvm_x86_call(get_rflags)(vcpu);
-	if (vcpu->guest_debug & KVM_GUESTDBG_SINGLESTEP)
-		rflags &= ~X86_EFLAGS_TF;
-	return rflags;
+	return __kvm_get_rflags(vcpu);
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_get_rflags);
 
