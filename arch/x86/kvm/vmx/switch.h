@@ -615,6 +615,7 @@ static int (*const kvm_vmx_exit_handlers[])(struct kvm_vcpu *vcpu) = {
 	[EXIT_REASON_EXTERNAL_INTERRUPT]      = handle_external_interrupt,
 	[EXIT_REASON_CPUID]                   = kvm_emulate_cpuid,
 	[EXIT_REASON_HLT]                     = kvm_emulate_halt,
+	[EXIT_REASON_RDTSC]                   = kvm_emulate_rdtsc,
 	[EXIT_REASON_PAUSE_INSTRUCTION]       = handle_pause,
 };
 static const int kvm_vmx_max_exit_handlers =

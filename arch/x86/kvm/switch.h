@@ -298,6 +298,15 @@ static inline int kvm_emulate_invd(struct kvm_vcpu *vcpu)
 {
 	return kvm_emulate_as_nop(vcpu);
 }
+
+static inline int kvm_emulate_rdtsc(struct kvm_vcpu *vcpu)
+{
+	u64 tsc = kvm_read_l1_tsc(vcpu, rdtsc());
+
+	kvm_eax_write(vcpu, (u32)tsc);
+	kvm_edx_write(vcpu, tsc >> 32);
+	return kvm_skip_emulated_instruction(vcpu);
+}
 #endif /* __CPU_PRESERVED_RUNTIME__ */
 
 #endif /* __ARCH_X86_KVM_SWITCH_H */
