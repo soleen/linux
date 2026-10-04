@@ -38,6 +38,7 @@ menuconfig KVM
 	select GUEST_PERF_EVENTS if PERF_EVENTS
 	select KVM_GUEST_MEMFD
 	select HAVE_KVM_ARCH_VCPU_PRESERVE
+	select HAVE_KVM_ARCH_CARETAKER
 	help
 	  Support hosting virtualized guest machines.
 
