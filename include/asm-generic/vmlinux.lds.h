@@ -655,6 +655,48 @@
 		*(.static_call.text)					\
 		__static_call_text_end = .;
 
+/*
+ * Page-aligned text and data sections for preserved CPUs.
+ * This code and data are KHO preserved when CPUs are preserved across
+ * live update.
+ */
+#ifdef CONFIG_CFI
+#define CPU_PRESERVED_CFI_ALIASES					\
+		PROVIDE(__cpu_preserved___kcfi_typeid___memcpy = __kcfi_typeid___memcpy); \
+		PROVIDE(__cpu_preserved___kcfi_typeid___memmove = __kcfi_typeid___memmove); \
+		PROVIDE(__cpu_preserved___kcfi_typeid___memset = __kcfi_typeid___memset); \
+		PROVIDE(__cpu_preserved___kcfi_typeid_memcpy = __kcfi_typeid_memcpy); \
+		PROVIDE(__cpu_preserved___kcfi_typeid_memmove = __kcfi_typeid_memmove); \
+		PROVIDE(__cpu_preserved___kcfi_typeid_memset = __kcfi_typeid_memset);
+#else
+#define CPU_PRESERVED_CFI_ALIASES
+#endif
+
+#ifdef CONFIG_LIVEUPDATE_CPU
+#define CPU_PRESERVED_TEXT						\
+		. = ALIGN(PAGE_SIZE);					\
+		__cpu_preserved_text_start = .;				\
+		*(.cpu_preserved.text .cpu_preserved.text.*)		\
+		CPU_PRESERVED_CFI_ALIASES				\
+		. = ALIGN(PAGE_SIZE);					\
+		__cpu_preserved_text_end = .;
+
+#define CPU_PRESERVED_DATA						\
+		. = ALIGN(PAGE_SIZE);					\
+		__cpu_preserved_data_start = .;				\
+		*(.cpu_preserved.data .cpu_preserved.data.*)		\
+		. = ALIGN(4);						\
+		__cpu_preserved_ex_table_start = .;			\
+		*(.cpu_preserved.ex_table)				\
+		__cpu_preserved_ex_table_end = .;			\
+		*(.cpu_preserved.bss .cpu_preserved.bss.*)		\
+		. = ALIGN(PAGE_SIZE);					\
+		__cpu_preserved_data_end = .;
+#else
+#define CPU_PRESERVED_TEXT
+#define CPU_PRESERVED_DATA
+#endif
+
 /* Section used for early init (in .S files) */
 #define HEAD_TEXT  KEEP(*(.head.text))
 
@@ -1155,6 +1197,7 @@
 		INIT_TASK_DATA(inittask)				\
 		NOSAVE_DATA						\
 		PAGE_ALIGNED_DATA(pagealigned)				\
+		CPU_PRESERVED_DATA					\
 		CACHE_HOT_DATA(cacheline)				\
 		CACHELINE_ALIGNED_DATA(cacheline)			\
 		READ_MOSTLY_DATA(cacheline)				\
