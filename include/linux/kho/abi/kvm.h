@@ -101,6 +101,28 @@ enum kvm_caretaker_state {
 };
 
 /**
+ * struct kvm_caretaker_telemetry_ser - Serialized Caretaker execution telemetry
+ * @total_runs: Total guest entry attempts across Caretaker quantums.
+ * @total_exits: Total VM exits decoded during Caretaker execution.
+ * @stall_count: Number of times Caretaker exited due to stall or error.
+ * @last_exit_reason: Raw architecture exit reason of most recent VM exit.
+ * @last_exit_rip: Guest instruction pointer at most recent VM exit.
+ * @stall_exit_reason: Raw architecture exit reason or error at stall.
+ * @stall_exit_rip: Guest instruction pointer at stall.
+ */
+#define KVM_CARETAKER_FAULT_STALL_BASE	0xbad00000ULL
+
+struct kvm_caretaker_telemetry_ser {
+	u64 total_runs;
+	u64 total_exits;
+	u64 stall_count;
+	u64 last_exit_reason;
+	u64 last_exit_rip;
+	u64 stall_exit_reason;
+	u64 stall_exit_rip;
+} __packed;
+
+/**
  * struct kvm_kho_folios_ser - Serialized list of KHO-preserved folios for a VM
  * @nr_folios: Number of physical folio addresses in @folios_pa.
  * @folios_pa: Physical addresses of folios preserved via kho_preserve_folio().
@@ -116,6 +138,7 @@ struct kvm_kho_folios_ser {
  * @pcpu_id:   Physical CPU ID where this vCPU runs while in Caretaker.
  * @vcpu_id:   Guest vCPU identifier.
  * @reserved:  Must be zero.
+ * @telemetry: Preservation pointer to Caretaker execution telemetry.
  *
  * Coordinates vCPU execution state across hypervisor detachment,
  * live update, and Caretaker CPU preservation.
@@ -125,6 +148,7 @@ struct kvm_caretaker_cb_ser {
 	u32 pcpu_id;
 	u32 vcpu_id;
 	u32 reserved;
+	DECLARE_KHOSER_PTR(telemetry, struct kvm_caretaker_telemetry_ser *);
 } __packed;
 
 /**

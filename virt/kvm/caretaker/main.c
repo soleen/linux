@@ -285,7 +285,7 @@ out:
 }
 
 /**
- * kvm_caretaker_vcpu_is_attached - Check whether a vCPU is currently attached to host KVM
+ * kvm_caretaker_vcpu_is_attached - Check whether a vCPU has attached back to host KVM
  * @vcpu: Target KVM vCPU.
  *
  * Return: %true if @vcpu is owned by host KVM, %false if still owned by
@@ -331,10 +331,12 @@ int kvm_caretaker_init_common_vcpu(struct kvm_caretaker_vcpu *cvcpu,
 	cb->pcpu_id = oncore_job_cpu(vcpu->caretaker.job);
 	cb->vcpu_id = vcpu->vcpu_id;
 	cb->reserved = 0;
+	cb->telemetry.phys = 0;
 
 	cvcpu->cb = cb;
 	cvcpu->ops = ops;
 	cvcpu->arch_data = arch_data ? arch_data : cvcpu;
+	cvcpu->telemetry = NULL;
 
 	vcpu->caretaker.cb = cb;
 	vcpu->caretaker.attached = false;
@@ -745,3 +747,4 @@ int kvm_caretaker_vcpu_finish(struct kvm_vcpu *vcpu,
 		vcpu->caretaker.cb = NULL;
 	return 0;
 }
+
