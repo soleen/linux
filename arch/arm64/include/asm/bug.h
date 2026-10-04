@@ -14,6 +14,7 @@
 #define __BUG_FLAGS(flags)				\
 	asm volatile (__stringify(ASM_BUG_FLAGS(flags)));
 
+#ifndef __CPU_PRESERVED_RUNTIME__
 #define BUG() do {					\
 	__BUG_FLAGS(0);					\
 	unreachable();					\
@@ -22,6 +23,7 @@
 #define __WARN_FLAGS(cond_str, flags) __BUG_FLAGS(BUGFLAG_WARNING|(flags))
 
 #define HAVE_ARCH_BUG
+#endif /* !__CPU_PRESERVED_RUNTIME__ */
 
 #include <asm-generic/bug.h>
 
