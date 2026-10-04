@@ -26,11 +26,18 @@ kvm-intel-$(CONFIG_KVM_CARETAKER) += caretaker/vmx.o $(kvm-intel-preserved-y)
 preserved-obj-$(CONFIG_KVM_CARETAKER) += $(kvm-intel-preserved-y)
 endif
 
+
 kvm-intel-$(CONFIG_X86_SGX_KVM)	+= vmx/sgx.o
 kvm-intel-$(CONFIG_KVM_HYPERV)	+= vmx/hyperv.o vmx/hyperv_evmcs.o
 kvm-intel-$(CONFIG_KVM_INTEL_TDX)	+= vmx/tdx.o
 
 kvm-amd-y		+= svm/svm.o svm/vmenter.o svm/pmu.o svm/nested.o svm/avic.o
+ifeq ($(CONFIG_KVM_AMD),y)
+kvm-amd-preserved-$(CONFIG_KVM_CARETAKER) := caretaker/svm_switch.preserved.o \
+					     svm/vmenter.preserved.o
+kvm-amd-$(CONFIG_KVM_CARETAKER) += caretaker/svm.o $(kvm-amd-preserved-y)
+preserved-obj-$(CONFIG_KVM_CARETAKER) += $(kvm-amd-preserved-y)
+endif
 
 kvm-amd-$(CONFIG_KVM_AMD_SEV)	+= svm/sev.o
 kvm-amd-$(CONFIG_KVM_HYPERV)	+= svm/hyperv.o
@@ -47,6 +54,9 @@ obj-$(CONFIG_KVM_AMD)	+= kvm-amd.o
 
 AFLAGS_svm/vmenter.o    := -iquote $(obj)
 $(obj)/svm/vmenter.o: $(obj)/kvm-asm-offsets.h
+
+AFLAGS_svm/vmenter.preserved.raw.o := -iquote $(obj)
+$(obj)/svm/vmenter.preserved.raw.o: $(obj)/kvm-asm-offsets.h
 
 AFLAGS_vmx/vmenter.o    := -iquote $(obj)
 $(obj)/vmx/vmenter.o: $(obj)/kvm-asm-offsets.h
