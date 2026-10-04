@@ -158,17 +158,187 @@ void __noreturn hyp_panic(void)
 	unreachable();
 }
 
+static void caretaker_vgic_v3_drain_pending_sgis(struct caretaker_arm64_page *cap)
+{
+	struct vgic_v3_cpu_if *cpu_if = &cap->kvm_vcpu.arch.vgic_cpu.vgic_v3;
+	unsigned int used_lrs = cpu_if->used_lrs;
+	u64 vtr = vgic_ich_vtr();
+	unsigned int max_lrs = min_t(unsigned int,
+				     FIELD_GET(ICH_VTR_EL2_ListRegs, vtr) + 1,
+				     VGIC_V3_MAX_LRS);
+	unsigned int i;
+
+	if (!cap->pending_sgis)
+		return;
+
+	for (i = 0; i < max_lrs && cap->pending_sgis; i++) {
+		if (i >= used_lrs || (cpu_if->vgic_lr[i] & ICH_LR_STATE) == 0) {
+			int sgi = __ffs(cap->pending_sgis);
+
+			cap->pending_sgis &= ~BIT(sgi);
+			cpu_if->vgic_lr[i] = ((u64)sgi & 0xf) |
+					     ICH_LR_PENDING_BIT |
+					     ICH_LR_GROUP |
+					     ((u64)GICD_INT_DEF_PRI <<
+					      ICH_LR_PRIORITY_SHIFT);
+			if (i >= used_lrs)
+				used_lrs = i + 1;
+		}
+	}
+	cpu_if->used_lrs = min(used_lrs, max_lrs);
+}
+
+static void
+caretaker_arm64_inject_sgi(struct caretaker_arm64_page *target_cap, u32 sgi)
+{
+	struct vgic_v3_cpu_if *cpu_if;
+	int slot = -1;
+	int i;
+
+	if (!target_cap)
+		return;
+
+	cpu_if = &target_cap->kvm_vcpu.arch.vgic_cpu.vgic_v3;
+
+	/* Check if the SGI is already pending or active */
+	for (i = 0; i < cpu_if->used_lrs; i++) {
+		u64 lr = cpu_if->vgic_lr[i];
+
+		if ((lr & ICH_LR_VIRTUAL_ID_MASK) == (sgi & 0xf) && (lr & ICH_LR_STATE))
+			return;
+		if ((lr & ICH_LR_STATE) == 0 && slot < 0)
+			slot = i;
+	}
+
+	if (slot < 0 && cpu_if->used_lrs < VGIC_V3_MAX_LRS) {
+		slot = cpu_if->used_lrs;
+		cpu_if->used_lrs++;
+	}
+
+	if (slot >= 0) {
+		cpu_if->vgic_lr[slot] =
+			((u64)sgi & 0xf) |
+			ICH_LR_PENDING_BIT |
+			ICH_LR_GROUP |
+			((u64)GICD_INT_DEF_PRI << ICH_LR_PRIORITY_SHIFT);
+	} else {
+		target_cap->pending_sgis |= BIT(sgi & 0xf);
+	}
+
+	smp_mb();
+
+	/* If target vCPU is running on a remote physical CPU, kick it */
+	if (target_cap->abi.cb.pcpu_id >= 0 &&
+	    target_cap->abi.cb.pcpu_id != arm64_caretaker_get_pcpu()) {
+		dsb(ishst);
+		sev();
+		gicv3_cpu_preserved_kick_mpidr(READ_ONCE(target_cap->pcpu_mpidr));
+		isb();
+	}
+}
+
+static void
+caretaker_arm64_handle_sgi(struct caretaker_arm64_page *src_cap, u64 reg)
+{
+	struct caretaker_arm64_page *target;
+	u32 sgi = FIELD_GET(ICC_SGI1R_SGI_ID_MASK, reg);
+	unsigned int i;
+
+	if (!src_cap || !src_cap->next_vcpu)
+		return;
+
+	if (reg & BIT_ULL(ICC_SGI1R_IRQ_ROUTING_MODE_BIT)) {
+		/* Broadcast to all other vCPUs */
+		for (target = src_cap->next_vcpu;
+		     target && target != src_cap;
+		     target = target->next_vcpu) {
+			caretaker_arm64_inject_sgi(target, sgi);
+		}
+	} else {
+		u64 aff3 = FIELD_GET(ICC_SGI1R_AFFINITY_3_MASK, reg);
+		u64 aff2 = FIELD_GET(ICC_SGI1R_AFFINITY_2_MASK, reg);
+		u64 aff1 = FIELD_GET(ICC_SGI1R_AFFINITY_1_MASK, reg);
+		u64 rs = FIELD_GET(ICC_SGI1R_RS_MASK, reg);
+		u64 cluster_mpidr = (aff3 << MPIDR_LEVEL_SHIFT(3)) |
+				    (aff2 << MPIDR_LEVEL_SHIFT(2)) |
+				    (aff1 << MPIDR_LEVEL_SHIFT(1));
+		u64 target_list = FIELD_GET(ICC_SGI1R_TARGET_LIST_MASK, reg);
+
+		for (i = 0; i < 16; i++) {
+			u64 target_mpidr;
+
+			if (!(target_list & BIT(i)))
+				continue;
+
+			target_mpidr = cluster_mpidr |
+				       ((rs * 16 + i) << MPIDR_LEVEL_SHIFT(0));
+
+			target = src_cap;
+			do {
+				if ((__vcpu_sys_reg(&target->kvm_vcpu, MPIDR_EL1) &
+				     MPIDR_HWID_BITMASK) == target_mpidr) {
+					caretaker_arm64_inject_sgi(target, sgi);
+					break;
+				}
+				target = target->next_vcpu;
+			} while (target && target != src_cap);
+		}
+	}
+}
+
+static void
+arm64_caretaker_op_arm_timer(void *data, u64 deadline_ticks)
+{
+	if (deadline_ticks && deadline_ticks != U64_MAX) {
+		write_sysreg_s(deadline_ticks, SYS_CNTHP_CVAL_EL2);
+		isb();
+		write_sysreg_s(1, SYS_CNTHP_CTL_EL2);
+	} else {
+		write_sysreg_s(0, SYS_CNTHP_CTL_EL2);
+	}
+	isb();
+}
+
+static void
+arm64_caretaker_op_disarm_timer(void *data)
+{
+	write_sysreg_s(0, SYS_CNTHP_CTL_EL2);
+	isb();
+}
+
 static bool caretaker_hyp_handle_wfx(struct kvm_vcpu *vcpu, u64 *exit_code)
 {
-	kvm_incr_pc(vcpu);
-	*exit_code = ARM_EXCEPTION_TRAP;
+	__kvm_skip_instr(vcpu);
 	return false;
+}
+
+static bool caretaker_hyp_handle_sysreg(struct kvm_vcpu *vcpu, u64 *exit_code)
+{
+	struct caretaker_arm64_page *cap =
+		container_of(vcpu, struct caretaker_arm64_page, kvm_vcpu);
+	u64 esr = kvm_vcpu_get_esr(vcpu);
+	u32 sysreg = esr_sys64_to_sysreg(esr);
+	bool is_write = (esr & ESR_ELx_SYS64_ISS_DIR_MASK) ==
+			ESR_ELx_SYS64_ISS_DIR_WRITE;
+
+	if (is_write &&
+	    (sysreg == SYS_ICC_SGI1R_EL1 ||
+	     sysreg == SYS_ICC_ASGI1R_EL1 ||
+	     sysreg == SYS_ICC_SGI0R_EL1)) {
+		u64 val = vcpu_get_reg(vcpu, kvm_vcpu_sys_get_rt(vcpu));
+
+		caretaker_arm64_handle_sgi(cap, val);
+		__kvm_skip_instr(vcpu);
+		return true;
+	}
+
+	return kvm_hyp_handle_sysreg(vcpu, exit_code);
 }
 
 static const exit_handler_fn caretaker_exit_handlers[ESR_ELx_EC_MAX + 1] = {
 	[ESR_ELx_EC_WFx]		= caretaker_hyp_handle_wfx,
 	[ESR_ELx_EC_CP15_32]		= kvm_hyp_handle_cp15_32,
-	[ESR_ELx_EC_SYS64]		= kvm_hyp_handle_sysreg,
+	[ESR_ELx_EC_SYS64]		= caretaker_hyp_handle_sysreg,
 	[ESR_ELx_EC_IABT_LOW]		= kvm_hyp_handle_iabt_low,
 	[ESR_ELx_EC_DABT_LOW]		= kvm_hyp_handle_dabt_low,
 	[ESR_ELx_EC_WATCHPT_LOW]	= kvm_hyp_handle_watchpt_low,
@@ -408,6 +578,7 @@ arm64_caretaker_op_pre_run(void *data)
 	if (cap->vgic_initialized) {
 		struct vgic_v3_cpu_if *cpu_if = &vcpu->arch.vgic_cpu.vgic_v3;
 
+		caretaker_vgic_v3_drain_pending_sgis(cap);
 		__vgic_v3_restore_vmcr_aprs(cpu_if);
 		__vgic_v3_activate_traps(cpu_if);
 		__vgic_v3_restore_state(cpu_if);
