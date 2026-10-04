@@ -21,6 +21,7 @@
 #define pr_fmt(fmt) "kprobes: " fmt
 
 #include <linux/kprobes.h>
+#include <linux/cpu_preserve.h>
 #include <linux/hash.h>
 #include <linux/init.h>
 #include <linux/slab.h>
@@ -2590,6 +2591,13 @@ static int __init populate_kprobe_blacklist(unsigned long *start,
 	/* Symbols in 'noinstr' section are blacklisted */
 	ret = kprobe_add_area_blacklist((unsigned long)__noinstr_text_start,
 					(unsigned long)__noinstr_text_end);
+
+#ifdef CONFIG_LIVEUPDATE_CPU
+	/* Preserved CPUs run a copy of this section: keep probes out of it */
+	if (!ret)
+		ret = kprobe_add_area_blacklist((unsigned long)__cpu_preserved_text_start,
+						(unsigned long)__cpu_preserved_text_end);
+#endif
 
 	return ret ? : arch_populate_kprobe_blacklist();
 }
