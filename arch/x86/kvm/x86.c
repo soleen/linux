@@ -4371,6 +4371,9 @@ long kvm_arch_vcpu_unlocked_ioctl(struct file *filp, unsigned int ioctl,
 	struct kvm_vcpu *vcpu = filp->private_data;
 	void __user *argp = (void __user *)arg;
 
+	if (!kvm_caretaker_vcpu_is_attached(vcpu))
+		return -EBUSY;
+
 	if (ioctl == KVM_MEMORY_ENCRYPT_OP &&
 	    kvm_x86_ops.vcpu_mem_enc_unlocked_ioctl)
 		return kvm_x86_call(vcpu_mem_enc_unlocked_ioctl)(vcpu, argp);
