@@ -603,6 +603,7 @@ static DEFINE_SPINLOCK(vmx_vpid_lock);
 struct vmcs_config vmcs_config __ro_after_init;
 struct vmx_capability vmx_capability __ro_after_init;
 
+
 static unsigned long host_idt_base;
 
 #if IS_ENABLED(CONFIG_HYPERV)
@@ -1367,39 +1368,6 @@ static void vmx_prepare_switch_to_host(struct vcpu_vmx *vmx)
 	vmx->vt.guest_state_loaded = false;
 	vmx->guest_uret_msrs_loaded = false;
 }
-
-#ifdef CONFIG_X86_64
-static u64 vmx_read_guest_host_msr(struct vcpu_vmx *vmx, u32 msr, u64 *cache)
-{
-	preempt_disable();
-	if (vmx->vt.guest_state_loaded)
-		*cache = read_msr(msr);
-	preempt_enable();
-	return *cache;
-}
-
-static void vmx_write_guest_host_msr(struct vcpu_vmx *vmx, u32 msr, u64 data,
-				     u64 *cache)
-{
-	preempt_disable();
-	if (vmx->vt.guest_state_loaded)
-		wrmsrns(msr, data);
-	preempt_enable();
-	*cache = data;
-}
-
-static u64 vmx_read_guest_kernel_gs_base(struct vcpu_vmx *vmx)
-{
-	return vmx_read_guest_host_msr(vmx, MSR_KERNEL_GS_BASE,
-				       &vmx->msr_guest_kernel_gs_base);
-}
-
-static void vmx_write_guest_kernel_gs_base(struct vcpu_vmx *vmx, u64 data)
-{
-	vmx_write_guest_host_msr(vmx, MSR_KERNEL_GS_BASE, data,
-				 &vmx->msr_guest_kernel_gs_base);
-}
-#endif
 
 static void grow_ple_window(struct kvm_vcpu *vcpu)
 {
@@ -6963,10 +6931,7 @@ static void vmx_refresh_guest_perf_global_control(struct kvm_vcpu *vcpu)
 
 void noinstr vmx_update_host_rsp(struct vcpu_vmx *vmx, unsigned long host_rsp)
 {
-	if (unlikely(host_rsp != vmx->loaded_vmcs->host_state.rsp)) {
-		vmx->loaded_vmcs->host_state.rsp = host_rsp;
-		vmcs_writel(HOST_RSP, host_rsp);
-	}
+	__vmx_update_host_rsp(vmx, host_rsp);
 }
 
 static fastpath_t vmx_exit_handlers_fastpath(struct kvm_vcpu *vcpu,
