@@ -102,6 +102,8 @@ struct cpu_preserved_as_ser {
 /**
  * struct cpu_preserved_session_ser - Serialized preserved CPU session metadata
  * @session_name:  LUO session name.
+ * @workload_pa:   Opaque physical address of preserved workload session
+ *                 (retained for freeing across kexec, never dereferenced).
  * @as:            Preservation pointer to struct cpu_preserved_as_ser.
  * @nr_cpu_words:  Number of 64-bit words in @cpus_bitmap.
  * @reserved:      Must be zero.
@@ -109,6 +111,7 @@ struct cpu_preserved_as_ser {
  */
 struct cpu_preserved_session_ser {
 	char session_name[LIVEUPDATE_SESSION_NAME_LENGTH];
+	u64 workload_pa;
 	DECLARE_KHOSER_PTR(as, struct cpu_preserved_as_ser *);
 	u32 nr_cpu_words;
 	u32 reserved;

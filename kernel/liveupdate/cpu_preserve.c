@@ -204,6 +204,7 @@
 #include <linux/liveupdate.h>
 #include <linux/mm.h>
 #include <linux/objtool.h>
+#include <linux/oncore.h>
 #include <linux/reboot.h>
 #include <linux/refcount.h>
 #include <linux/string.h>
@@ -1047,6 +1048,7 @@ struct cpu_preserved_session {
 	struct cpu_preserved_session_ser *ser;
 	struct cpu_preserved_as_ser *as;
 	bool incoming;
+	void *workload;
 };
 
 static DEFINE_MUTEX(cpu_preserved_sessions_lock);
@@ -1070,6 +1072,9 @@ cpu_preserved_session_find_locked(const char *sname)
 
 static void cpu_preserved_session_release(struct cpu_preserved_session *ps)
 {
+	if (ps->ser && ps->ser->workload_pa)
+		oncore_session_release(ps->ser->workload_pa, ps->incoming);
+
 	if (ps->incoming) {
 		cpu_preserved_as_restore_free(ps->as);
 		if (ps->ser)
@@ -1198,6 +1203,37 @@ cpu_preserved_session_cpus(struct cpu_preserved_session *ps)
 	return to_cpumask((unsigned long *)ps->ser->cpus_bitmap);
 }
 
+/**
+ * cpu_preserved_session_set_workload - Associate opaque workload state with @ps
+ * @ps:       Preserved CPU session.
+ * @workload: Opaque host-side workload session pointer (or %NULL to clear).
+ * @pa:       Physical address of KHO-preserved workload metadata (or 0).
+ */
+void cpu_preserved_session_set_workload(struct cpu_preserved_session *ps,
+					void *workload, u64 pa)
+{
+	if (!ps || IS_ERR(ps))
+		return;
+
+	ps->workload = workload;
+	if (ps->ser) {
+		ps->ser->workload_pa = pa;
+		cpu_preserved_clean(&ps->ser->workload_pa);
+	}
+}
+
+/**
+ * cpu_preserved_session_workload - Return the opaque workload state of @ps
+ * @ps: Preserved CPU session.
+ *
+ * Return: Opaque workload pointer previously registered via
+ *         cpu_preserved_session_set_workload(), or %NULL.
+ */
+void *cpu_preserved_session_workload(struct cpu_preserved_session *ps)
+{
+	return (!ps || IS_ERR(ps)) ? NULL : ps->workload;
+}
+
 static void cpu_preserved_session_restore(struct liveupdate_session *s,
 					  struct cpu_preserved_session_ser *sser)
 {
@@ -1259,6 +1295,7 @@ static void cpu_preserved_session_remove_cpu(struct liveupdate_session *s,
 	if (!had_cpu)
 		return;
 
+	oncore_cpu_unpreserved(ps, cpu);
 	cpu_preserved_session_put(ps);
 }
 
@@ -1405,6 +1442,7 @@ static int cpu_preserve(unsigned int cpu, struct liveupdate_session *session)
 				       struct_size(ps->ser, cpus_bitmap,
 						   ps->ser->nr_cpu_words));
 	}
+	oncore_cpu_preserved(ps, cpu);
 	return 0;
 }
 
@@ -1455,6 +1493,9 @@ static int cpu_unpreserve(unsigned int cpu)
 	return 0;
 }
 
+/*
+ * FLB Ops for Preserved CPUs
+ */
 static int cpu_preserved_flb_preserve(struct liveupdate_flb_op_args *argp)
 {
 	unsigned int nr_words = BITS_TO_U64(nr_cpu_ids);
@@ -1795,6 +1836,15 @@ static struct notifier_block cpu_preserve_reboot_nb = {
 	.priority = 0,
 };
 
+/**
+ * cpu_preserve_early_init - Early boot registration & retrieval of CPUs
+ *
+ * Registers the preserved CPU file handler and FLB with LUO, retrieves incoming
+ * preserved CPU state prior to secondary SMP bringup, and registers the reboot
+ * notifier.
+ *
+ * Return: 0 on success, or negative error code on failure.
+ */
 static int __init cpu_preserve_early_init(void)
 {
 	void *obj;
@@ -1833,7 +1883,6 @@ static int __init cpu_preserve_early_init(void)
 	return 0;
 }
 early_initcall(cpu_preserve_early_init);
-
 static ssize_t preserved_show(struct device *dev,
 			      struct device_attribute *attr, char *buf)
 {

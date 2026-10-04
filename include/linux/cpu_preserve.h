@@ -46,6 +46,7 @@ struct cpu_preserved_ser;
  * @session_pgd_pa:   Session root page table physical address, or 0.
  * @ser:              Preserved CPU descriptor in isolated address space.
  * @entry_fn:         Workload entry function to run.
+ * @fault:            Per-CPU exception telemetry and abort callback (x86_64).
  *
  * This structure lives at the base of a preserved CPU's dedicated stack and is
  * accessed by the preserved CPU during parking and workload execution. It is
@@ -106,12 +107,6 @@ bool cpu_preserved_should_exit(void) __cpu_preserved_sym_asm(cpu_preserved_shoul
 void cpu_preserved_set_dead(void) __cpu_preserved_sym_asm(cpu_preserved_set_dead);
 void cpu_preserved_park(int cpu);
 void cpu_preserved_park_loop(int cpu) __cpu_preserved_sym_asm(cpu_preserved_park_loop);
-
-void arch_cpu_preserved_park_wait(void);
-void arch_cpu_preserved_park_init(int cpu);
-void arch_cpu_preserved_dcache_clean(unsigned long start, unsigned long end);
-void arch_cpu_preserved_dcache_inval(unsigned long start, unsigned long end);
-
 const struct cpumask *cpu_get_preserved_mask(void);
 struct cpu_preserved_stack_context *cpu_preserved_get_sctx(int cpu);
 int cpu_preserved_attach_workload(int cpu,
@@ -132,37 +127,96 @@ static inline void cpu_preserved_report_dead(void)
 		cpu_preserved_park(raw_smp_processor_id());
 }
 
+/*
+ * Architecture-specific hooks for CPU preservation.
+ */
+
 /**
  * arch_cpu_preserved_kick - Signal or wake up a preserved physical CPU
  * @cpu: Logical CPU identifier.
  *
- * Architecture backend hook to wake a preserved CPU from arch_cpu_preserved_park_wait().
- *
- * Executed in normal text context.
+ * Architecture backend hook to wake up the specified preserved CPU from its
+ * low-power parking state (e.g. via IPI, NMI, or SGI).
  */
 void arch_cpu_preserved_kick(int cpu);
 
 /**
+ * arch_cpu_preserved_park_wait - Architecture low-power wait in parking loop
+ *
+ * Architecture backend hook to execute a low-power wait instruction
+ * (e.g., cpu_relax/pause, wfe) while parked.
+ *
+ * This function must be placed in the .cpu_preserved.text section.
+ */
+void arch_cpu_preserved_park_wait(void) __cpu_preserved_sym_asm(arch_cpu_preserved_park_wait);
+
+/**
+ * arch_cpu_preserved_park_init - Architecture setup upon entering park loop
+ * @cpu: Logical CPU identifier.
+ *
+ * Architecture backend hook to configure the physical core (e.g., disable
+ * or mask local interrupts) upon entering the park loop.
+ *
+ * This function must be placed in the .cpu_preserved.text section.
+ */
+void arch_cpu_preserved_park_init(int cpu) __cpu_preserved_sym_asm(arch_cpu_preserved_park_init);
+
+/**
  * arch_cpu_preserved_early_init - Arch early-boot init for incoming preserved CPUs
  *
- * Architecture backend hook invoked by cpu_preserve_early_init() before
- * secondary CPU bringup to restore per-CPU preserved hardware state.
+ * Called during early boot in the incoming kernel when preserved physical CPUs
+ * are adopted from KHO metadata.
  */
 void arch_cpu_preserved_early_init(void);
 
+/**
+ * arch_cpu_preserved_park_finish - Architecture cleanup on park loop exit
+ * @cpu: Logical CPU identifier.
+ *
+ * Architecture backend hook to execute cleanup or CPU powerdown sequence
+ * when the park loop exits.
+ *
+ * This function must be placed in the .cpu_preserved.text section.
+ */
 void arch_cpu_preserved_park_finish(int cpu) __cpu_preserved_sym_asm(arch_cpu_preserved_park_finish);
 
 /**
  * arch_cpu_preserved_park_on_stack - Switch stack and enter park loop
  * @cpu: Logical CPU identifier.
- * @stack_top: Top of the dedicated preserved stack.
+ * @stack_top: Top address of the preserved stack.
  *
- * Architecture backend hook to switch to the preserved CPU stack and
- * invoke cpu_preserved_park_loop(). Does not return.
+ * Architecture backend hook to switch to the preserved execution stack
+ * and invoke cpu_preserved_park_loop().
  *
- * Executed in normal text context during CPU teardown.
+ * This function must be placed in the .cpu_preserved.text section.
  */
 void arch_cpu_preserved_park_on_stack(int cpu, unsigned long stack_top);
+
+/**
+ * arch_cpu_preserved_dcache_clean - Clean data cache for address range
+ * @start: Starting virtual address.
+ * @end: Ending virtual address.
+ *
+ * Architecture backend hook to flush/clean data caches to PoC for memory
+ * preservation across live update.
+ *
+ * This function must be placed in the .cpu_preserved.text section.
+ */
+void arch_cpu_preserved_dcache_clean(unsigned long start, unsigned long end)
+	__cpu_preserved_sym_asm(arch_cpu_preserved_dcache_clean);
+
+/**
+ * arch_cpu_preserved_dcache_inval - Invalidate/clean data cache for range
+ * @start: Starting virtual address.
+ * @end: Ending virtual address.
+ *
+ * Architecture backend hook to clean/invalidate data caches across live
+ * update transitions.
+ *
+ * This function must be placed in the .cpu_preserved.text section.
+ */
+void arch_cpu_preserved_dcache_inval(unsigned long start, unsigned long end)
+	__cpu_preserved_sym_asm(arch_cpu_preserved_dcache_inval);
 
 /**
  * arch_cpu_preserved_wait_dead - Wait for CPU to reach dead state
@@ -211,11 +265,9 @@ struct cpu_preserved_session *cpu_preserved_session_get(struct liveupdate_sessio
 void cpu_preserved_session_put(struct cpu_preserved_session *ps);
 struct cpu_preserved_as_ser *cpu_preserved_session_as(struct cpu_preserved_session *ps);
 const struct cpumask *cpu_preserved_session_cpus(struct cpu_preserved_session *ps);
-
-bool arch_cpu_preserved_is_active(void)
-	__cpu_preserved_sym_asm(arch_cpu_preserved_is_active);
-void arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa)
-	__cpu_preserved_sym_asm(arch_cpu_preserved_switch_pgd);
+void cpu_preserved_session_set_workload(struct cpu_preserved_session *ps,
+					void *workload, u64 pa);
+void *cpu_preserved_session_workload(struct cpu_preserved_session *ps);
 
 /**
  * arch_cpu_preserved_as_map - Add one range to a preserved address space
@@ -257,6 +309,23 @@ bool arch_cpu_preserved_as_unmap(struct cpu_preserved_as_ser *as,
  */
 void arch_cpu_preserved_as_flush_tlb(void);
 
+/**
+ * arch_cpu_preserved_is_active - Check whether any preserved CPU runtime mapping is active
+ *
+ * Return: %true if preserved runtime mappings are active, %false otherwise.
+ */
+bool arch_cpu_preserved_is_active(void)
+	__cpu_preserved_sym_asm(arch_cpu_preserved_is_active);
+
+/**
+ * arch_cpu_preserved_switch_pgd - Switch the current preserved CPU to an isolated PGD
+ * @pgd_pa: Physical address of the root page table to install.
+ *
+ * This function must be placed in the .cpu_preserved.text section.
+ */
+void arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa)
+	__cpu_preserved_sym_asm(arch_cpu_preserved_switch_pgd);
+
 #else /* !CONFIG_LIVEUPDATE_CPU */
 
 #include <linux/kexec_handover.h>
@@ -266,18 +335,8 @@ struct cpu_preserved_as_ser;
 static inline bool cpu_is_preserved(int cpu) { return false; }
 static inline bool cpu_preserved_should_exit(void) { return true; }
 static inline void cpu_preserved_park(int cpu) {}
-static inline void cpu_preserved_report_dead(void) {}
 static inline void cpu_preserved_set_dead(void) {}
-static inline void arch_cpu_preserved_park_wait(void) {}
-static inline void arch_cpu_preserved_park_init(int cpu) {}
-static inline void arch_cpu_preserved_dcache_clean(unsigned long start,
-						   unsigned long end) {}
-static inline void arch_cpu_preserved_kick(int cpu) {}
-static inline void arch_cpu_preserved_early_init(void) {}
-static inline void arch_cpu_preserved_park_finish(int cpu) {}
-static inline void arch_cpu_preserved_dcache_inval(unsigned long start,
-						   unsigned long end) {}
-static inline void arch_cpu_preserved_wait_dead(int cpu) {}
+static inline void cpu_preserved_report_dead(void) {}
 static inline const struct cpumask *cpu_get_preserved_mask(void)
 {
 	return cpu_none_mask;
@@ -316,7 +375,16 @@ static inline int cpu_preserved_detach_workload(int cpu)
 
 static inline void cpu_preserved_set_workload_context(int cpu, void *ctx,
 						      phys_addr_t pgd_pa) {}
-
+static inline void arch_cpu_preserved_kick(int cpu) {}
+static inline void arch_cpu_preserved_park_wait(void) {}
+static inline void arch_cpu_preserved_park_init(int cpu) {}
+static inline void arch_cpu_preserved_early_init(void) {}
+static inline void arch_cpu_preserved_park_finish(int cpu) {}
+static inline void arch_cpu_preserved_dcache_clean(unsigned long start,
+						   unsigned long end) {}
+static inline void arch_cpu_preserved_dcache_inval(unsigned long start,
+						   unsigned long end) {}
+static inline void arch_cpu_preserved_wait_dead(int cpu) {}
 static inline int arch_cpu_preserved_setup_buffer(struct page *text_page,
 						  unsigned int text_nr_pages,
 						  struct page *data_page,
@@ -335,8 +403,24 @@ cpu_preserved_get_stack_context(void)
 
 #endif /* CONFIG_LIVEUPDATE_CPU */
 
-#define cpu_preserved_clean_sz(p, sz)						arch_cpu_preserved_dcache_clean((unsigned long)(p),							(unsigned long)(p) + (sz))
-#define cpu_preserved_inval_sz(p, sz)						arch_cpu_preserved_dcache_inval((unsigned long)(p),							(unsigned long)(p) + (sz))
+/*
+ * Object-granular wrappers around the arch dcache hooks.
+ *
+ * Every preserved-memory handshake flushes or invalidates a whole object, so
+ * spell that out once instead of open-coding (addr, addr + size) at each call
+ * site: the size can then never drift from the object it is supposed to cover.
+ *
+ * @p is a pointer to the object.  For a statically sized array, pass &array so
+ * that sizeof(*(p)) is the size of the whole array rather than of one element.
+ * Use the _sz() forms for flexible-array structures and for raw page buffers,
+ * where the length is not derivable from the type.
+ */
+#define cpu_preserved_clean_sz(p, sz)					\
+	arch_cpu_preserved_dcache_clean((unsigned long)(p),		\
+					(unsigned long)(p) + (sz))
+#define cpu_preserved_inval_sz(p, sz)					\
+	arch_cpu_preserved_dcache_inval((unsigned long)(p),		\
+					(unsigned long)(p) + (sz))
 #define cpu_preserved_clean(p)		cpu_preserved_clean_sz(p, sizeof(*(p)))
 #define cpu_preserved_inval(p)		cpu_preserved_inval_sz(p, sizeof(*(p)))
 
