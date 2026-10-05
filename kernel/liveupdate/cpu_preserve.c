@@ -176,7 +176,9 @@
  *   the stack, with an unmapped guard page between them;
  * - The per-CPU descriptor (struct cpupr_ser), ``PAGE_KERNEL`` NX;
  * - The memory of the workloads of the session, such as On-Core jobs and the
- *   vCPUs of the KVM Caretaker, ``PAGE_KERNEL`` NX at its direct-map address.
+ *   vCPUs of the KVM Caretaker, ``PAGE_KERNEL`` NX at its direct-map address;
+ * - Device registers that the workloads program, such as the GIC
+ *   redistributors, with device memory attributes.
  *
  * Deliberately absent: the rest of the linear direct map, all user address
  * ranges, the kernel heap, vmalloc, modules, and BPF JIT.
@@ -188,7 +190,8 @@
  *   tables and the stack areas, from the folio allocator behind it.  A page
  *   that belongs to another owner and must keep its physical address, such
  *   as a register page that the hardware uses, is adopted with
- *   cpupr_as_adopt_page().
+ *   cpupr_as_adopt_page().  cpupr_as_map_mmio() maps device registers, which
+ *   are not memory.
  * - Each folio is preserved with KHO, recorded in struct cpupr_as_ser
  *   and freed only with the address space, once every CPU of the session has
  *   left it: by cpupr_as_unpreserve() in the outgoing kernel, and by
@@ -240,6 +243,7 @@
 #include <linux/kexec.h>
 #include <linux/kexec_handover.h>
 #include <linux/liveupdate.h>
+#include <linux/oncore.h>
 #include <linux/pagemap.h>
 #include <linux/reboot.h>
 #include <linux/suspend.h>
@@ -248,8 +252,10 @@
  * struct cpupr_session - The preserved CPUs of one LUO session
  * @node: Entry on cpupr_sessions while @lsession can find it.
  * @lsession: The outgoing LUO session, or %NULL.
+ * @id: Identifier of the session, unique in this kernel.
  * @cpus: CPUs of the session that are preserved and parked.
  * @as: Isolated address space of the CPUs.
+ * @workload: Opaque host-side workload session pointer.
  * @incoming: Whether the previous kernel created the session.
  * @as_lock: Serializes the allocations and mappings of an outgoing @as.
  * @mapped_mem_file: Last job mem_file mapped into @as.
@@ -258,8 +264,10 @@
 struct cpupr_session {
 	struct list_head node;
 	struct liveupdate_session *lsession;
+	u64 id;
 	struct cpumask cpus;
 	struct cpupr_as_ser *as;
+	void *workload;
 	bool incoming;
 	struct mutex as_lock;
 	struct file *mapped_mem_file;
@@ -273,6 +281,7 @@ struct cpupr_session {
 static DEFINE_MUTEX(cpupr_lock);
 static DEFINE_MUTEX(cpupr_sessions_lock);
 static LIST_HEAD(cpupr_sessions);
+static u64 cpupr_session_last_id;
 
 /*
  * A preserved CPU is either incoming, handed over by the previous kernel, or
@@ -489,6 +498,33 @@ int cpupr_as_adopt_page(struct cpupr_session *ps, struct page *page)
 				   PAGE_SIZE, PAGE_KERNEL);
 }
 
+/**
+ * cpupr_as_map_mmio - Map device registers into a session
+ * @ps:   Outgoing preserved CPU session.
+ * @pa:   Physical address of the registers.
+ * @va:   Virtual address the registers must appear at.
+ * @size: Size of the range in bytes.
+ *
+ * Maps registers of a device that the CPUs of @ps use while parked, such as
+ * a GIC redistributor, with device memory attributes.  This is the only
+ * mapping of an isolated address space that is not memory it owns: the range
+ * must not intersect system RAM.
+ *
+ * Return: 0 on success, or a negative errno on failure.
+ */
+int cpupr_as_map_mmio(struct cpupr_session *ps, phys_addr_t pa,
+		      unsigned long va, size_t size)
+{
+	if (!ps || !size)
+		return -EINVAL;
+
+	if (region_intersects(pa, size, IORESOURCE_SYSTEM_RAM,
+			      IORES_DESC_NONE) != REGION_DISJOINT) {
+		return -EINVAL;
+	}
+
+	return cpupr_as_map(ps, pa, va, size, pgprot_device(PAGE_KERNEL));
+}
 static struct folio *cpupr_alloc_section_copy(const void *start, const void *end)
 {
 	size_t size = end - start;
@@ -1132,6 +1168,7 @@ static struct cpupr_session *cpupr_session_alloc(void)
 		return NULL;
 
 	INIT_LIST_HEAD(&ps->node);
+	ps->id = ++cpupr_session_last_id;
 	mutex_init(&ps->as_lock);
 	return ps;
 }
@@ -1144,6 +1181,39 @@ static void cpupr_session_release(struct cpupr_session *ps)
 		cpupr_as_unpreserve(ps);
 
 	kfree(ps);
+}
+
+static struct cpupr_session *
+cpupr_session_find_locked(struct liveupdate_session *s)
+{
+	struct cpupr_session *ps;
+
+	lockdep_assert_held(&cpupr_sessions_lock);
+	list_for_each_entry(ps, &cpupr_sessions, node) {
+		if (ps->lsession == s)
+			return ps;
+	}
+	return NULL;
+}
+
+/**
+ * cpupr_find_session - Look up an existing preserved CPU session
+ * @s: Outgoing Live Update session handle.
+ *
+ * Looks up the preserved CPU session of @s without creating a new one if none
+ * exists.
+ *
+ * Return: Pointer to the &struct cpupr_session, or %NULL if @s has no
+ *         preserved CPU session.
+ */
+struct cpupr_session *
+cpupr_find_session(struct liveupdate_session *s)
+{
+	if (!s)
+		return NULL;
+
+	guard(mutex)(&cpupr_sessions_lock);
+	return cpupr_session_find_locked(s);
 }
 
 /*
@@ -1159,10 +1229,9 @@ static struct cpupr_session *cpupr_session_get(struct liveupdate_session *s)
 		return ERR_PTR(-EINVAL);
 
 	guard(mutex)(&cpupr_sessions_lock);
-	list_for_each_entry(ps, &cpupr_sessions, node) {
-		if (ps->lsession == s)
-			return ps;
-	}
+	ps = cpupr_session_find_locked(s);
+	if (ps)
+		return ps;
 
 	ps = cpupr_session_alloc();
 	if (!ps)
@@ -1213,7 +1282,44 @@ static void cpupr_session_detach(struct cpupr_session *ps)
 
 	guard(mutex)(&cpupr_sessions_lock);
 	list_del_init(&ps->node);
-	ps->lsession = NULL;
+	WRITE_ONCE(ps->lsession, NULL);
+}
+
+/**
+ * cpupr_session_lsession - Return the LUO session of a session
+ * @ps: Preserved CPU session.
+ *
+ * Return: The outgoing LUO session of @ps, or %NULL if @ps is incoming,
+ *         outlived its LUO session, or is %NULL or an ERR_PTR().
+ */
+struct liveupdate_session *
+cpupr_session_lsession(struct cpupr_session *ps)
+{
+	return (!ps || IS_ERR(ps)) ? NULL : READ_ONCE(ps->lsession);
+}
+
+/**
+ * cpupr_session_id - Return the identifier of a session
+ * @ps: Preserved CPU session.
+ *
+ * Return: An identifier of @ps that no other session of this kernel has, or
+ *         0 if @ps is %NULL or an ERR_PTR().
+ */
+u64 cpupr_session_id(struct cpupr_session *ps)
+{
+	return (!ps || IS_ERR(ps)) ? 0 : ps->id;
+}
+
+/**
+ * cpupr_session_pgd_pa - Return the root page table of a session
+ * @ps: Preserved CPU session.
+ *
+ * Return: Physical address of the root page table of the isolated address
+ *         space of @ps, or 0 if @ps is %NULL or an ERR_PTR().
+ */
+phys_addr_t cpupr_session_pgd_pa(struct cpupr_session *ps)
+{
+	return (!ps || IS_ERR(ps) || !ps->as) ? 0 : ps->as->pgd_pa;
 }
 
 /**
@@ -1229,6 +1335,32 @@ const struct cpumask *cpupr_session_cpus(struct cpupr_session *ps)
 		return cpu_none_mask;
 
 	return &ps->cpus;
+}
+
+/**
+ * cpupr_session_set_workload - Associate opaque workload state with @ps
+ * @ps:       Preserved CPU session.
+ * @workload: Opaque host-side workload session pointer (or %NULL to clear).
+ */
+void cpupr_session_set_workload(struct cpupr_session *ps,
+				void *workload)
+{
+	if (!ps || IS_ERR(ps))
+		return;
+
+	ps->workload = workload;
+}
+
+/**
+ * cpupr_session_workload - Return the opaque workload state of @ps
+ * @ps: Preserved CPU session.
+ *
+ * Return: Opaque workload pointer previously registered via
+ *         cpupr_session_set_workload(), or %NULL.
+ */
+void *cpupr_session_workload(struct cpupr_session *ps)
+{
+	return (!ps || IS_ERR(ps)) ? NULL : ps->workload;
 }
 
 /* The session of a preserved CPU */
@@ -1252,6 +1384,11 @@ static void cpupr_session_remove_cpu(struct cpupr_session *ps,
 	scoped_guard(mutex, &cpupr_sessions_lock) {
 		if (!cpumask_test_and_clear_cpu(cpu, &ps->cpus))
 			return;
+	}
+
+	oncore_cpu_unpreserved(ps, cpu);
+
+	scoped_guard(mutex, &cpupr_sessions_lock) {
 		empty = cpumask_empty(&ps->cpus);
 		if (empty)
 			list_del_init(&ps->node);
@@ -1462,6 +1599,7 @@ static int cpupr_preserve(unsigned int cpu, struct liveupdate_session *session)
 
 	scoped_guard(mutex, &cpupr_sessions_lock)
 		cpumask_set_cpu(cpu, &ps->cpus);
+	oncore_cpu_preserved(ps, cpu);
 	return 0;
 
 err_unpreserve:

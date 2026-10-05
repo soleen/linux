@@ -280,8 +280,17 @@ int arch_cpupr_setup_buffer(struct page *text_page, unsigned int text_nr_pages,
 void *cpupr_as_alloc_page(void *arg);
 void *cpupr_as_alloc_buffer(struct cpupr_session *ps, size_t size);
 int cpupr_as_adopt_page(struct cpupr_session *ps, struct page *page);
+int cpupr_as_map_mmio(struct cpupr_session *ps, phys_addr_t pa,
+		      unsigned long va, size_t size);
 
+struct cpupr_session *cpupr_find_session(struct liveupdate_session *s);
+struct liveupdate_session *cpupr_session_lsession(struct cpupr_session *ps);
+u64 cpupr_session_id(struct cpupr_session *ps);
+phys_addr_t cpupr_session_pgd_pa(struct cpupr_session *ps);
 const struct cpumask *cpupr_session_cpus(struct cpupr_session *ps);
+void cpupr_session_set_workload(struct cpupr_session *ps,
+				void *workload);
+void *cpupr_session_workload(struct cpupr_session *ps);
 
 void arch_cpupr_switch_pgd(phys_addr_t pgd_pa)
 	__cpupr_sym_asm(arch_cpupr_switch_pgd);
