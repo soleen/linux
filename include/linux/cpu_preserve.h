@@ -98,6 +98,7 @@ extern char __cpu_preserved_text_start[], __cpu_preserved_text_end[];
 extern char __cpu_preserved_data_start[], __cpu_preserved_data_end[];
 extern char __cpu_preserved_rodata_end[];
 bool cpu_is_preserved(int cpu);
+bool cpu_preserved_is_stopped(int cpu);
 void cpu_preserved_set_dead(void) __cpu_preserved_sym_asm(cpu_preserved_set_dead);
 void cpu_preserved_park(int cpu);
 void cpu_preserved_park_loop(int cpu) __cpu_preserved_sym_asm(cpu_preserved_park_loop);
@@ -302,6 +303,7 @@ void arch_cpu_preserved_as_flush_tlb(void);
 struct cpu_preserved_as_ser;
 
 static inline bool cpu_is_preserved(int cpu) { return false; }
+static inline bool cpu_preserved_is_stopped(int cpu) { return true; }
 static inline void cpu_preserved_park(int cpu) {}
 static inline void cpu_preserved_report_dead(void) {}
 static inline void cpu_preserved_set_dead(void) {}

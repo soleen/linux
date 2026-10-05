@@ -857,6 +857,23 @@ static u32 cpu_preserved_read_state(struct cpu_preserved_ser *ser)
 	return smp_load_acquire(&ser->state);
 }
 
+/**
+ * cpu_preserved_is_stopped - Check whether a preserved CPU has stopped
+ * @cpu: Logical CPU identifier.
+ *
+ * Return: True if @cpu is not preserved or has reached %CPU_PRESERVED_DEAD or
+ *         %CPU_PRESERVED_FAULTED, false otherwise.
+ */
+bool cpu_preserved_is_stopped(int cpu)
+{
+	struct cpu_preserved_ser *ser = cpu_preserved_get_ser(cpu);
+
+	if (!ser)
+		return !cpu_is_preserved(cpu);
+
+	return cpu_preserved_state_is_stopped(cpu_preserved_read_state(ser));
+}
+
 static int cpu_wait_parked(int cpu)
 {
 	struct cpu_preserved_ser *ser = cpu_preserved_get_ser(cpu);
