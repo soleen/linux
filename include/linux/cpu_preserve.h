@@ -68,6 +68,9 @@ struct cpu_preserved_stack_context {
 #endif
 };
 
+static_assert(CPU_PRESERVED_STACK_SIZE > 0 &&
+	      !(CPU_PRESERVED_STACK_SIZE & (CPU_PRESERVED_STACK_SIZE - 1)),
+	      "the stack area size must be a power of 2 for natural alignment");
 static_assert(offsetof(struct cpu_preserved_stack_context, magic) == 0,
 	      "magic must lead: the struct is found by masking the stack pointer");
 static_assert(sizeof(struct cpu_preserved_stack_context) <= CPU_PRESERVED_STACK_GUARD,
@@ -184,6 +187,14 @@ static inline u64 arch_cpu_preserved_mode(void)
 }
 #endif
 
+/**
+ * arch_cpu_preserved_park_finish - Architecture cleanup on park loop exit
+ * @cpu: Logical CPU identifier.
+ *
+ * Architecture backend hook invoked when @cpu exits the preserved parking loop
+ * (or on the fallback path if parking fails). May power down the CPU and not
+ * return.
+ */
 void arch_cpu_preserved_park_finish(int cpu)
 	__cpu_preserved_sym_asm(arch_cpu_preserved_park_finish);
 
@@ -250,8 +261,6 @@ void cpu_preserved_session_put(struct cpu_preserved_session *ps);
 struct cpu_preserved_as_ser *cpu_preserved_session_as(struct cpu_preserved_session *ps);
 const struct cpumask *cpu_preserved_session_cpus(struct cpu_preserved_session *ps);
 
-bool arch_cpu_preserved_is_active(void)
-	__cpu_preserved_sym_asm(arch_cpu_preserved_is_active);
 void arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa)
 	__cpu_preserved_sym_asm(arch_cpu_preserved_switch_pgd);
 
@@ -349,7 +358,6 @@ static inline int arch_cpu_preserved_setup_buffer(struct page *text_page,
 	return 0;
 }
 
-static inline bool arch_cpu_preserved_is_active(void) { return false; }
 static inline void arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa) {}
 static __always_inline struct cpu_preserved_stack_context *
 cpu_preserved_get_stack_context(void)

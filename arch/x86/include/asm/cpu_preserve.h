@@ -67,14 +67,11 @@ extern struct desc_ptr x86_preserved_idt_desc
 
 void arch_cpu_preserved_load_desc(void)
 	__cpu_preserved_sym_asm(arch_cpu_preserved_load_desc);
-bool arch_cpu_preserved_is_active(void)
-	__cpu_preserved_sym_asm(arch_cpu_preserved_is_active);
 
 u64 arch_cpu_preserved_mode(void);
 #define arch_cpu_preserved_mode arch_cpu_preserved_mode
 #else
 static inline void arch_cpu_preserved_load_desc(void) {}
-static inline bool arch_cpu_preserved_is_active(void) { return false; }
 #endif
 
 #endif /* __ASM_X86_CPU_PRESERVE_H */

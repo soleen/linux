@@ -258,14 +258,6 @@ void arch_cpu_preserved_park_finish(int cpu __maybe_unused)
 {
 }
 
-bool arch_cpu_preserved_is_active(void)
-{
-	struct cpu_preserved_stack_context *sctx = cpu_preserved_get_stack_context();
-	unsigned long cr3 = __native_read_cr3() & PAGE_MASK & ~x86_preserved_sme_mask;
-
-	return sctx && sctx->session_pgd_pa && cr3 == sctx->session_pgd_pa;
-}
-
 void arch_cpu_preserved_park_worker(int cpu)
 {
 	cpu_preserved_park_loop(cpu);

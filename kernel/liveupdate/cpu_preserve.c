@@ -941,11 +941,14 @@ void cpu_preserved_park(int cpu)
 
 	if (WARN_ON_ONCE(!sctx || sctx->magic != CPU_PRESERVED_STACK_MAGIC ||
 			 !sctx->session_pgd_pa)) {
-		arch_cpu_preserved_park_finish(cpu);
-		if (sctx && sctx->ser) {
-			WRITE_ONCE(sctx->ser->state, CPU_PRESERVED_DEAD);
-			cpu_preserved_clean(sctx->ser);
+		struct cpu_preserved_ser *ser = cpu_preserved_get_ser(cpu);
+
+		if (ser) {
+			/* Pairs with the acquire in cpu_preserved_read_state() */
+			smp_store_release(&ser->state, CPU_PRESERVED_DEAD);
+			cpu_preserved_clean(ser);
 		}
+		arch_cpu_preserved_park_finish(cpu);
 		return;
 	}
 
