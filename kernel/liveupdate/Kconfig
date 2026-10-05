@@ -147,4 +147,16 @@ config LIVEUPDATE_ONCORE
 
 	  If unsure, say N.
 
+config LIVEUPDATE_ONCORE_TEST
+	bool "Test driver for On-Core scheduler"
+	depends on LIVEUPDATE_ONCORE
+	depends on DEBUG_FS
+	help
+	  Enable a built-in test driver (/sys/kernel/debug/oncore_test) and
+	  Live Update file handler ("oncore-test-v1") for exercising the
+	  On-Core session and scheduler framework across intra-kernel cancel
+	  loops and kexec live updates.
+
+	  If unsure, say N.
+
 endmenu
