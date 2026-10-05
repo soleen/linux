@@ -122,16 +122,20 @@ static_assert(sizeof(struct cpu_preserved_as_ser) == 32);
 
 /**
  * struct cpu_preserved_session_ser - Serialized preserved CPU session metadata
- * @as: Preservation pointer to struct cpu_preserved_as_ser.
+ * @as:          Preservation pointer to struct cpu_preserved_as_ser.
+ * @workload_pa: Physical address of the first struct kho_block_header_ser
+ *               containing u64 physical addresses of KHO-preserved workload
+ *               pages, or 0.
  *
  * The CPUs of a session are the handed-over CPUs whose descriptors point to
  * it.
  */
 struct cpu_preserved_session_ser {
 	DECLARE_KHOSER_PTR(as, struct cpu_preserved_as_ser *);
+	u64 workload_pa;
 };
 
-static_assert(sizeof(struct cpu_preserved_session_ser) == 8);
+static_assert(sizeof(struct cpu_preserved_session_ser) == 16);
 
 /**
  * struct cpu_preserved_ser - Serialized state for preserved CPU

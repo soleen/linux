@@ -238,6 +238,7 @@
 #include <linux/liveupdate.h>
 #include <linux/mm.h>
 #include <linux/objtool.h>
+#include <linux/oncore.h>
 #include <linux/reboot.h>
 #include <linux/refcount.h>
 #include <linux/string.h>
@@ -1246,30 +1247,6 @@ static int cpu_preserved_init_outgoing(void)
 	return 0;
 }
 
-/*
- * struct cpu_preserved_session - The preserved CPUs of one LUO session
- * @node:     Entry on cpu_preserved_sessions or cpu_preserved_incoming_sessions.
- * @ref:      One reference for each CPU in @cpus, and one for each other user.
- * @lsession: The outgoing LUO session, or %NULL.
- * @ser:      KHO-preserved session metadata.
- * @as:       Isolated address space of the CPUs.
- * @cpus:     CPUs of the session that are preserved and parked.
- * @incoming: Whether the previous kernel created the session.
- *
- * The outgoing kernel finds a session by its LUO session.  The incoming kernel
- * creates its sessions at boot, from the CPUs that were handed over, and finds
- * them through these CPUs.
- */
-struct cpu_preserved_session {
-	struct list_head node;
-	refcount_t ref;
-	struct liveupdate_session *lsession;
-	struct cpu_preserved_session_ser *ser;
-	struct cpu_preserved_as_ser *as;
-	struct cpumask cpus;
-	bool incoming;
-};
-
 static DEFINE_MUTEX(cpu_preserved_sessions_lock);
 static LIST_HEAD(cpu_preserved_sessions);
 static LIST_HEAD(cpu_preserved_incoming_sessions);
@@ -1289,6 +1266,9 @@ cpu_preserved_session_find_locked(struct liveupdate_session *s)
 
 static void cpu_preserved_session_release(struct cpu_preserved_session *ps)
 {
+	if (ps->ser && ps->ser->workload_pa)
+		oncore_session_release(ps->ser->workload_pa, ps->incoming);
+
 	if (ps->incoming) {
 		cpu_preserved_as_restore_free(ps->as);
 		if (ps->ser)
@@ -1300,6 +1280,31 @@ static void cpu_preserved_session_release(struct cpu_preserved_session *ps)
 	}
 
 	kfree(ps);
+}
+
+/**
+ * cpu_preserved_find_session - Look up an existing preserved CPU session
+ * @s: Outgoing Live Update session handle.
+ *
+ * Looks up the preserved CPU session of @s without creating a new one if none
+ * exists, and increments its reference count if found.
+ *
+ * Return: Pointer to the &struct cpu_preserved_session, or %NULL if @s has no
+ *         preserved CPU session.
+ */
+struct cpu_preserved_session *
+cpu_preserved_find_session(struct liveupdate_session *s)
+{
+	struct cpu_preserved_session *ps;
+
+	if (!s)
+		return NULL;
+
+	guard(mutex)(&cpu_preserved_sessions_lock);
+	ps = cpu_preserved_session_find_locked(s);
+	if (ps)
+		refcount_inc(&ps->ref);
+	return ps;
 }
 
 /**
@@ -1425,6 +1430,37 @@ cpu_preserved_session_cpus(struct cpu_preserved_session *ps)
 	return &ps->cpus;
 }
 
+/**
+ * cpu_preserved_session_set_workload - Associate opaque workload state with @ps
+ * @ps:       Preserved CPU session.
+ * @workload: Opaque host-side workload session pointer (or %NULL to clear).
+ * @pa:       Physical address of KHO-preserved workload metadata (or 0).
+ */
+void cpu_preserved_session_set_workload(struct cpu_preserved_session *ps,
+					void *workload, u64 pa)
+{
+	if (!ps || IS_ERR(ps))
+		return;
+
+	ps->workload = workload;
+	if (ps->ser) {
+		ps->ser->workload_pa = pa;
+		cpu_preserved_clean(&ps->ser->workload_pa);
+	}
+}
+
+/**
+ * cpu_preserved_session_workload - Return the opaque workload state of @ps
+ * @ps: Preserved CPU session.
+ *
+ * Return: Opaque workload pointer previously registered via
+ *         cpu_preserved_session_set_workload(), or %NULL.
+ */
+void *cpu_preserved_session_workload(struct cpu_preserved_session *ps)
+{
+	return (!ps || IS_ERR(ps)) ? NULL : ps->workload;
+}
+
 /* The session of a preserved CPU, which holds a reference for it */
 static struct cpu_preserved_session *cpu_preserved_session_of(unsigned int cpu)
 {
@@ -1453,6 +1489,7 @@ static void cpu_preserved_session_remove_cpu(struct cpu_preserved_session *ps,
 	if (!had_cpu)
 		return;
 
+	oncore_cpu_unpreserved(ps, cpu);
 	cpu_preserved_session_put(ps);
 }
 
@@ -1670,6 +1707,7 @@ static int cpu_preserve(unsigned int cpu, struct liveupdate_session *session)
 
 	scoped_guard(mutex, &cpu_preserved_sessions_lock)
 		cpumask_set_cpu(cpu, &ps->cpus);
+	oncore_cpu_preserved(ps, cpu);
 	return 0;
 }
 

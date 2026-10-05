@@ -13,6 +13,7 @@
 #include <linux/errno.h>
 #include <linux/kho/abi/cpu.h>
 #include <linux/list.h>
+#include <linux/refcount.h>
 #include <linux/smp.h>
 #include <linux/types.h>
 
@@ -255,7 +256,28 @@ int arch_cpu_preserved_wait_dead(int cpu);
 
 struct page;
 struct liveupdate_session;
-struct cpu_preserved_session;
+
+/*
+ * struct cpu_preserved_session - The preserved CPUs of one LUO session
+ * @node:     Entry on cpu_preserved_sessions or cpu_preserved_incoming_sessions.
+ * @ref:      One reference for each CPU in @cpus, and one for each other user.
+ * @lsession: The outgoing LUO session, or %NULL.
+ * @ser:      KHO-preserved session metadata.
+ * @as:       Isolated address space of the CPUs.
+ * @cpus:     CPUs of the session that are preserved and parked.
+ * @workload: Opaque host-side workload session pointer.
+ * @incoming: Whether the previous kernel created the session.
+ */
+struct cpu_preserved_session {
+	struct list_head node;
+	refcount_t ref;
+	struct liveupdate_session *lsession;
+	struct cpu_preserved_session_ser *ser;
+	struct cpu_preserved_as_ser *as;
+	struct cpumask cpus;
+	void *workload;
+	bool incoming;
+};
 
 /**
  * arch_cpu_preserved_setup_buffer - Prepare the copy of the preserved runtime
@@ -285,10 +307,14 @@ void cpu_preserved_as_unmap(struct cpu_preserved_as_ser *as,
 void cpu_preserved_free_kho(void *va, bool is_incoming);
 void *cpu_preserved_as_alloc_page(void *arg);
 
+struct cpu_preserved_session *cpu_preserved_find_session(struct liveupdate_session *s);
 struct cpu_preserved_session *cpu_preserved_session_get(struct liveupdate_session *s);
 void cpu_preserved_session_put(struct cpu_preserved_session *ps);
 struct cpu_preserved_as_ser *cpu_preserved_session_as(struct cpu_preserved_session *ps);
 const struct cpumask *cpu_preserved_session_cpus(struct cpu_preserved_session *ps);
+void cpu_preserved_session_set_workload(struct cpu_preserved_session *ps,
+					void *workload, u64 pa);
+void *cpu_preserved_session_workload(struct cpu_preserved_session *ps);
 
 void arch_cpu_preserved_switch_pgd(phys_addr_t pgd_pa)
 	__cpu_preserved_sym_asm(arch_cpu_preserved_switch_pgd);
@@ -339,6 +365,14 @@ void arch_cpu_preserved_as_flush_tlb(void);
 #include <linux/kexec_handover.h>
 
 struct cpu_preserved_as_ser;
+struct cpu_preserved_session;
+struct liveupdate_session;
+
+static inline struct cpu_preserved_session *
+cpu_preserved_find_session(struct liveupdate_session *s)
+{
+	return NULL;
+}
 
 static inline bool cpu_preserved_is_runtime_text(const void *fn) { return false; }
 static inline bool cpu_is_preserved(int cpu) { return false; }

@@ -132,4 +132,19 @@ config LIVEUPDATE_CPU
 
 	  If unsure, say N.
 
+config LIVEUPDATE_ONCORE
+	bool "On-core scheduler for preserved CPUs"
+	depends on LIVEUPDATE_CPU
+	help
+	  Run kernel jobs on CPUs that are preserved across a live update
+	  while the rest of the system goes through kexec. The CPUs of a
+	  live update session share a minimal scheduler in the preserved
+	  runtime: a job that has a CPU to itself runs tickless, more jobs
+	  than CPUs are time-sliced.
+
+	  Users of the scheduler, such as the KVM Caretaker, select this
+	  option.
+
+	  If unsure, say N.
+
 endmenu
