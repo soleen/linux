@@ -64,6 +64,14 @@ enum cpu_preserved_workload {
 #define CPU_PRESERVED_X86_X2APIC	BIT_ULL(0)
 #define CPU_PRESERVED_X86_LA57		BIT_ULL(1)
 
+/* Fields of cpu_preserved_global_ser.arch_mode on arm64 */
+#define CPU_PRESERVED_ARM64_PAGE_SHIFT_MASK	GENMASK_ULL(7, 0)
+#define CPU_PRESERVED_ARM64_VA_BITS_MASK	GENMASK_ULL(15, 8)
+#define CPU_PRESERVED_ARM64_PGTABLE_LEVELS_MASK	GENMASK_ULL(19, 16)
+#define CPU_PRESERVED_ARM64_LPA2		BIT_ULL(20)
+#define CPU_PRESERVED_ARM64_VHE			BIT_ULL(21)
+#define CPU_PRESERVED_ARM64_BE			BIT_ULL(22)
+
 /**
  * struct cpu_preserved_global_ser - Global FLB serialization header
  * @text_runtime_pa:    Physical address of preserved CPU runtime text.
