@@ -207,8 +207,10 @@ void arch_cpu_preserved_park_on_stack(int cpu, unsigned long stack_top);
  * for the CPU to be fully stopped.
  *
  * Executed in normal text context during CPU teardown.
+ *
+ * Return: 0 on success, or a negative errno if the CPU is not fully stopped.
  */
-void arch_cpu_preserved_wait_dead(int cpu);
+int arch_cpu_preserved_wait_dead(int cpu);
 
 struct page;
 struct liveupdate_session;
@@ -312,7 +314,7 @@ static inline void arch_cpu_preserved_early_init(void) {}
 static inline void arch_cpu_preserved_park_finish(int cpu) {}
 static inline void arch_cpu_preserved_dcache_inval(unsigned long start,
 						   unsigned long end) {}
-static inline void arch_cpu_preserved_wait_dead(int cpu) {}
+static inline int arch_cpu_preserved_wait_dead(int cpu) { return 0; }
 static inline const struct cpumask *cpu_get_preserved_mask(void)
 {
 	return cpu_none_mask;

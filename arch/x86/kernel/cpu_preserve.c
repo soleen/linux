@@ -237,13 +237,13 @@ int arch_cpu_preserved_setup_buffer(struct page *text_page,
 	return ret;
 }
 
-void arch_cpu_preserved_wait_dead(int cpu)
+int arch_cpu_preserved_wait_dead(int cpu)
 {
 	struct cpu_preserved_stack_context *sctx = cpu_preserved_get_sctx(cpu);
 	const struct x86_preserved_fault *f;
 
 	if (!sctx)
-		return;
+		return 0;
 
 	f = &sctx->fault;
 	if (READ_ONCE(f->count))
@@ -252,4 +252,6 @@ void arch_cpu_preserved_wait_dead(int cpu)
 	if (READ_ONCE(f->nr_mce))
 		pr_warn("cpu_preserve: CPU %d recovered from %lu machine checks\n",
 			cpu, f->nr_mce);
+
+	return 0;
 }

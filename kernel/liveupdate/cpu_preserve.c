@@ -43,10 +43,13 @@
  *    rebuilds the sessions of the listed CPUs and marks the CPUs preserved,
  *    so that smp_init() does not bring them up.  It finds each CPU by its
  *    hardware identifier, as kernels may number CPUs differently, and
- *    refuses the whole handover if an entry does not match: smp_init() then
- *    brings up the CPUs as usual, which resets them.  Retrieving a CPU file
- *    leaves the CPU parked.  Finishing the session stops the CPU and brings
- *    it online with device_online().
+ *    refuses the whole handover if an entry does not match, stopping every
+ *    listed CPU before smp_init() brings up the CPUs as usual.  On
+ *    architectures where bringing a CPU online does not reset a running CPU
+ *    (such as arm64 with PSCI), the incoming kernel must have
+ *    ``CONFIG_LIVEUPDATE_CPU=y`` enabled when CPUs are preserved across kexec.
+ *    Retrieving a CPU file leaves the CPU parked.  Finishing the session stops
+ *    the CPU and brings it online with device_online().
  *
  * This subsystem provides the generic, hypervisor-agnostic foundation for
  * physical CPU preservation.
@@ -812,24 +815,28 @@ static bool cpu_preserved_state_is_stopped(u32 state)
 	return state == CPU_PRESERVED_DEAD || state == CPU_PRESERVED_FAULTED;
 }
 
-static void cpu_signal_exit(int cpu)
+static void cpu_signal_exit_ser(struct cpu_preserved_ser *ser)
 {
-	struct cpu_preserved_ser *ser = cpu_preserved_get_ser(cpu);
+	u32 old;
 
-	if (ser) {
-		u32 old;
+	if (!ser)
+		return;
 
-		cpu_preserved_inval(ser);
-		old = READ_ONCE(ser->state);
-		while (!cpu_preserved_state_is_stopped(old) &&
-		       old != CPU_PRESERVED_EXITING) {
-			if (try_cmpxchg(&ser->state, &old,
-					CPU_PRESERVED_EXITING)) {
-				cpu_preserved_clean(ser);
-				break;
-			}
+	cpu_preserved_inval(ser);
+	old = READ_ONCE(ser->state);
+	while (!cpu_preserved_state_is_stopped(old) &&
+	       old != CPU_PRESERVED_EXITING) {
+		if (try_cmpxchg(&ser->state, &old,
+				CPU_PRESERVED_EXITING)) {
+			cpu_preserved_clean(ser);
+			break;
 		}
 	}
+}
+
+static void cpu_signal_exit(int cpu)
+{
+	cpu_signal_exit_ser(cpu_preserved_get_ser(cpu));
 }
 
 /*
@@ -870,9 +877,9 @@ static int cpu_wait_parked(int cpu)
 	return ret ?: -EIO;
 }
 
-static int cpu_wait_dead_timeout(int cpu, u64 timeout_us)
+static int cpu_wait_dead_ser(int cpu, struct cpu_preserved_ser *ser,
+			     u64 timeout_us)
 {
-	struct cpu_preserved_ser *ser = cpu_preserved_get_ser(cpu);
 	u32 state;
 	int ret;
 
@@ -891,8 +898,15 @@ static int cpu_wait_dead_timeout(int cpu, u64 timeout_us)
 	if (state == CPU_PRESERVED_FAULTED)
 		pr_err("Preserved cpu %d stopped on a fault\n", cpu);
 
-	arch_cpu_preserved_wait_dead(cpu);
-	return 0;
+	if (cpu < 0)
+		return 0;
+
+	return arch_cpu_preserved_wait_dead(cpu);
+}
+
+static int cpu_wait_dead_timeout(int cpu, u64 timeout_us)
+{
+	return cpu_wait_dead_ser(cpu, cpu_preserved_get_ser(cpu), timeout_us);
 }
 
 static int cpu_wait_dead(int cpu)
@@ -1550,6 +1564,18 @@ static bool cpu_preserved_runtime_valid(u64 pa, u64 size)
 	return pa && size && PAGE_ALIGNED(pa) && PAGE_ALIGNED(size);
 }
 
+static int cpu_find_by_hwid(u64 hwid)
+{
+	unsigned int cpu;
+
+	for_each_possible_cpu(cpu) {
+		if (arch_match_cpu_phys_id(cpu, hwid))
+			return cpu_online(cpu) ? -EBUSY : cpu;
+	}
+
+	return -ENODEV;
+}
+
 /*
  * Check the fields of @ser that this kernel uses, and find the CPU that the
  * previous kernel handed over with it by its hardware identifier.  Return the
@@ -1559,26 +1585,65 @@ static int cpu_preserved_match_cpu(struct cpu_preserved_ser *ser)
 {
 	struct cpu_preserved_session_ser *sser = KHOSER_LOAD_PTR(ser->session);
 	struct cpu_preserved_as_ser *as = sser ? KHOSER_LOAD_PTR(sser->as) : NULL;
-	unsigned int cpu;
 
 	if (READ_ONCE(ser->state) >= CPU_PRESERVED_NR_STATES ||
 	    !ser->stack_pa || !PAGE_ALIGNED(ser->stack_pa) ||
 	    !as || !as->pgd_pa || !PAGE_ALIGNED(as->pgd_pa))
 		return -EINVAL;
 
-	for_each_possible_cpu(cpu) {
-		if (arch_match_cpu_phys_id(cpu, ser->hwid))
-			return cpu_online(cpu) ? -EBUSY : cpu;
+	return cpu_find_by_hwid(ser->hwid);
+}
+
+/*
+ * Stop every CPU listed in @ser when the incoming kernel refuses the handover.
+ * A CPU that fails to stop remains in cpu_preserved_mask so that smp_init() and
+ * later CPU hotplug do not touch it while it still runs the old runtime.
+ */
+static void cpu_preserved_stop(struct cpu_preserved_global_ser *ser)
+{
+	struct cpu_preserved_ser *pser;
+	unsigned int count = 0;
+	ktime_t deadline;
+
+	guard(mutex)(&cpu_preserved_lock);
+	for (pser = KHOSER_LOAD_PTR(ser->cpus); pser && count < nr_cpu_ids;
+	     pser = KHOSER_LOAD_PTR(pser->next), count++) {
+		int cpu;
+
+		cpu_preserved_inval(pser);
+		if (READ_ONCE(pser->state) >= CPU_PRESERVED_NR_STATES)
+			continue;
+
+		cpu_signal_exit_ser(pser);
+		cpu = cpu_find_by_hwid(pser->hwid);
+		if (cpu >= 0) {
+			cpumask_set_cpu(cpu, &cpu_preserved_mask);
+			arch_cpu_preserved_kick(cpu);
+		}
 	}
 
-	return -ENODEV;
+	count = 0;
+	deadline = ktime_add_us(ktime_get(), CPU_WAIT_DEAD_TIMEOUT_US);
+	for (pser = KHOSER_LOAD_PTR(ser->cpus); pser && count < nr_cpu_ids;
+	     pser = KHOSER_LOAD_PTR(pser->next), count++) {
+		int cpu;
+		s64 left;
+
+		if (READ_ONCE(pser->state) >= CPU_PRESERVED_NR_STATES)
+			continue;
+
+		cpu = cpu_find_by_hwid(pser->hwid);
+		left = max(ktime_us_delta(deadline, ktime_get()), 1);
+		if (!cpu_wait_dead_ser(cpu, pser, left) && cpu >= 0)
+			cpumask_clear_cpu(cpu, &cpu_preserved_mask);
+	}
 }
 
 static int cpu_preserved_flb_retrieve(struct liveupdate_flb_op_args *argp)
 {
 	struct cpu_preserved_state *incoming = &cpu_preserved_incoming;
-	struct cpu_preserved_session **sessions;
-	struct cpu_preserved_ser *pser, **cpus;
+	struct cpu_preserved_session **sessions = NULL;
+	struct cpu_preserved_ser *pser, **cpus = NULL;
 	struct cpu_preserved_global_ser *ser;
 	unsigned int cpu;
 	int ret;
@@ -1598,7 +1663,8 @@ static int cpu_preserved_flb_retrieve(struct liveupdate_flb_op_args *argp)
 	if (ser->arch_mode != arch_cpu_preserved_mode()) {
 		pr_err("refusing handover: arch mode 0x%llx, this kernel runs in 0x%llx\n",
 		       ser->arch_mode, arch_cpu_preserved_mode());
-		return -EINVAL;
+		ret = -EINVAL;
+		goto err_free;
 	}
 
 	cpus = kcalloc(nr_cpu_ids, sizeof(*cpus), GFP_KERNEL);
@@ -1612,8 +1678,8 @@ static int cpu_preserved_flb_retrieve(struct liveupdate_flb_op_args *argp)
 	 * The outgoing kernel may have numbered the CPUs differently, so find
 	 * each CPU by its hardware identifier.  If an entry is malformed, or
 	 * its CPU is not found, online, or found twice (which also catches a
-	 * loop in the list), refuse the whole handover: smp_init() then brings
-	 * up the CPUs as usual, which resets them.
+	 * loop in the list), refuse the whole handover and stop the listed
+	 * CPUs before smp_init() brings up the CPUs as usual.
 	 */
 	for (pser = KHOSER_LOAD_PTR(ser->cpus); pser;
 	     pser = KHOSER_LOAD_PTR(pser->next)) {
@@ -1648,6 +1714,7 @@ static int cpu_preserved_flb_retrieve(struct liveupdate_flb_op_args *argp)
 	return 0;
 
 err_free:
+	cpu_preserved_stop(ser);
 	kfree(sessions);
 	kfree(cpus);
 	return ret;
