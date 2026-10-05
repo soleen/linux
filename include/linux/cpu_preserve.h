@@ -48,20 +48,24 @@ struct cpu_preserved_ser;
  * struct cpu_preserved_stack_context - Context header at base of preserved CPU stack
  * @magic:            Validation signature (%CPU_PRESERVED_STACK_MAGIC).
  * @cpu:              Logical CPU identifier of the preserved physical core.
+ * @workload_context: Opaque owning workload or session context.
  * @session_pgd_pa:   Session root page table physical address, or 0.
  * @ser:              Preserved CPU descriptor in isolated address space.
+ * @entry_fn:         Workload entry function to run.
  * @fault:            Exceptions taken by the preserved CPU (x86, arm64).
  * @x86:              Descriptor tables and exception stacks (x86).
  *
  * This structure lives at the base of a preserved CPU's dedicated stack and is
- * accessed by the preserved CPU during parking. It is private to the preserved
- * CPU execution context of the kernel that allocated it.
+ * accessed by the preserved CPU during parking and workload execution. It is
+ * private to the preserved CPU execution context of the kernel that allocated it.
  */
 struct cpu_preserved_stack_context {
 	u64 magic;
 	u32 cpu;
+	u64 workload_context;
 	u64 session_pgd_pa;
 	struct cpu_preserved_ser *ser;
+	void (*entry_fn)(void *data);
 #ifdef CONFIG_X86_64
 	struct x86_preserved_fault fault;
 	struct x86_preserved_cpu x86;
@@ -102,8 +106,19 @@ cpu_preserved_get_stack_context(void)
 extern char __cpu_preserved_text_start[], __cpu_preserved_text_end[];
 extern char __cpu_preserved_data_start[], __cpu_preserved_data_end[];
 extern char __cpu_preserved_rodata_end[];
+
+static inline bool cpu_preserved_is_runtime_text(const void *fn)
+{
+	unsigned long addr = (unsigned long)fn;
+
+	return addr >= (unsigned long)__cpu_preserved_text_start &&
+	       addr < (unsigned long)__cpu_preserved_text_end;
+}
+
 bool cpu_is_preserved(int cpu);
 bool cpu_preserved_is_stopped(int cpu);
+u32 cpu_preserved_state(int cpu);
+bool cpu_preserved_should_exit(void) __cpu_preserved_sym_asm(cpu_preserved_should_exit);
 void cpu_preserved_set_dead(void) __cpu_preserved_sym_asm(cpu_preserved_set_dead);
 void cpu_preserved_park(int cpu);
 void cpu_preserved_park_loop(int cpu) __cpu_preserved_sym_asm(cpu_preserved_park_loop);
@@ -123,6 +138,10 @@ void arch_cpu_preserved_dcache_inval(unsigned long start, unsigned long end)
 
 const struct cpumask *cpu_get_preserved_mask(void);
 struct cpu_preserved_stack_context *cpu_preserved_get_sctx(int cpu);
+int cpu_preserved_attach_workload(int cpu,
+				  void (*entry_fn)(void *data), void *data);
+int cpu_preserved_detach_workload(int cpu);
+void cpu_preserved_set_workload_context(int cpu, void *ctx);
 
 struct attribute_group;
 extern const struct attribute_group cpu_preserve_attr_group;
@@ -313,10 +332,13 @@ void arch_cpu_preserved_as_flush_tlb(void);
 
 struct cpu_preserved_as_ser;
 
+static inline bool cpu_preserved_is_runtime_text(const void *fn) { return false; }
 static inline bool cpu_is_preserved(int cpu) { return false; }
 static inline bool cpu_preserved_is_stopped(int cpu) { return true; }
+static inline u32 cpu_preserved_state(int cpu) { return CPU_PRESERVED_DEAD; }
 static inline void cpu_preserved_park(int cpu) {}
 static inline void cpu_preserved_report_dead(void) {}
+static inline bool cpu_preserved_should_exit(void) { return true; }
 static inline void cpu_preserved_set_dead(void) {}
 static inline void arch_cpu_preserved_park_wait(void) {}
 static inline void arch_cpu_preserved_park_init(int cpu) {}
@@ -351,6 +373,20 @@ static inline void cpu_preserved_free_kho(void *va, bool is_incoming)
 	else
 		kho_unpreserve_free(va);
 }
+
+static inline int cpu_preserved_attach_workload(int cpu,
+						void (*entry_fn)(void *data),
+						void *data)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int cpu_preserved_detach_workload(int cpu)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline void cpu_preserved_set_workload_context(int cpu, void *ctx) {}
 
 static inline int arch_cpu_preserved_setup_buffer(struct page *text_page,
 						  unsigned int text_nr_pages,

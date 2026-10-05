@@ -209,6 +209,17 @@
  *   &struct cpu_preserved_session_ser, which the descriptor of each of its
  *   CPUs points to.  At boot, the incoming kernel rebuilds the sessions of
  *   the CPUs handed over to it.
+ *
+ * Workloads
+ * =========
+ *
+ * A kernel subsystem can run code on a parked CPU of the outgoing kernel with
+ * cpu_preserved_attach_workload().  The CPU moves from PARKED to the WORKLOAD
+ * state and calls the entry function, which must be preserved-runtime code.
+ * The CPU is PARKED again when the function returns, which it does when it is
+ * done or when cpu_preserved_should_exit() tells it to, for example after
+ * cpu_preserved_detach_workload().  A workload keeps running across kexec;
+ * retrieving the CPU file in the incoming kernel detaches it.
  */
 
 #define pr_fmt(fmt) "cpu_preserve: " fmt
@@ -835,9 +846,67 @@ static void cpu_signal_exit_ser(struct cpu_preserved_ser *ser)
 	}
 }
 
-static void cpu_signal_exit(int cpu)
+/**
+ * cpu_preserved_attach_workload - Attach & start workload execution on core
+ * @cpu: Logical CPU identifier.
+ * @entry_fn: Workload callback to execute repeatedly on the physical core.
+ * @data: Opaque argument passed to @entry_fn.
+ *
+ * Return: 0 on success, negative error code on failure.
+ */
+int cpu_preserved_attach_workload(int cpu,
+				  void (*entry_fn)(void *data), void *data)
 {
-	cpu_signal_exit_ser(cpu_preserved_get_ser(cpu));
+	struct cpu_preserved_stack_context *sctx;
+	struct cpu_preserved_ser *ser;
+	u32 old;
+
+	if ((unsigned int)cpu >= nr_cpu_ids || !entry_fn ||
+	    !cpu_preserved_is_runtime_text(entry_fn))
+		return -EINVAL;
+
+	mutex_lock(&cpu_preserved_lock);
+	if (!cpumask_test_cpu(cpu, &cpu_preserved_outgoing.mask)) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -ENODEV;
+	}
+
+	sctx = cpu_preserved_stack_va(cpu);
+	if (!sctx || sctx->magic != CPU_PRESERVED_STACK_MAGIC) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -ENODEV;
+	}
+
+	ser = cpu_preserved_get_ser(cpu);
+	if (!ser) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -EBUSY;
+	}
+
+	cpu_preserved_inval(ser);
+	if (READ_ONCE(ser->state) != CPU_PRESERVED_PARKED || sctx->entry_fn) {
+		mutex_unlock(&cpu_preserved_lock);
+		return -EBUSY;
+	}
+
+	WRITE_ONCE(sctx->workload_context, (u64)(uintptr_t)data);
+	WRITE_ONCE(sctx->entry_fn, entry_fn);
+	cpu_preserved_clean(sctx);
+
+	old = CPU_PRESERVED_PARKED;
+	/* Pairs with smp_load_acquire() in cpu_preserved_park_loop() */
+	if (!try_cmpxchg_release(&ser->state, &old, CPU_PRESERVED_WORKLOAD)) {
+		WRITE_ONCE(sctx->entry_fn, NULL);
+		WRITE_ONCE(sctx->workload_context, 0);
+		cpu_preserved_clean(sctx);
+		mutex_unlock(&cpu_preserved_lock);
+		return -EBUSY;
+	}
+	cpu_preserved_clean(ser);
+
+	arch_cpu_preserved_kick(cpu);
+	mutex_unlock(&cpu_preserved_lock);
+	return 0;
 }
 
 /*
@@ -856,6 +925,131 @@ static u32 cpu_preserved_read_state(struct cpu_preserved_ser *ser)
 	cpu_preserved_inval(ser);
 	/* Pairs with the release cmpxchg()es of the preserved CPU */
 	return smp_load_acquire(&ser->state);
+}
+
+/**
+ * cpu_preserved_detach_workload - Detach workload and return core to idle park
+ * @cpu: Logical CPU identifier.
+ *
+ * The stack context of a CPU that the previous kernel handed over is private
+ * to that kernel: only the state of such a CPU is changed.
+ *
+ * Return: 0 on success, negative error code on failure.
+ */
+int cpu_preserved_detach_workload(int cpu)
+{
+	struct cpu_preserved_stack_context *sctx;
+	struct cpu_preserved_ser *ser;
+	u32 state;
+	int ret;
+
+	if ((unsigned int)cpu >= nr_cpu_ids)
+		return -EINVAL;
+
+	scoped_guard(mutex, &cpu_preserved_lock) {
+		if (!cpumask_test_cpu(cpu, &cpu_preserved_mask))
+			return -ENODEV;
+
+		sctx = cpu_preserved_stack_va(cpu);
+		if (!cpu_preserved_is_incoming(cpu) &&
+		    (!sctx || sctx->magic != CPU_PRESERVED_STACK_MAGIC))
+			return -ENODEV;
+
+		ser = cpu_preserved_get_ser(cpu);
+		if (!ser)
+			return -ENODEV;
+
+		state = cpu_preserved_read_state(ser);
+		if (state == CPU_PRESERVED_FAULTED)
+			return -EIO;
+
+		if (state != CPU_PRESERVED_WORKLOAD &&
+		    state != CPU_PRESERVED_DETACHING) {
+			if (sctx) {
+				WRITE_ONCE(sctx->entry_fn, NULL);
+				cpu_preserved_clean(sctx);
+			}
+			return 0;
+		}
+
+		while (state == CPU_PRESERVED_WORKLOAD) {
+			if (try_cmpxchg(&ser->state, &state,
+					CPU_PRESERVED_DETACHING)) {
+				cpu_preserved_clean(ser);
+				break;
+			}
+		}
+
+		arch_cpu_preserved_kick(cpu);
+	}
+
+	ret = read_poll_timeout(cpu_preserved_read_state, state,
+				state != CPU_PRESERVED_WORKLOAD &&
+				state != CPU_PRESERVED_DETACHING,
+				CPU_WAIT_POLL_US, CPU_WAIT_PARKED_TIMEOUT_US,
+				false, ser);
+	if (WARN_ON_ONCE(ret || state == CPU_PRESERVED_FAULTED))
+		return ret ?: -EIO;
+
+	scoped_guard(mutex, &cpu_preserved_lock) {
+		sctx = cpu_preserved_stack_va(cpu);
+		if (sctx && sctx->magic == CPU_PRESERVED_STACK_MAGIC) {
+			WRITE_ONCE(sctx->entry_fn, NULL);
+			cpu_preserved_clean(sctx);
+		}
+	}
+
+	return 0;
+}
+
+/**
+ * cpu_preserved_set_workload_context - Set workload context on a preserved CPU stack
+ * @cpu: Logical CPU identifier.
+ * @ctx: Opaque owning workload context pointer.
+ */
+void cpu_preserved_set_workload_context(int cpu, void *ctx)
+{
+	struct cpu_preserved_stack_context *sctx;
+
+	if (cpu < 0 || cpu >= nr_cpu_ids)
+		return;
+
+	mutex_lock(&cpu_preserved_lock);
+	sctx = cpu_preserved_stack_va(cpu);
+	if (sctx && sctx->magic == CPU_PRESERVED_STACK_MAGIC) {
+		WRITE_ONCE(sctx->workload_context, (u64)(uintptr_t)ctx);
+		cpu_preserved_clean(sctx);
+	}
+	mutex_unlock(&cpu_preserved_lock);
+}
+
+static void cpu_signal_exit(int cpu)
+{
+	struct cpu_preserved_stack_context *sctx = cpu_preserved_stack_va(cpu);
+
+	cpu_signal_exit_ser(cpu_preserved_get_ser(cpu));
+	if (sctx) {
+		WRITE_ONCE(sctx->entry_fn, NULL);
+		WRITE_ONCE(sctx->workload_context, 0);
+		cpu_preserved_clean(sctx);
+	}
+}
+
+/**
+ * cpu_preserved_state - Return the current workload state of a preserved CPU
+ * @cpu: Logical CPU identifier.
+ *
+ * Return: Current &enum cpu_preserved_workload state of @cpu, or
+ *         %CPU_PRESERVED_DEAD if @cpu is not preserved.
+ */
+u32 cpu_preserved_state(int cpu)
+{
+	struct cpu_preserved_ser *ser = cpu_preserved_get_ser(cpu);
+
+	if (!ser)
+		return CPU_PRESERVED_DEAD;
+
+	return cpu_preserved_read_state(ser);
 }
 
 /**
@@ -1412,8 +1606,10 @@ static int cpu_preserve(unsigned int cpu, struct liveupdate_session *session)
 	sctx = stack;
 	sctx->magic = CPU_PRESERVED_STACK_MAGIC;
 	sctx->cpu = cpu;
+	sctx->workload_context = 0;
 	sctx->session_pgd_pa = as->pgd_pa;
 	sctx->ser = ser;
+	sctx->entry_fn = NULL;
 	cpu_preserved_clean(sctx);
 
 	/*
@@ -1950,6 +2146,7 @@ static int cpu_preserve_retrieve(struct liveupdate_file_op_args *args)
 		fput(file);
 		return -ENOENT;
 	}
+	cpu_preserved_detach_workload(cpu);
 
 	args->file = file;
 	return 0;
