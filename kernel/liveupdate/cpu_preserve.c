@@ -1383,6 +1383,7 @@ static struct cpupr_ser *cpupr_alloc_cpu(struct cpupr_session *ps,
 
 	sctx = stack;
 	sctx->magic = CPUPR_STACK_MAGIC;
+	sctx->cpu = cpu;
 	sctx->workload_context = 0;
 	sctx->session_pgd_pa = ps->as->pgd_pa;
 	sctx->ser = ser;
