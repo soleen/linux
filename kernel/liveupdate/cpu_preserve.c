@@ -1340,7 +1340,7 @@ static int cpu_preserved_map_stack(struct cpu_preserved_as_ser *as, void *stack)
 				   CPU_PRESERVED_STACK_SIZE - CPU_PRESERVED_STACK_BASE,
 				   PAGE_KERNEL);
 	if (ret)
-		cpu_preserved_as_unmap(as, va, CPU_PRESERVED_STACK_GUARD);
+		cpu_preserved_as_unmap(as, va, CPU_PRESERVED_STACK_SIZE);
 	return ret;
 }
 
