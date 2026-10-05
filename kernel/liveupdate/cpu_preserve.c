@@ -193,7 +193,8 @@
  * mappings to address spaces it did not create.
  *
  * On x86 these mappings are built with the identity-map helpers in
- * ``arch/x86/mm/ident_map.c``.
+ * ``arch/x86/mm/ident_map.c``; on arm64 they are built with
+ * trans_pgd_map_range() in ``arch/arm64/mm/trans_pgd.c``.
  *
  * Sessions
  * ========
