@@ -7,6 +7,7 @@
  */
 #include <linux/linkage.h>
 #include <asm/assembler.h>
+#include <asm/cpu_preserve.h>
 
 	.text
 
@@ -38,3 +39,39 @@ SYM_FUNC_START(__arch_cpu_preserved_dcache_clean)
 SYM_FUNC_END(__arch_cpu_preserved_dcache_clean)
 SYM_FUNC_ALIAS(arch_cpu_preserved_dcache_clean, __arch_cpu_preserved_dcache_clean)
 SYM_FUNC_ALIAS(arch_cpu_preserved_dcache_inval, __arch_cpu_preserved_dcache_clean)
+
+.macro preserved_ventry kind
+	.align 7
+	mov	x0, #\kind
+	b	arm64_preserved_vec_common
+.endm
+
+	.align 11
+SYM_CODE_START(arm64_preserved_vectors)
+	preserved_ventry 0
+	preserved_ventry 1
+	preserved_ventry 2
+	preserved_ventry 3
+	preserved_ventry 4
+	preserved_ventry 5
+	preserved_ventry 6
+	preserved_ventry 7
+	preserved_ventry 8
+	preserved_ventry 9
+	preserved_ventry 10
+	preserved_ventry 11
+	preserved_ventry 12
+	preserved_ventry 13
+	preserved_ventry 14
+	preserved_ventry 15
+SYM_CODE_END(arm64_preserved_vectors)
+
+SYM_CODE_START_LOCAL(arm64_preserved_vec_common)
+	mov	x1, sp
+	and	x1, x1, #~(CPU_PRESERVED_STACK_SIZE - 1)
+	add	x1, x1, #CPU_PRESERVED_STACK_SIZE
+	sub	sp, x1, #256
+	mov	x29, xzr
+	bl	arm64_preserved_handle_exception
+	b	.
+SYM_CODE_END(arm64_preserved_vec_common)

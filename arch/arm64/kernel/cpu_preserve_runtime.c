@@ -207,6 +207,9 @@ void arch_cpu_preserved_park_init(int cpu)
 		return;
 
 	local_daif_mask();
+	write_sysreg((unsigned long)arm64_preserved_vectors, vbar_el1);
+	isb();
+
 	if ((read_sysreg(ttbr1_el1) & TTBRx_EL1_BADDR) !=
 	    arm64_pgd_to_ttbr1(sctx->session_pgd_pa))
 		gicv3_cpu_preserved_enable_sgi();
@@ -214,6 +217,7 @@ void arch_cpu_preserved_park_init(int cpu)
 	sysreg_clear_set(tcr_el1, 0, TCR_EPD0_MASK);
 	write_sysreg(0, ttbr0_el1);
 	arch_cpu_preserved_switch_pgd(sctx->session_pgd_pa);
+	asm volatile("msr daifclr, #4" ::: "memory");
 
 	write_sysreg_s(ICC_CTLR_EL1_EOImode_drop, SYS_ICC_CTLR_EL1);
 	write_sysreg_s(ICC_SRE_EL1_SRE, SYS_ICC_SRE_EL1);
@@ -276,3 +280,42 @@ void arch_cpu_preserved_park_finish(int cpu)
 	arm64_preserved_cpu_off();
 }
 
+/*
+ * An unexpected exception leaves the CPU in an unknown state: record the first
+ * one and turn the CPU off.  The host sees CPU_PRESERVED_FAULTED and can bring
+ * the CPU back online.
+ */
+asmlinkage void arm64_preserved_handle_exception(unsigned long kind)
+{
+	struct cpu_preserved_stack_context *sctx = cpu_preserved_get_stack_context();
+
+	local_daif_mask();
+	if (sctx && !sctx->fault.count++) {
+		struct arm64_preserved_fault *f = &sctx->fault;
+
+		f->kind = kind;
+		f->esr = read_sysreg(esr_el1);
+		f->elr = read_sysreg(elr_el1);
+		f->far = read_sysreg(far_el1);
+		f->spsr = read_sysreg(spsr_el1);
+		cpu_preserved_clean(f);
+
+		arm64_preserved_cpu_quiesce();
+		if (sctx->ser) {
+			u32 old = READ_ONCE(sctx->ser->state);
+
+			/* Pairs with the acquire in cpu_preserved_read_state() */
+			do {
+				if (old == CPU_PRESERVED_DEAD ||
+				    old == CPU_PRESERVED_FAULTED)
+					break;
+			} while (!try_cmpxchg_release(&sctx->ser->state, &old,
+						      CPU_PRESERVED_FAULTED));
+			cpu_preserved_clean(sctx->ser);
+		}
+		arm64_preserved_cpu_off();
+	}
+
+	for (;;)
+		wfi();
+}
