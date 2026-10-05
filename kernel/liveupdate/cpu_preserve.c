@@ -1606,6 +1606,7 @@ static int cpu_preserve(unsigned int cpu, struct liveupdate_session *session)
 	sctx = stack;
 	sctx->magic = CPU_PRESERVED_STACK_MAGIC;
 	sctx->cpu = cpu;
+	sctx->reserved = 0;
 	sctx->workload_context = 0;
 	sctx->session_pgd_pa = as->pgd_pa;
 	sctx->ser = ser;

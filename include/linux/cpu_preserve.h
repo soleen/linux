@@ -48,6 +48,10 @@ struct cpu_preserved_ser;
  * struct cpu_preserved_stack_context - Context header at base of preserved CPU stack
  * @magic:            Validation signature (%CPU_PRESERVED_STACK_MAGIC).
  * @cpu:              Logical CPU identifier of the preserved physical core.
+ * @oncore_busy:      True while an On-Core job is executing on this CPU.
+ * @oncore_tickless:  True while an On-Core job is executing tickless (U64_MAX).
+ * @reserved:         Must be zero.
+ * @oncore_curr_job:  Pointer to the currently executing On-Core job, or 0.
  * @workload_context: Opaque owning workload or session context.
  * @session_pgd_pa:   Session root page table physical address, or 0.
  * @ser:              Preserved CPU descriptor in isolated address space.
@@ -62,6 +66,10 @@ struct cpu_preserved_ser;
 struct cpu_preserved_stack_context {
 	u64 magic;
 	u32 cpu;
+	u8 oncore_busy;
+	u8 oncore_tickless;
+	u16 reserved;
+	u64 oncore_curr_job;
 	u64 workload_context;
 	u64 session_pgd_pa;
 	struct cpu_preserved_ser *ser;
