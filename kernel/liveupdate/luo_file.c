@@ -426,11 +426,11 @@ static void __luo_file_unfreeze(struct luo_file_set *file_set,
 /**
  * luo_file_freeze - Freezes all preserved files and serializes their metadata.
  * @file_set:     The file_set whose files are to be frozen.
- * @file_set_ser: Where to put the serialized file_set.
+ * @file_set_ser: Where to put the serialized file_set, or %NULL if freezing early.
  *
- * This function is called from the reboot() syscall path, just before the
- * kernel transitions to the new image via kexec. Its purpose is to perform the
- * final preparation and serialization of all preserved files in the file_set.
+ * This function is called from the reboot() syscall path or from
+ * LIVEUPDATE_SESSION_FREEZE. Its purpose is to perform the preparation and
+ * serialization of all preserved files in the file_set.
  *
  * It iterates through each preserved file in FIFO order (the order of
  * preservation) and performs two main actions:
@@ -453,7 +453,7 @@ static void __luo_file_unfreeze(struct luo_file_set *file_set,
  * running state. The function then returns an error, causing the reboot()
  * syscall to fail.
  *
- * Context: Called only from the liveupdate_reboot() path.
+ * Context: Called from the liveupdate_reboot() path or LIVEUPDATE_SESSION_FREEZE.
  * Return: 0 on success, or a negative errno on failure.
  */
 int luo_file_freeze(struct luo_file_set *file_set,
@@ -491,8 +491,10 @@ int luo_file_freeze(struct luo_file_set *file_set,
 		file_ser->token = luo_file->token;
 	}
 
-	file_set_ser->count = file_set->count;
-	file_set_ser->files = kho_block_set_head_pa(&file_set->block_set);
+	if (file_set_ser) {
+		file_set_ser->count = file_set->count;
+		file_set_ser->files = kho_block_set_head_pa(&file_set->block_set);
+	}
 
 	return 0;
 
@@ -505,7 +507,7 @@ err_unfreeze:
 /**
  * luo_file_unfreeze - Unfreezes all files in a file_set and clear serialization
  * @file_set:     The file_set whose files are to be unfrozen.
- * @file_set_ser: Serialized file_set.
+ * @file_set_ser: Serialized file_set, or %NULL if not serialized yet.
  *
  * This function rolls back the state of all files in a file_set after the
  * freeze phase has begun but must be aborted. It is the counterpart to
@@ -516,7 +518,8 @@ err_unfreeze:
  * their respective .unfreeze() handler callbacks.
  *
  * Context: This is called when the live update is aborted during
- *          the reboot() syscall, after luo_file_freeze() has been called.
+ *          the reboot() syscall, after luo_file_freeze() has been called,
+ *          or when an early-frozen session is released before kexec.
  */
 void luo_file_unfreeze(struct luo_file_set *file_set,
 		       struct luo_file_set_ser *file_set_ser)
@@ -525,7 +528,8 @@ void luo_file_unfreeze(struct luo_file_set *file_set,
 		return;
 
 	__luo_file_unfreeze(file_set, NULL);
-	memset(file_set_ser, 0, sizeof(*file_set_ser));
+	if (file_set_ser)
+		memset(file_set_ser, 0, sizeof(*file_set_ser));
 }
 
 /**
