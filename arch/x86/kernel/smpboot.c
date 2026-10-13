@@ -1415,9 +1415,25 @@ void play_dead_common(void)
 }
 
 /*
- * We need to flush the caches before going to sleep, lest we have
- * dirty data in our caches when we come back up.
+ * Return true if another online CPU shares @cpu's last level cache. Its WBINVD
+ * (wbinvd_on_all_cpus(), or the boot CPU's flush before entering system sleep)
+ * still writes back that cache after @cpu has gone offline.
  */
+static bool llc_shared_with_online_cpu(unsigned int cpu)
+{
+	u32 llc_id = per_cpu_llc_id(cpu);
+	unsigned int i;
+
+	if (llc_id == BAD_APICID)
+		return false;
+
+	for_each_online_cpu(i) {
+		if (i != cpu && per_cpu_llc_id(i) == llc_id)
+			return true;
+	}
+	return false;
+}
+
 void __noreturn mwait_play_dead(unsigned int eax_hint)
 {
 	struct mwait_cpu_dead *md = this_cpu_ptr(&mwait_cpu_dead);
@@ -1426,15 +1442,23 @@ void __noreturn mwait_play_dead(unsigned int eax_hint)
 	md->status = CPUDEAD_MWAIT_WAIT;
 	md->control = CPUDEAD_MWAIT_WAIT;
 
-	wbinvd();
+	/*
+	 * MWAIT C-states keep the caches coherent while the package is powered,
+	 * so there is no need to flush while another online CPU shares this
+	 * LLC: its WBINVD still reaches the cache. Once the last CPU sharing the
+	 * LLC goes offline nothing else writes it back: wbinvd_on_all_cpus() and
+	 * the boot CPU's flush before system sleep only reach online CPUs, and
+	 * CPUs that are already offline are not woken up again for suspend.
+	 * During system sleep, flush unconditionally as before.
+	 */
+	if (cpuhp_tasks_frozen || !llc_shared_with_online_cpu(smp_processor_id()))
+		wbinvd();
 
 	while (1) {
 		/*
 		 * The CLFLUSH is a workaround for erratum AAI65 for
 		 * the Xeon 7400 series.  It's not clear it is actually
 		 * needed, but it should be harmless in either case.
-		 * The WBINVD is insufficient due to the spurious-wakeup
-		 * case where we return around the loop.
 		 */
 		mb();
 		clflush(md);
